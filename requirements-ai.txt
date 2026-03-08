@@ -1,0 +1,16 @@
+# AI Core Dependencies
+chromadb
+sqlite-vec
+sentence-transformers
+
+# LLM Providers & Agent Frameworks
+langchain
+langgraph
+google-generativeai
+groq
+openai
+
+# News & Data Pipeline
+feedparser
+scrapling[fetchers]
+sseclient-py
