@@ -8,10 +8,12 @@ user_data/*
 !user_data/strategy/sample_strategy.py
 !user_data/notebooks
 !user_data/models
+!user_data/scripts
 !user_data/freqaimodels
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*
+user_data/scripts/__pycache__/*
 freqtrade-plot.html
 freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
@@ -116,3 +118,4 @@ target/
 !config_examples/config_freqai.example.json
 
 docker-compose-*.yml
+!docker-compose.ai.yml
