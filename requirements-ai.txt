@@ -14,3 +14,12 @@ openai
 feedparser
 scrapling[fetchers]
 sseclient-py
+
+# Machine Learning & Optimization
+optimum[onnxruntime]
+lightgbm
+
+# Hybrid RAG Foundation
+chromadb
+rank-bm25
+flashrank
