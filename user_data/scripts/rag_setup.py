@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VECTOR_DB_DIR = os.path.join(BASE_DIR, "vectordb")
+from ai_config import CHROMA_PERSIST_DIR as VECTOR_DB_DIR
 
 def init_chromadb():
     """Initializes the persistent ChromaDB collections for Hybrid RAG."""

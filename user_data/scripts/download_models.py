@@ -12,7 +12,8 @@ ONNX_DIR = os.path.join(MODELS_DIR, "onnx")
 # Models to download
 MODELS = {
     "cryptobert": "ElKulako/cryptobert",
-    "finbert": "ProsusAI/finbert"
+    "finbert": "ProsusAI/finbert",
+    "jina-colbert-v2": "jinaai/jina-colbert-v2"
 }
 
 def download_models():

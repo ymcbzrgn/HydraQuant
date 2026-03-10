@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import pandas as pd
+import re
 from datetime import datetime, timedelta
 
 # Auto-detect ONNX vs PyTorch
@@ -46,6 +47,15 @@ def load_sentiment_pipeline(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     return pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
 
+# Phase 7: Clean Text for Model Input
+def clean_text(text: str) -> str:
+    """Emoji ve unicode karakterleri temizle"""
+    # Remove Non-ASCII
+    text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+    # Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def analyze_unscored_news():
     """Fetches unscored news from the DB, analyzes sentiment, and saves back."""
     logger.info("Loading Sentiment Models (CryptoBERT and FinBERT)...")
@@ -74,6 +84,9 @@ def analyze_unscored_news():
         text_to_analyze = article['summary'] if article['summary'] and len(article['summary']) > 20 else article['title']
         if not text_to_analyze:
             continue
+            
+        # Phase 7: Clean text before model inference
+        text_to_analyze = clean_text(text_to_analyze)
             
         try:
             # Choose model based on source

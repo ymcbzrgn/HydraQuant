@@ -20,6 +20,22 @@ COIN_MAPPINGS = {
     "BNB": ["binance coin", "bnb"],
 }
 
+# Phase 7: Tier Weighting - Give higher weight to established crypto news sites
+TIER_WEIGHTS = {
+    "coindesk.com": 1.0, "cointelegraph.com": 1.0, "decrypt.co": 1.0, "theblock.co": 1.0,
+    "cryptoslate.com": 0.8, "cryptopotato.com": 0.8, "cryptonews.com": 0.8,
+    "chaingpt.org": 0.6, "finance.yahoo.com": 0.6
+}
+
+def _weighted_mean(df_subset: pd.DataFrame) -> float:
+    """Calculates weighted sentiment mean based on news source tier."""
+    if df_subset.empty:
+        return 0.0
+    weights = df_subset['source'].map(lambda s: TIER_WEIGHTS.get(str(s).lower(), 0.5))
+    if weights.sum() == 0:
+        return 0.0
+    return float((df_subset['sentiment_score'] * weights).sum() / weights.sum())
+
 def init_sentiment_table():
     conn = get_db_connection()
     c = conn.cursor()
@@ -44,8 +60,9 @@ def compute_rolling_sentiment():
     c = conn.cursor()
     
     # Needs to extract coin mentions. In SQLite, we can pull the recent 24h ones into pandas
+    # Added "source" to query for Tier Weighting
     query = """
-    SELECT id, title, summary, published_at, sentiment_score
+    SELECT id, title, summary, source, published_at, sentiment_score
     FROM market_news 
     WHERE sentiment_score IS NOT NULL 
     AND published_at >= datetime('now', '-24 hours')
@@ -77,9 +94,9 @@ def compute_rolling_sentiment():
         mask_1h = coin_df['published_at'] >= (now - pd.Timedelta(hours=1))
         mask_4h = coin_df['published_at'] >= (now - pd.Timedelta(hours=4))
         
-        sent_1h = float(coin_df[mask_1h]['sentiment_score'].mean()) if not coin_df[mask_1h].empty else 0.0
-        sent_4h = float(coin_df[mask_4h]['sentiment_score'].mean()) if not coin_df[mask_4h].empty else 0.0
-        sent_24h = float(coin_df['sentiment_score'].mean())
+        sent_1h = _weighted_mean(coin_df[mask_1h])
+        sent_4h = _weighted_mean(coin_df[mask_4h])
+        sent_24h = _weighted_mean(coin_df)
         count_24h = int(len(coin_df))
         
         inserts.append((ticker, sent_1h, sent_4h, sent_24h, count_24h))
