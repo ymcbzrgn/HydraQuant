@@ -6,12 +6,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "ai_data.sqlite")
+from ai_config import AI_DB_PATH as DB_PATH
 
 def get_db_connection():
-    """Returns a connection to the AI SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
+    """Returns a connection to the AI SQLite database with safe concurrency settings."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")  # Allow concurrent reads + writes
     return conn
 
 def init_db():
@@ -19,6 +20,7 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_db_connection()
     c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL")  # WAL mode for concurrent access
     
     # Haber ve duygu analizi verilerinin tutulacagi tablo
     c.execute('''
@@ -71,10 +73,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS forgone_profit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pair TEXT NOT NULL,
+            signal_type TEXT,
             signal_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             confidence REAL,
-            was_executed BOOLEAN,
-            forgone_pnl REAL
+            entry_price REAL,
+            was_executed BOOLEAN DEFAULT 0,
+            exit_price REAL,
+            forgone_pnl REAL,
+            resolved_at DATETIME
         )
     ''')
 

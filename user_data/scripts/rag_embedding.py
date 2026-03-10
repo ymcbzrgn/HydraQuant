@@ -5,7 +5,7 @@ import json
 import logging
 import numpy as np
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 from sentence_transformers import SentenceTransformer
 
 # Load environment variables
@@ -14,7 +14,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
 # Constants
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "ai_data.sqlite")
+from ai_config import AI_DB_PATH as DB_PATH
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 class DualEmbeddingPipeline:
@@ -22,15 +22,17 @@ class DualEmbeddingPipeline:
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in .env")
             
-        genai.configure(api_key=GEMINI_API_KEY)
-        self.gemini_model = "models/gemini-embedding-001"
+        # Phase 7: google.genai migration
+        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        self.gemini_model = "text-embedding-004"
         
         logger.info("Loading local BGE-Financial embedding model...")
         self.local_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
         
     def _get_db_connection(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def _hash_text(self, text: str) -> str:
@@ -71,12 +73,18 @@ class DualEmbeddingPipeline:
         try:
             # Gemini Embedding (Semantic, General)
             # Freqtrade uses the newer model text-embedding-004
-            gemini_result = genai.embed_content(
+            # Phase 7: Using new SDK client.models.embed_content
+            gemini_result = self.client.models.embed_content(
                 model=self.gemini_model,
-                content=text,
-                task_type="retrieval_document"
+                contents=text
             )
-            gemini_emb = gemini_result['embedding']
+            # Adapter Pattern for SDK differences
+            if hasattr(gemini_result, 'embeddings') and gemini_result.embeddings:
+                gemini_emb = gemini_result.embeddings[0].values
+            elif isinstance(gemini_result, dict) and 'embedding' in gemini_result:
+                gemini_emb = gemini_result['embedding']
+            else:
+                gemini_emb = gemini_result # Fallback
             
             # BGE-Financial Embedding (Financial Specific terms)
             bge_emb = self.local_model.encode(text, normalize_embeddings=True).tolist()

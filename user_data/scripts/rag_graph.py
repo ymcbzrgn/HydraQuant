@@ -1,229 +1,495 @@
 import os
 import logging
+import json
+import sys
+
 from typing import List, Dict, Any, Literal
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.tools.ddg_search import DuckDuckGoSearchRun
 from langgraph.graph import StateGraph, START, END
 
+# Ensure local imports work
+sys.path.append(os.path.dirname(__file__))
+
 from hybrid_retriever import HybridRetriever
+from ai_decision_logger import AIDecisionLogger
+from llm_router import LLMRouter
+from crag_evaluator import CRAGEvaluator
+from adaptive_router import AdaptiveQueryRouter
+from rag_fusion import RAGFusion
+from entity_extractor import KnowledgeGraphManager
 
 # Load Env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
-# LLM Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set in .env")
-
-# We use gemini-2.5-flash for almost all cognitive tasks due to speed/cost ratio
-llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-flash", api_key=GEMINI_API_KEY, temperature=0, convert_system_message_to_human=True)
+# Replace raw Gemini with the zero-latency failover Router
+llm = LLMRouter(temperature=0)
 web_search_tool = DuckDuckGoSearchRun()
 
 # Single persistent retriever instance
 retriever = HybridRetriever()
 
+# Phase 3.2: Corrective RAG — evaluates + fixes bad retrieval
+crag = CRAGEvaluator(router=llm)
+
+# Phase 3.3: Adaptive RAG — routes queries to optimal pipeline
+adaptive_router = AdaptiveQueryRouter(router=llm)
+
+# Phase 3.4: RAG-Fusion for multi-perspective retrieval
+rag_fusion = RAGFusion(router=llm)
+
+# Persistent Logger for AI Decisions (Phase 3.5.1)
+decision_logger = AIDecisionLogger()
+
 # --- Graph State Definition ---
 class GraphState(TypedDict):
     """
-    State dictionary for the LangGraph RAG Agent.
+    State dictionary for the LangGraph Multi-Agent RAG Brain.
+    Phase 5.2: Extended with bull/bear researcher outputs for MADAM debate.
     """
-    question: str
-    generation: str
-    web_search: str # "yes" or "no"
+    pair: str
     documents: List[str]
+    technical_analysis: str
+    sentiment_analysis: str
+    news_analysis: str
+    bull_case: str
+    bear_case: str
+    signal: str
+    confidence: float
+    reasoning: str
 
-# --- Nodes (Modular Functions) ---
+# --- Parallel Analyst Nodes ---
 
-def retrieve(state: GraphState):
-    """Retrieves documents from the Hybrid Search Vector DB."""
-    logger.info("---RETRIEVE---")
-    question = state["question"]
+def analyze_technical(state: GraphState):
+    """Fetches and analyzes real-time technical indicators."""
+    logger.info("---[NODE] TECHNICAL ANALYST---")
+    pair = state.get("pair", "BTC/USDT")
     
-    # Get top 5 from hybrid retriever
-    results = retriever.search(question, top_k=5)
-    documents = [res["text"] for res in results]
+    # Agent-Specific LLM (Zero Emotion, High Reliability)
+    tech_llm = LLMRouter(temperature=0.1, request_timeout=15)
     
-    return {"documents": documents, "question": question}
+    # In a full production env, this would call ccxt or ta-lib. 
+    # For now, we use a tool-augmented web search to get current TA context.
+    try:
+        from langchain_community.tools.ddg_search import DuckDuckGoSearchRun
+        search = DuckDuckGoSearchRun()
+        search_res = search.invoke(f"{pair} current technical analysis RSI MACD support resistance price prediction")
+    except Exception as e:
+        logger.warning(f"Technical Search Failed: {e}")
+        search_res = "Unable to fetch live technical data."
 
-def generate(state: GraphState):
-    """Generates the final answer using retrieved documents."""
-    logger.info("---GENERATE---")
-    question = state["question"]
-    documents = state["documents"]
+    prompt = f"""You are a master Crypto Technical Analyst. 
+Analyze these current technical indicators and market search results for {pair}:
+{search_res}
+
+Provide a dense, 2-3 sentence technical analysis. State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
+NEVER provide a final trading signal. ONLY provide your technical perspective."""
+
+    response = tech_llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
     
-    context = "\n\n".join(documents)
-    prompt = f"""You are Freqbot, an expert crypto market analyst. 
-Use the following pieces of retrieved context to answer the user's question. 
-If you don't know the answer, just say that you don't know. 
-Keep the answer concise and geared towards financial reasoning.
-
-Context: 
-{context}
-
-Question: {question}
-Answer:"""
-
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {"documents": documents, "question": question, "generation": response.content}
-
-def grade_documents(state: GraphState):
-    """
-    CRAG Mechanism: Discriminator node.
-    Evaluates if documents are relevant to the question.
-    """
-    logger.info("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
-    question = state["question"]
-    documents = state["documents"]
-    
-    # Prompt for relevance grading (outputs structured YES/NO ideally, simplified here)
-    system_msg = "You are a grader assessing relevance of a retrieved document to a user question. " \
-                 "If the document contains keywords or semantic meaning related to the question, grade it as 'yes'. " \
-                 "Otherwise, grade it as 'no'. Give ONLY a 'yes' or 'no' string as your response without explanation."
-                 
-    filtered_docs = []
-    web_search = "no"
-    
-    for d in documents:
-        prompt = f"Retrieved document: \n\n {d} \n\n User question: {question} \n\n Is it relevant? (yes/no):"
-        response = llm.invoke([
-            SystemMessage(content=system_msg),
-            HumanMessage(content=prompt)
-        ])
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
         
-        grade = response.content.strip().lower()
-        if "yes" in grade:
-            filtered_docs.append(d)
-        else:
-            logger.info("---GRADE: DOCUMENT NOT RELEVANT---")
-            web_search = "yes"
-            continue
-            
-    return {"documents": filtered_docs, "question": question, "web_search": web_search}
+    return {"technical_analysis": content_raw.strip()}
 
-def web_search(state: GraphState):
-    """Web search based fallback (CRAG execution)"""
-    logger.info("---WEB SEARCH FALLBACK---")
-    question = state["question"]
-    documents = state["documents"]
+
+def analyze_sentiment(state: GraphState):
+    """Retrieves and analyzes the latest DB fear/greed and CryptoBERT sentiment."""
+    logger.info("---[NODE] SENTIMENT ANALYST---")
+    pair = state.get("pair", "BTC/USDT")
+    
+    # Agent-Specific LLM (Understands human emotion and market hype)
+    sent_llm = LLMRouter(temperature=0.4, request_timeout=15)
+    
+    # ===== LIVE DATA: Query real sentiment from ai_data.sqlite =====
+    import sqlite3
+    from ai_config import AI_DB_PATH as db_path
+    db_context_parts = []
     
     try:
-        docs = web_search_tool.invoke(question)
-        documents.append(docs)
-    except Exception as e:
-        logger.error(f"Web search failed: {e}")
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
         
-    return {"documents": documents, "question": question}
-
-# --- Conditional Edges ---
-
-def decide_to_generate(state: GraphState) -> Literal["generate", "web_search"]:
-    """Determines whether to execute web search or generate immediately."""
-    logger.info("---ASSESS GRADED DOCUMENTS---")
-    web_search = state["web_search"]
-    
-    if web_search == "yes":
-        logger.info("---DECISION: ALL/SOME DOCS IRRELEVANT, ROUTE TO WEB SEARCH---")
-        return "web_search"
-    else:
-        logger.info("---DECISION: GENERATE---")
-        return "generate"
-
-def grade_generation_v_documents_and_question(state: GraphState) -> Literal["useful", "not_useful", "not_supported"]:
-    """
-    Self-RAG Mechanism: Self-Critique.
-    Validates Hallucination (against docs) and Answer Relevance (against question).
-    """
-    logger.info("---CHECK HALLUCINATIONS---")
-    question = state["question"]
-    documents = state["documents"]
-    generation = state["generation"]
-    
-    # Hallucination Check
-    system_msg_hall = "You are a grader checking for hallucinations. Does the following generation purely rely on the provided documents? " \
-                      "Provide ONLY 'yes' or 'no'."
-                      
-    context = "\n\n".join(documents)
-    prompt_hall = f"Documents: {context} \n\n Generation: {generation} \n\n Is the generation grounded in the documents? (yes/no):"
-    
-    res_hall = llm.invoke([SystemMessage(content=system_msg_hall), HumanMessage(content=prompt_hall)])
-    hallucination_grade = res_hall.content.strip().lower()
-    
-    if "yes" in hallucination_grade:
-        logger.info("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
-        # Answer Relevance Check
-        logger.info("---GRADE GENERATION vs QUESTION---")
-        system_msg_rel = "You are a grader assessing if an answer resolves a question. Answer ONLY 'yes' or 'no'."
-        prompt_rel = f"Question: {question} \n\n Answer: {generation} \n\n Does it address the question? (yes/no):"
-        
-        res_rel = llm.invoke([SystemMessage(content=system_msg_rel), HumanMessage(content=prompt_rel)])
-        relevance_grade = res_rel.content.strip().lower()
-        
-        if "yes" in relevance_grade:
-            logger.info("---DECISION: GENERATION ADDRESSES QUESTION---")
-            return "useful"
+        # Fear & Greed Index (live from fng_fetcher.py)
+        c.execute("SELECT value, value_classification FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1")
+        fng_row = c.fetchone()
+        if fng_row:
+            db_context_parts.append(f"Fear & Greed Index: {fng_row['value']} ({fng_row['value_classification']}).")
         else:
-            logger.info("---DECISION: GENERATION DOES NOT ADDRESS QUESTION---")
-            return "not_useful"
-    else:
-        logger.info("---DECISION: GENERATION IS HALLUCINATED---")
-        return "not_supported"
+            db_context_parts.append("Fear & Greed Index: Data unavailable.")
+            
+        # CryptoBERT rolling sentiment (live from coin_sentiment_aggregator.py)
+        base_coin = pair.split("/")[0]
+        c.execute("SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", (base_coin,))
+        sent_row = c.fetchone()
+        if sent_row:
+            s1h = sent_row['sentiment_1h']
+            s4h = sent_row['sentiment_4h']
+            s24h = sent_row['sentiment_24h']
+            db_context_parts.append(f"CryptoBERT rolling sentiment for {base_coin}: 1H={s1h:.2f}, 4H={s4h:.2f}, 24H={s24h:.2f}.")
+        else:
+            db_context_parts.append(f"CryptoBERT rolling sentiment for {base_coin}: No data available yet.")
+        
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Sentiment DB query failed: {e}. Falling back to neutral context.")
+        db_context_parts.append("Sentiment data temporarily unavailable. Assume NEUTRAL baseline.")
+    
+    db_context = " ".join(db_context_parts)
+    # ===== END LIVE DATA =====
+    
+    prompt = f"""You are a Behavioral Economics & Crypto Sentiment Analyst. 
+Analyze the current sentiment metrics for {pair}:
+{db_context}
 
-# --- Graph Construction ---
+Provide a 2-3 sentence psychological market analysis. State whether the crowd sentiment leans BULLISH, BEARISH, or NEUTRAL.
+NEVER provide a final trading signal. ONLY provide your sentiment perspective."""
+
+    response = sent_llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)])
+    
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        
+    return {"sentiment_analysis": content_raw.strip()}
+
+
+def analyze_news(state: GraphState):
+    """Retrieves and reads the latest semantic/BM25 news chunks from ChromaDB."""
+    logger.info("---[NODE] NEWS & MACRO ANALYST---")
+    pair = state.get("pair", "BTC/USDT")
+    
+    # Agent-Specific LLM (Factual News Extraction)
+    news_llm = LLMRouter(temperature=0.3, request_timeout=15)
+    
+    # Phase 3.3: Adaptive RAG — route query to optimal pipeline
+    query = f"{pair} macro fundamentals exact news ETF"
+    corrected_results = adaptive_router.route(
+        query=query,
+        retriever=retriever,
+        crag_evaluator=crag
+    )
+    
+    documents = [res.get("text", str(res)) for res in corrected_results[:5]]
+    
+    # Phase 5.1: Knowledge Graph Traversal
+    kg = KnowledgeGraphManager()
+    base_coin = pair.split("/")[0]
+    
+    # Query for ticker and full name (e.g., BTC and Bitcoin)
+    network_links = kg.query_entity_network(base_coin)
+    
+    # Add common full names for major coins to enrich graph hits
+    coin_map = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "XRP": "Ripple"}
+    if base_coin in coin_map:
+        network_links.extend(kg.query_entity_network(coin_map[base_coin]))
+        
+    kg_context = "\n".join(list(set(network_links))) # Deduplicate
+    
+    if kg_context:
+        documents.append(f"--- KNOWLEDGE GRAPH RELATIONS ---\n{kg_context}")
+    
+    context = "\n\n".join(documents)
+    
+    prompt = f"""You are a Crypto Fundamental & Macroeconomic Analyst. 
+Analyze these retrieved recent news documents and Knowledge Graph relations for {pair}:
+{context}
+
+Provide a dense, 2-3 sentence fundamental analysis on the news. State whether the fundamentals lean BULLISH, BEARISH, or NEUTRAL. 
+Focus only on news impact. NEVER provide a final trading signal."""
+
+    response = news_llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)])
+    
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        
+    return {"news_analysis": content_raw.strip(), "documents": documents}
+
+
+# --- Phase 5.2: Bull/Bear Researcher Nodes ---
+
+def research_bullish(state: GraphState):
+    """Bull Researcher: Collects and advocates for bullish evidence."""
+    logger.info("---[NODE] BULL RESEARCHER---")
+    pair = state.get("pair", "BTC/USDT")
+    
+    bull_llm = LLMRouter(temperature=0.3, request_timeout=15)
+    
+    # RAG-Fusion: search for bullish signals from multiple angles
+    bull_results = rag_fusion.fused_search(
+        f"{pair} bullish signals support RSI oversold accumulation",
+        retriever, n_queries=3, top_k_per_query=5
+    )
+    bull_context = "\n".join([r.get("text", str(r)) for r in bull_results[:5]])
+    
+    prompt = f"""You are a BULL RESEARCHER for {pair}. Your job is to build the STRONGEST possible bullish case.
+
+Relevant evidence:
+{bull_context}
+
+Build your bullish argument covering:
+1. Technical strength: RSI oversold bounce, support levels holding, volume increases
+2. Sentiment tailwinds: positive news, Fear & Greed trending toward Greed
+3. On-chain: whale accumulation, exchange outflows, hodler behavior
+
+Output format:
+- BULL_STRENGTH: 0.0-1.0 (how strong is the bullish case?)
+- KEY_ARGUMENTS: 2-3 strongest bullish points
+
+Be an advocate. Find the BEST bullish evidence, but be honest about weakness."""
+    
+    response = bull_llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)])
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+    
+    return {"bull_case": content_raw.strip()}
+
+
+def research_bearish(state: GraphState):
+    """Bear Researcher: Collects and advocates for bearish evidence."""
+    logger.info("---[NODE] BEAR RESEARCHER---")
+    pair = state.get("pair", "BTC/USDT")
+    
+    bear_llm = LLMRouter(temperature=0.3, request_timeout=15)
+    
+    # RAG-Fusion: search for bearish signals from multiple angles
+    bear_results = rag_fusion.fused_search(
+        f"{pair} bearish signals resistance rejection death cross distribution",
+        retriever, n_queries=3, top_k_per_query=5
+    )
+    bear_context = "\n".join([r.get("text", str(r)) for r in bear_results[:5]])
+    
+    prompt = f"""You are a BEAR RESEARCHER for {pair}. Your job is to build the STRONGEST possible bearish case.
+
+Relevant evidence:
+{bear_context}
+
+Build your bearish argument covering:
+1. Technical weakness: resistance rejection, death cross, declining volume
+2. Sentiment headwinds: negative news, Fear & Greed trending toward Fear
+3. On-chain: whale distribution, exchange inflows, miner selling
+
+Output format:
+- BEAR_STRENGTH: 0.0-1.0 (how strong is the bearish case?)
+- KEY_ARGUMENTS: 2-3 strongest bearish points
+
+Be an advocate. Find the BEST bearish evidence, but be honest about weakness."""
+    
+    response = bear_llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)])
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+    
+    return {"bear_case": content_raw.strip()}
+
+
+def coordinator_debate(state: GraphState):
+    """MADAM-RAG: Synthesizes all 5 agent reports via structured bull vs bear debate."""
+    logger.info("---[NODE] MASTER COORDINATOR DEBATE (MADAM-RAG)---")
+    pair = state.get("pair", "UNKNOWN")
+    tech = state.get("technical_analysis", "No TA")
+    sent = state.get("sentiment_analysis", "No Sentiment")
+    news = state.get("news_analysis", "No News")
+    bull = state.get("bull_case", "No bull case")
+    bear = state.get("bear_case", "No bear case")
+    
+    exec_llm = LLMRouter(temperature=0.7, request_timeout=25)
+    
+    prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
+You have received reports from your 5-agent analyst team:
+
+[TECHNICAL ANALYST]:
+{tech}
+
+[SENTIMENT ANALYST]:
+{sent}
+
+[NEWS & MACRO ANALYST]:
+{news}
+
+[BULL RESEARCHER — Advocacy for LONG]:
+{bull}
+
+[BEAR RESEARCHER — Advocacy for SHORT]:
+{bear}
+
+CONDUCT A STRUCTURED DEBATE:
+1. Compare Bull vs Bear evidence strength. Which side has MORE concrete, data-backed arguments?
+2. Cross-reference with the 3 analyst reports. Do technicals/sentiment/news support bull or bear?
+3. Identify any CONTRADICTIONS between agents.
+4. Make your final decision based on the WEIGHT OF EVIDENCE, not on any single agent.
+5. Confidence = bull_strength / (bull_strength + bear_strength), adjusted by analyst agreement.
+
+Respond in valid JSON ONLY, no markdown:
+{{
+   "signal": "BULLISH" | "BEARISH" | "NEUTRAL",
+   "confidence": 0.00 to 1.00,
+   "reasoning": "2-sentence synthesis of the debate outcome. Mention which agents agreed/disagreed."
+}}"""
+    
+    response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)])
+    
+    content_raw = response.content
+    if isinstance(content_raw, list):
+        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        
+    raw_content = content_raw.replace("```json", "").replace("```", "").strip()
+    
+    try:
+        data = json.loads(raw_content)
+        signal = data.get("signal", "NEUTRAL")
+        conf = float(data.get("confidence", 0.0))
+        reason = data.get("reasoning", "")
+    except Exception as e:
+        logger.error(f"Failed to parse Coordinator JSON: {e}")
+        signal, conf, reason = "NEUTRAL", 0.0, "JSON Parsing Failure."
+        
+    return {"signal": signal, "confidence": conf, "reasoning": reason}
+
+
+
+# --- Graph Construction (Multi-Agent DAG) ---
 workflow = StateGraph(GraphState)
 
-# Define nodes
-workflow.add_node("retrieve", retrieve)
-workflow.add_node("grade_documents", grade_documents)
-workflow.add_node("generate", generate)
-workflow.add_node("web_search", web_search)
+# Define nodes (5 parallel analysts + 1 coordinator)
+workflow.add_node("analyze_technical", analyze_technical)
+workflow.add_node("analyze_sentiment", analyze_sentiment)
+workflow.add_node("analyze_news", analyze_news)
+workflow.add_node("research_bullish", research_bullish)
+workflow.add_node("research_bearish", research_bearish)
+workflow.add_node("coordinator_debate", coordinator_debate)
 
-# Define edges
-workflow.add_edge(START, "retrieve")
-workflow.add_edge("retrieve", "grade_documents")
+# Define edges (5 Parallel Agents)
+workflow.add_edge(START, "analyze_technical")
+workflow.add_edge(START, "analyze_sentiment")
+workflow.add_edge(START, "analyze_news")
+workflow.add_edge(START, "research_bullish")
+workflow.add_edge(START, "research_bearish")
 
-workflow.add_conditional_edges(
-    "grade_documents",
-    decide_to_generate,
-    {
-        "web_search": "web_search",
-        "generate": "generate",
-    }
+# All 5 parallel nodes converge to the MADAM Coordinator Debate
+workflow.add_edge(
+    ["analyze_technical", "analyze_sentiment", "analyze_news", "research_bullish", "research_bearish"],
+    "coordinator_debate"
 )
 
-workflow.add_edge("web_search", "generate")
-
-workflow.add_conditional_edges(
-    "generate",
-    grade_generation_v_documents_and_question,
-    {
-        "not_supported": "generate", # Generate again (retry without hallucination)
-        "useful": END,               # Finished successfully
-        "not_useful": "web_search",  # Not answering question, get more info from web
-    }
-)
+workflow.add_edge("coordinator_debate", END)
 
 # Compile graph
 rag_bot = workflow.compile()
 
+def get_trading_signal(pair: str) -> dict:
+    """Entry point for Freqtrade to request a trading decision from the Analyst Team."""
+    logger.info(f"Initiating Multi-Agent Analyst Team for {pair}...")
+    
+    # Phase 9: Semantic Cache
+    from semantic_cache import SemanticCache
+    from self_rag import SelfRAG
+    import json
+    
+    cache = SemanticCache()
+    query_str = f"trading signal analysis for {pair}"
+    
+    # a. Check Cache
+    cached_response_str = cache.get(query=query_str, pair=pair)
+    if cached_response_str:
+        try:
+            logger.info("[Semantic Cache] Reusing cached decision for pair.")
+            return json.loads(cached_response_str)
+        except Exception as e:
+            logger.error(f"Failed to parse cached response: {e}")
+
+    self_rag = SelfRAG()
+    
+    # b. Rule-based Retrieval Gating Check
+    if not self_rag.should_retrieve(query_str, {}):
+        minimal_resp = {"signal": "NEUTRAL", "confidence": 0.5, "reasoning": "Skipped retrieval due to gating rules."}
+        cache.put(query=query_str, response=json.dumps(minimal_resp), pair=pair)
+        return minimal_resp
+    
+    # Initialize state
+    inputs = {
+        "pair": pair,
+        "documents": [],
+        "technical_analysis": "",
+        "sentiment_analysis": "",
+        "news_analysis": "",
+        "bull_case": "",
+        "bear_case": "",
+        "signal": "",
+        "confidence": 0.0,
+        "reasoning": ""
+    }
+    
+    # d. Retry logic with Self-RAG Critique
+    max_retries = 1
+    final_output = {}
+    signal = "NEUTRAL"
+    confidence = 0.0
+    reasoning = ""
+    
+    for attempt in range(max_retries + 1):
+        for output in rag_bot.stream(inputs):
+            for key, value in output.items():
+                final_output = value
+                
+        signal = final_output.get("signal", "NEUTRAL") if final_output else "NEUTRAL"
+        confidence = final_output.get("confidence", 0.0) if final_output else 0.0
+        reasoning = final_output.get("reasoning", "") if final_output else ""
+        
+        # Self-RAG Critique
+        critique = self_rag.self_critique(
+            query=query_str,
+            response=f"Signal: {signal}. Reasoning: {reasoning}",
+            evidence=[final_output.get("technical_analysis", ""), final_output.get("news_analysis", "")]
+        )
+        
+        if critique["passed"] or attempt == max_retries:
+            if not critique["passed"]:
+                logger.warning(f"[Self-RAG] Output failed critique, but max retries reached. Proceeding.")
+            else:
+                logger.info(f"[Self-RAG] Response critique PASSED. Quality verified.")
+            break
+            
+        logger.warning(f"[Self-RAG] Output failed critique. Retrying pipeline. Attempt {attempt+1}/{max_retries}")
+
+    # Log the decision persistently in Phase 3.5.1 Logger
+    decision_logger.log_decision(
+        pair=pair,
+        signal_type=signal,
+        confidence=confidence,
+        reasoning_summary=reasoning,
+        regime="MULTI_AGENT_PHASE_5"
+    )
+    
+    result_dict = {
+        "signal": signal,
+        "confidence": confidence,
+        "reasoning": reasoning
+    }
+    
+    # e. Put directly to Semantic Cache
+    cache.put(query=query_str, response=json.dumps(result_dict), pair=pair)
+    
+    return result_dict
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Initiating Phase 3.1 Advanced RAG Flow Test...")
     
-    test_query = "What exactly is happening with Tether reserves today?"
-    inputs = {"question": test_query}
+    # Allow CLI execution for testing or Freqtrade subprocess call
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pair", type=str, default="BTC/USDT", help="Pair to analyze")
+    args = parser.parse_args()
     
-    # Execute the Stateful Graph
-    final_output = None
-    for output in rag_bot.stream(inputs):
-        for key, value in output.items():
-            logger.info(f"Finished Node: {key}")
-            final_output = value
-            
-    print("\n\n=== FINAL ANSWER ===")
-    print(final_output["generation"])
+    result = get_trading_signal(args.pair)
+    # Print clean JSON to stdout so subprocess can read it
+    print("\n--- JSON OUTPUT ---")
+    print(json.dumps(result))

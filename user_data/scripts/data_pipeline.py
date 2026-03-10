@@ -1,50 +1,188 @@
-import subprocess
+import os
+import sys
 import time
 import logging
-import sys
-import os
+from typing import List, Dict
+import sqlite3
+import subprocess
 import threading
+
+# Ensure local imports work regardless of execution directory
+sys.path.append(os.path.dirname(__file__))
+
+# Data Fetchers
+from rss_fetcher import fetch_rss_feeds
+from fng_fetcher import fetch_fng
+
+# NLP & Database Services
+from db import get_db_connection
+from sentiment_analyzer import analyze_unscored_news
+from rag_chunker import ContentChunker
+from hybrid_retriever import HybridRetriever
+from entity_extractor import KnowledgeGraphManager
 
 logger = logging.getLogger(__name__)
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+class DataPipeline:
+    """
+    Phase 4.2: Data Ingestion Pipeline & NLP Pre-processing
+    Orchestrates the continuous flow of information from external APIs to the RAG memory.
+    Replaces the legacy subprocess orchestrator with direct function calls where possible.
+    """
+    def __init__(self):
+        self.retriever = HybridRetriever(collection_name="crypto_news")
+        
+    def run_pipeline(self):
+        """Executes a single pass of the entire ingestion pipeline."""
+        logger.info("---| RUNNING DATA PIPELINE |---")
+        
+        # 1. Fetch Raw Data
+        logger.info("[Step 1] Fetching external data...")
+        try:
+            fetch_fng()
+            new_articles_count = fetch_rss_feeds()
+        except Exception as e:
+            logger.error(f"Failed during data fetch: {e}")
+            new_articles_count = 0
+            
+        logger.info(f"Fetch completed. New RSS Articles: {new_articles_count}")
+        
+        # 2. Analyze Sentiment (CryptoBERT/FinBERT)
+        logger.info("[Step 2] Processing sentiment for unscored news...")
+        try:
+            analyze_unscored_news()
+        except Exception as e:
+            logger.error(f"Failed during sentiment analysis: {e}")
+            
+        # 3. Vectorization & RAG Insertion
+        logger.info("[Step 3] Vectorizing and embedding unprocessed news into ChromaDB...")
+        self._embed_unprocessed_news()
+        
+        logger.info("---| PIPELINE PASS COMPLETE |---")
 
-def run_script(script_name):
-    script_path = os.path.join(SCRIPTS_DIR, script_name)
-    logger.info(f"Executing {script_name}...")
-    try:
-        # Assuming uv is in the path or we use current python executable from virtualenv
-        subprocess.run([sys.executable, script_path], check=True)
-        logger.info(f"Completed {script_name}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running {script_name}: {e}")
+    def _embed_unprocessed_news(self):
+        """
+        Finds database articles that haven't been pushed to ChromaDB,
+        chunks them, generates embeddings, and saves them.
+        """
+        conn = get_db_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        # Check if column exists, create if not (Evolutionary schema update)
+        try:
+            c.execute("SELECT is_embedded FROM market_news LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.warning("Adding 'is_embedded' column to market_news table.")
+            c.execute("ALTER TABLE market_news ADD COLUMN is_embedded BOOLEAN DEFAULT 0")
+            conn.commit()
 
-def run_periodic_tasks():
-    logger.info("Starting Data Pipeline cron manager...")
-    runs = 0
-    while True:
-        # Run RSS feeds every 10 mins
-        if runs % 10 == 0:
-            run_script("rss_fetcher.py")
+        # Fetch articles that have sentiment scored but not yet embedded
+        c.execute("""
+            SELECT id, title, summary, source, sentiment_score, published_at, url 
+            FROM market_news 
+            WHERE is_embedded = 0 AND sentiment_score IS NOT NULL
+            LIMIT 50
+        """)
+        articles = c.fetchall()
+        
+        if not articles:
+            logger.info("No new articles to embed.")
+            conn.close()
+            return
             
-        # Run Fear&Greed and CryptoCompare every 15 mins
-        if runs % 15 == 0:
-            run_script("fng_fetcher.py")
-            run_script("cryptocompare_fetcher.py")
+        logger.info(f"Embedding {len(articles)} articles...")
+        
+        docs_to_insert = []
+        metadatas_to_insert = []
+        ids_to_insert = []
+        successful_db_ids = []
+        
+        # Phase 5.1: Initialize Knowledge Graph Extractor
+        kg = KnowledgeGraphManager()
+        
+        for article in articles:
+            text_content = f"Title: {article['title']}\n\nSummary: {article['summary']}"
+            # Document-level context for contextual chunking (Anthropic-style)
+            doc_summary = f"{article['title']} ({article['source']})"
             
-        # Run Sentiment Analysis and Aggregation every 15 mins (staggered by 5 mins after fetchers)
-        if (runs - 5) % 15 == 0:
-            run_script("sentiment_analyzer.py")
-            run_script("coin_sentiment_aggregator.py")
+            # Use Parent-Child chunking if text is very long, otherwise Recursive.
+            if len(text_content) > 1000:
+                chunks = ContentChunker.chunk_parent_child(text_content, parent_size=600, child_size=200)
+                for i, chunk_dict in enumerate(chunks):
+                    doc_id = f"news_{article['id']}_chunk_{i}"
+                    # Phase 3.1: Contextual Chunking — prepend doc context for better retrieval
+                    contextual_text = ContentChunker.construct_contextual_prompt(
+                        chunk_dict['child_text'], doc_summary
+                    )
+                    docs_to_insert.append(contextual_text)
+                    metadatas_to_insert.append({
+                        "source": article['source'],
+                        "published_at": str(article['published_at']),
+                        "sentiment_score": float(article['sentiment_score']) if article['sentiment_score'] else 0.0,
+                        "type": "news_child",
+                        "url": article['url'],
+                        "parent_text": chunk_dict['parent_text']
+                    })
+                    ids_to_insert.append(doc_id)
+            else:
+                chunks = ContentChunker.chunk_recursive(text_content, chunk_size=512, chunk_overlap=50)
+                for i, chunk_text in enumerate(chunks):
+                    doc_id = f"news_{article['id']}_chunk_{i}"
+                    # Phase 3.1: Contextual Chunking — prepend doc context
+                    contextual_text = ContentChunker.construct_contextual_prompt(
+                        chunk_text, doc_summary
+                    )
+                    docs_to_insert.append(contextual_text)
+                    metadatas_to_insert.append({
+                        "source": article['source'],
+                        "published_at": str(article['published_at']),
+                        "sentiment_score": float(article['sentiment_score']) if article['sentiment_score'] else 0.0,
+                        "type": "news",
+                        "url": article['url'],
+                        "parent_text": text_content
+                    })
+                    ids_to_insert.append(doc_id)
             
-        time.sleep(60)
-        runs += 1
+            successful_db_ids.append(article['id'])
+            
+        # Push to Vector DB
+        try:
+            if docs_to_insert:
+                self.retriever.add_documents(
+                    documents=docs_to_insert,
+                    metadatas=metadatas_to_insert,
+                    ids=ids_to_insert
+                )
+                
+            # Mark as embedded in SQLite
+            if successful_db_ids:
+                format_strings = ','.join(['?'] * len(successful_db_ids))
+                c.execute(f"UPDATE market_news SET is_embedded = 1 WHERE id IN ({format_strings})", tuple(successful_db_ids))
+                conn.commit()
+                logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles.")
+                
+            # Phase 5.1: Extract Entities and build Knowledge Graph
+            for article in articles:
+                if article['id'] in successful_db_ids:
+                    try:
+                        extracted = kg.extract_from_text(article['summary'], source_reference=article['url'])
+                        if extracted:
+                            logger.info(f"Extracted {len(extracted.get('entities', []))} entities for art_{article['id']}")
+                    except Exception as e:
+                        logger.warning(f"Entity extraction failed for art_{article['id']}: {e}")
+                
+        except Exception as e:
+            logger.error(f"Failed to push embeddings to DB: {e}")
+            
+        finally:
+            conn.close()
 
 def start_sse_stream():
     """Run the streaming script indefinitely with auto-restart on failure."""
     while True:
         logger.info("Starting SSE Stream processor...")
-        script_path = os.path.join(SCRIPTS_DIR, "crypto_cv_stream.py")
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crypto_cv_stream.py")
         try:
             subprocess.run([sys.executable, script_path], check=True)
         except subprocess.CalledProcessError as e:
@@ -53,10 +191,43 @@ def start_sse_stream():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    import argparse
     
-    # Start the SSE thread (Real-Time)
-    sse_thread = threading.Thread(target=start_sse_stream, daemon=True)
-    sse_thread.start()
+    parser = argparse.ArgumentParser(description="Freqtrade AI Data Ingestion Pipeline")
+    parser.add_argument("--once", action="store_true", help="Run the pipeline exactly once and exit")
+    parser.add_argument("--interval", type=int, default=300, help="Interval in seconds between runs (default: 5 mins)")
+    parser.add_argument("--scheduled", action="store_true", help="Use APScheduler instead of while/sleep loop")
+    args = parser.parse_args()
     
-    # Run the polling thread (Batch Fetchers)
-    run_periodic_tasks()
+    # Start the SSE thread (Real-Time Background)
+    if not args.once:
+        sse_thread = threading.Thread(target=start_sse_stream, daemon=True)
+        sse_thread.start()
+    
+    pipeline = DataPipeline()
+    
+    if args.once:
+        pipeline.run_pipeline()
+    elif args.scheduled:
+        # Phase 4.5: APScheduler mode — proper job scheduling
+        from scheduler import PipelineScheduler
+        sched = PipelineScheduler()
+        if sched.start():
+            logger.info("APScheduler mode active. Jobs:")
+            for job in sched.get_job_info():
+                logger.info(f"  {job['name']}: {job['trigger']} → next: {job['next_run']}")
+            try:
+                while True:
+                    time.sleep(60)
+            except KeyboardInterrupt:
+                sched.stop()
+        else:
+            logger.error("APScheduler failed. Install: pip install apscheduler")
+    else:
+        # Legacy mode: while/sleep loop
+        logger.info(f"Starting continuous data pipeline (Interval: {args.interval}s)")
+        while True:
+            pipeline.run_pipeline()
+            logger.info(f"Sleeping for {args.interval} seconds...")
+            time.sleep(args.interval)
+

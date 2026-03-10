@@ -1,25 +1,40 @@
 # AI Core Dependencies
-chromadb
-sqlite-vec
-sentence-transformers
+chromadb==1.5.4
+sqlite-vec==0.1.6
+sentence-transformers==5.2.3
 
 # LLM Providers & Agent Frameworks
-langchain
-langgraph
-google-generativeai
-groq
-openai
+langchain==1.2.10
+langgraph==1.0.10
+langchain-core==1.2.17
+langchain-community==0.4.1
+google-generativeai==0.8.6
+google-genai==1.66.0
+langchain-google-genai==4.2.1
+groq==0.37.1
+langchain-groq==1.1.2
+openai==2.26.0
+langchain-openai==1.1.10
 
 # News & Data Pipeline
-feedparser
-scrapling[fetchers]
-sseclient-py
+feedparser==6.0.12
+scrapling[fetchers]==0.4.1
+sseclient-py==1.9.0
 
 # Machine Learning & Optimization
-optimum[onnxruntime]
-lightgbm
+optimum[onnxruntime]==2.1.0
+lightgbm==4.6.0
 
 # Hybrid RAG Foundation
-chromadb
-rank-bm25
-flashrank
+rank-bm25==0.2.2
+flashrank==0.2.10
+httpx==0.28.1
+numpy==2.4.2
+pandas==2.3.3
+pydantic==2.12.5
+python-dotenv==1.2.2
+torch==2.10.0
+transformers==4.57.6
+einops==0.8.2
+duckduckgo-search==8.1.1
+apscheduler==3.11.0

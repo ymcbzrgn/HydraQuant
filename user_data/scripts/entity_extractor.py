@@ -14,7 +14,7 @@ from langchain_groq import ChatGroq
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "ai_data.sqlite")
+from ai_config import AI_DB_PATH as DB_PATH
 
 class Relationship(BaseModel):
     source: str = Field(description="The source entity (e.g., Bitcoin, SEC, Federal Reserve)")
@@ -54,8 +54,9 @@ class KnowledgeGraphManager:
         self._init_db_tables()
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def _init_db_tables(self):

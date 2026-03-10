@@ -1,6 +1,8 @@
 import os
+import math
 import sqlite3
 import logging
+from datetime import datetime, timezone
 import chromadb
 from flashrank import Ranker, RerankRequest
 from typing import List, Dict, Any
@@ -9,10 +11,7 @@ from rag_embedding import DualEmbeddingPipeline
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "db", "ai_data.sqlite")
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VECTOR_DB_DIR = os.path.join(BASE_DIR, "vectordb")
+from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as VECTOR_DB_DIR
 
 class HybridRetriever:
     """
@@ -24,27 +23,60 @@ class HybridRetriever:
     
     def __init__(self, collection_name: str = "crypto_news"):
         self.chroma_client = chromadb.PersistentClient(path=VECTOR_DB_DIR)
+        # Primary: Gemini embeddings (general semantic)
         self.collection = self.chroma_client.get_or_create_collection(
             name=collection_name, 
             metadata={"hnsw:space": "cosine"}
         )
+        # Secondary: BGE-Financial embeddings (domain-specific)
+        self.bge_collection = self.chroma_client.get_or_create_collection(
+            name=f"{collection_name}_bge",
+            metadata={"hnsw:space": "cosine"}
+        )
         self.embedder = DualEmbeddingPipeline()
-        self.reranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=os.path.join(VECTOR_DB_DIR, "flashrank_cache"))
-        
+        try:
+            from flashrank import Ranker
+            self.reranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=os.path.join(VECTOR_DB_DIR, "flashrank_cache"))
+        except ImportError:
+            logger.warning("FlashRank not found, disabling FlashRank component.")
+            self.reranker = None
+            
+        try:
+            from colbert_reranker import ColBERTReranker
+            self.colbert_reranker = ColBERTReranker()
+        except ImportError:
+            logger.warning("ColBERT not found, disabling ColBERT component. Run pip install transformers torch")
+            self.colbert_reranker = None
+
+        try:
+            from binary_quantizer import BinaryQuantizer
+            self.binary_quantizer = BinaryQuantizer()
+        except ImportError:
+            logger.warning("BinaryQuantizer not available, disabling binary pre-filter.")
+            self.binary_quantizer = None
+
     def _get_db_connection(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        
+        # Phase 10: Store binary BGE embeddings
+        conn.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
+            doc_id TEXT PRIMARY KEY,
+            packed_bge BLOB
+        )''')
         return conn
 
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
-        """Embeds and adds documents to ChromaDB and updates SQLite FTS5 BM25 index."""
+        """Embeds and adds documents to BOTH ChromaDB collections (Gemini + BGE) and SQLite FTS5."""
         gemini_embeddings = []
-        # We index using the primary semantic model (Gemini) for ChromaDB
-        # BGE embeddings can be stored in metadata for dual-retrieval
+        bge_embeddings = []
         for doc in documents:
             embs = self.embedder.get_embeddings(doc)
             gemini_embeddings.append(embs['gemini'])
-            
+            bge_embeddings.append(embs['bge'])
+        
+        # Store Gemini vectors
         self.collection.add(
             ids=ids,
             embeddings=gemini_embeddings,
@@ -52,11 +84,25 @@ class HybridRetriever:
             metadatas=metadatas
         )
         
-        # Add to FTS5 SQLite index
+        # Store BGE vectors in parallel collection (Still stored as float just in case we need exact fallback)
+        self.bge_collection.add(
+            ids=ids,
+            embeddings=bge_embeddings,
+            documents=documents,
+            metadatas=metadatas
+        )
+        
+        # Add to FTS5 SQLite index and Binary BGE table
         try:
+            # Generate packed BGE representations for fast binary filtering
+            packed_bges = None
+            if hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+                import numpy as np
+                packed_bges = self.binary_quantizer.binarize_and_pack(np.array(bge_embeddings))
+                
             with self._get_db_connection() as conn:
                 cursor = conn.cursor()
-                for doc_id, doc_text in zip(ids, documents):
+                for i, (doc_id, doc_text) in enumerate(zip(ids, documents)):
                     # FTS5 doesn't natively support INSERT OR REPLACE gracefully without rowid,
                     # so we delete the existing doc_id if it exists, then insert.
                     cursor.execute("DELETE FROM bm25_index WHERE doc_id = ?", (doc_id,))
@@ -64,10 +110,15 @@ class HybridRetriever:
                         "INSERT INTO bm25_index (doc_id, content) VALUES (?, ?)", 
                         (doc_id, doc_text)
                     )
+                    
+                    if packed_bges is not None:
+                        # Store binary BGE BLOB
+                        cursor.execute("INSERT OR REPLACE INTO binary_embeddings (doc_id, packed_bge) VALUES (?, ?)", 
+                                       (doc_id, packed_bges[i].tobytes()))
                 conn.commit()
-            logger.info(f"Added {len(documents)} docs to Chroma DB & SQLite FTS5.")
+            logger.info(f"Added {len(documents)} docs to Chroma DB & SQLite FTS5 including Binary BGE.")
         except Exception as e:
-            logger.error(f"Error adding to SQLite FTS5 BM25: {e}")
+            logger.error(f"Error adding to SQLite FTS5 BM25 or Binary BGE: {e}")
 
     def reciprocal_rank_fusion(self, results_lists: List[List[str]], k=60) -> List[str]:
         """Calculates RRF score to combine multiple ranked lists."""
@@ -85,68 +136,194 @@ class HybridRetriever:
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         Executes the full Hybrid Search:
-        1. Query -> SQLite FTS5 (BM25) -> Top 30
-        2. Query -> Chroma (Dense) -> Top 30
-        3. RRF Fusion -> Top 20
-        4. FlashRank -> Top K
+        1. Query -> SQLite FTS5 (BM25) -> Top 300 candidates
+        2. Binary Quantization -> Pre-filter BM25 Top 300 to Top 30 via Hamming distance on BGE
+        3. Query -> Chroma (Dense Gemini) -> Top 30
+        4. RRF Fusion -> Top 20
+        5. FlashRank + ColBERT -> Top K
         """
-        # 1. Sparse Search (SQLite FTS5 BM25)
+        query_embs = self.embedder.get_embeddings(query)
+        
+        # 1. Sparse Search (SQLite FTS5 BM25) - Widen the funnel
         bm25_top_ids = []
         try:
             with self._get_db_connection() as conn:
                 cursor = conn.cursor()
-                # FTS5 expects double quotes around phrases if they contain spaces
                 sanitized_query = query.replace('"', '').replace("'", "")
-                # Wrap the query in double quotes for exact or phrase matching
                 fts_query = f'"{sanitized_query}"'
                 
                 cursor.execute(
-                    "SELECT doc_id FROM bm25_index WHERE bm25_index MATCH ? ORDER BY rank LIMIT 30", 
+                    "SELECT doc_id FROM bm25_index WHERE bm25_index MATCH ? ORDER BY rank LIMIT 300", 
                     (fts_query,)
                 )
                 rows = cursor.fetchall()
                 bm25_top_ids = [row['doc_id'] for row in rows]
+                
+                # 2. Pre-filter BM25 results with Binary Quantization (BGE Hamming Distance)
+                # Instead of hitting Chroma with float BGE, we do an ultra-fast local binary filter
+                if bm25_top_ids and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+                    import numpy as np
+                    q_bin = self.binary_quantizer.binarize_and_pack(np.array(query_embs['bge']))
+                    placeholders = ",".join(["?"] * len(bm25_top_ids))
+                    cursor.execute(f"SELECT doc_id, packed_bge FROM binary_embeddings WHERE doc_id IN ({placeholders})", bm25_top_ids)
+                    bin_rows = cursor.fetchall()
+                    
+                    if bin_rows:
+                        doc_ids = [r['doc_id'] for r in bin_rows]
+                        doc_blobs = [np.frombuffer(r['packed_bge'], dtype=np.uint8) for r in bin_rows]
+                        doc_packed = np.array(doc_blobs)
+                        
+                        distances = self.binary_quantizer.hamming_distance(q_bin, doc_packed)
+                        
+                        # Sort by smallest hamming distance (most similar)
+                        scored_bin = list(zip(doc_ids, distances))
+                        scored_bin.sort(key=lambda x: x[1])
+                        # Replace BM25 vast list with tightly dense-filtered top 30
+                        bm25_top_ids = [x[0] for x in scored_bin[:30]]
+                else:
+                    # Fallback if no binary quantizer
+                    bm25_top_ids = bm25_top_ids[:30]
+                    
         except Exception as e:
-            logger.error(f"SQLite FTS5 Search failed: {e}")
+            logger.error(f"SQLite FTS5 / Binary Search failed: {e}")
 
-        # 2. Dense Search (ChromaDB utilizing Gemini vectors)
-        query_embs = self.embedder.get_embeddings(query)
-        dense_top_ids = []
+        # 3. Dense Search — Gemini embeddings
+        dense_gemini_ids = []
         
-        # We need to know corpus size to avoid ChromaDB querying errors
         collection_count = self.collection.count()
         if collection_count > 0:
             dense_results = self.collection.query(
                 query_embeddings=[query_embs['gemini']],
                 n_results=min(30, collection_count)
             )
-            dense_top_ids = dense_results['ids'][0] if dense_results['ids'] else []
+            dense_gemini_ids = dense_results['ids'][0] if dense_results['ids'] else []
 
-        # 3. Reciprocal Rank Fusion (RRF)
-        fused_ids = self.reciprocal_rank_fusion([bm25_top_ids, dense_top_ids])
+        # (BGE float search is bypassed completely by the binary quantizer pre-filter above)
+        dense_bge_ids = []
+
+        # 3. Reciprocal Rank Fusion (3-way: BM25 + Gemini Dense + BGE Dense)
+        fused_ids = self.reciprocal_rank_fusion([bm25_top_ids, dense_gemini_ids, dense_bge_ids])
         fused_top_20 = fused_ids[:20]
 
         # Fetch actual documents for generating reranking payloads
         passages = []
         if fused_top_20:
-            fetched = self.collection.get(ids=fused_top_20)
+            fetched = self.collection.get(ids=fused_top_20, include=["documents", "metadatas"])
             if fetched and fetched['documents']:
                 for i, doc_id in enumerate(fetched['ids']):
+                    meta = fetched['metadatas'][i] if fetched['metadatas'] else {}
+                    child_text = fetched['documents'][i]
+                    
+                    # Parent-Child Retrieval: If this is a child chunk and we have the parent,
+                    # return the FULL parent text instead of just the 128-token child fragment.
+                    # This is the critical fix from EVALUATION.md lines 125-129.
+                    if meta.get('type') == 'news_child' and meta.get('parent_text'):
+                        display_text = meta['parent_text']
+                    else:
+                        display_text = child_text
+                    
                     passages.append({
                         "id": doc_id,
-                        "text": fetched['documents'][i],
-                        "meta": fetched['metadatas'][i] if fetched['metadatas'] else {}
+                        "text": display_text,
+                        "meta": meta
                     })
 
         if not passages:
             return []
 
-        # 4. Cross-Encoder Reranking (FlashRank)
-        rerank_request = RerankRequest(query=query, passages=passages)
-        reranked_results = self.reranker.rerank(rerank_request)
+        # Phase 3.15: Temporal Decay — penalize old news before reranking
+        passages = self._apply_temporal_decay(passages)
+
+        # 4. Multi-Reranker Ensemble
+        flashrank_results = []
+        if self.reranker:
+            rerank_request = RerankRequest(query=query, passages=passages)
+            flashrank_results = self.reranker.rerank(rerank_request)
+            if flashrank_results:
+                max_score = max(float(doc.get("score", 0.0)) for doc in flashrank_results)
+                min_score = min(float(doc.get("score", 0.0)) for doc in flashrank_results)
+                range_score = max_score - min_score if max_score > min_score else 1.0
+                for doc in flashrank_results:
+                    doc["flashrank_normalized"] = (float(doc.get("score", 0.0)) - min_score) / range_score
+                    
+        colbert_results = []
+        if self.colbert_reranker:
+            # We want to score all candidates, so top_k is len(passages)
+            colbert_results = self.colbert_reranker.rerank(query, passages, top_k=len(passages))
+            
+        final_results = self._ensemble_rerank(passages, flashrank_results, colbert_results)
         
         # Return final top_k
-        return reranked_results[:top_k]
+        return final_results[:top_k]
+
+    def _ensemble_rerank(self, base_passages, flashrank_results, colbert_results, alpha=0.5):
+        """Combines FlashRank and ColBERT normalized scores."""
+        flash_dict = {doc['id']: doc for doc in flashrank_results}
+        colbert_dict = {doc['id']: doc for doc in colbert_results}
+        
+        ensemble_results = []
+        for doc in base_passages:
+            doc_id = doc['id']
+            f_norm = flash_dict.get(doc_id, {}).get("flashrank_normalized", 0.0)
+            c_norm = colbert_dict.get(doc_id, {}).get("colbert_normalized", 0.0)
+            
+            if not flash_dict and colbert_dict:
+                final_score = c_norm
+            elif flash_dict and not colbert_dict:
+                final_score = f_norm
+            elif not flash_dict and not colbert_dict:
+                final_score = float(doc.get("score", 0.0))
+            else:
+                final_score = alpha * f_norm + (1 - alpha) * c_norm
+                
+            doc_copy = doc.copy()
+            doc_copy["ensemble_score"] = final_score
+            doc_copy["score"] = final_score # Used later for standard sorting if needed
+            ensemble_results.append(doc_copy)
+            
+        ensemble_results.sort(key=lambda x: x["ensemble_score"], reverse=True)
+        return ensemble_results
+
+    def _apply_temporal_decay(
+        self,
+        results: List[Dict[str, Any]],
+        half_life_days: float = 7.0,
+        alpha: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply temporal decay to search results.
+        Formula: score = alpha * relevance + (1-alpha) * 0.5^(age/half_life)
+        
+        - 1-hour-old news: decay ≈ 1.0 → score barely reduced
+        - 7-day-old news: decay = 0.5 → 30% penalty
+        - 30-day-old news: decay ≈ 0.05 → ~28.5% penalty
+        - 90-day-old news: decay ≈ 0.0002 → killed
+        """
+        now = datetime.now(tz=timezone.utc)
+        
+        for result in results:
+            meta = result.get('meta', {})
+            pub_date_str = meta.get('published_at') or meta.get('date') or meta.get('timestamp')
+            
+            if pub_date_str:
+                try:
+                    pub_date = datetime.fromisoformat(str(pub_date_str).replace('Z', '+00:00'))
+                    if pub_date.tzinfo is None:
+                        pub_date = pub_date.replace(tzinfo=timezone.utc)
+                    age_days = (now - pub_date).total_seconds() / 86400.0
+                    decay = math.pow(0.5, age_days / half_life_days)
+                except (ValueError, TypeError):
+                    decay = 0.5  # Unknown date → moderate penalty
+            else:
+                decay = 0.5  # No date metadata → moderate penalty
+            
+            original_score = float(result.get('score', 1.0))
+            result['score'] = alpha * original_score + (1 - alpha) * decay
+        
+        # Re-sort by decayed score (highest first)
+        results.sort(key=lambda x: float(x.get('score', 0)), reverse=True)
+        
+        return results
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
