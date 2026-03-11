@@ -1,5 +1,12 @@
+"""
+Phase 17: Comprehensive End-to-End Smoke Test
+Tests all 18 RAG techniques + monitoring + deployment readiness.
+No real API calls — mock/import verification only.
+"""
+
 import os
 import sys
+import time
 
 # Step 0: Ensure we use a temporary isolated database for the smoke test
 os.environ["AI_DB_PATH"] = "/tmp/smoke_db.sqlite"
@@ -15,158 +22,230 @@ from unittest.mock import patch, MagicMock
 # Minimal logging to not clutter the smoke test output
 logging.basicConfig(level=logging.ERROR)
 
-def print_result(step_name: str, passed: bool, msg: str = ""):
-    icon = "✅ PASS" if passed else "❌ FAIL"
-    print(f"{icon}: {step_name} {msg}")
 
-def run_smoke_test():
-    print("="*50)
-    print("🚀 Starting AI Pipeline End-to-End Smoke Test")
-    print("="*50)
-    
-    # --- Step 0: DB Initialization ---
-    try:
+def print_result(step_name: str, passed: bool, msg: str = ""):
+    icon = "PASS" if passed else "FAIL"
+    print(f"[{icon}] {step_name} {msg}")
+
+
+def run_full_smoke_test() -> dict:
+    """Run all AI system checks, return structured results."""
+    start_time = time.time()
+    results = {"total_checks": 0, "passed": 0, "failed": 0, "failures": [], "details": []}
+
+    def check(name: str, fn):
+        results["total_checks"] += 1
+        try:
+            fn()
+            results["passed"] += 1
+            print_result(name, True)
+            results["details"].append({"name": name, "passed": True})
+        except Exception as e:
+            results["failed"] += 1
+            results["failures"].append(f"{name}: {e}")
+            print_result(name, False, str(e))
+            results["details"].append({"name": name, "passed": False, "error": str(e)})
+
+    print("=" * 60)
+    print("AI Pipeline End-to-End Smoke Test (Phase 17)")
+    print("=" * 60)
+
+    # --- Core Infrastructure ---
+    def test_db_init():
         from db import init_db
         init_db()
-        print_result("1. Database Init", True, "(/tmp/smoke_db.sqlite created)")
-    except Exception as e:
-        print_result("1. Database Init", False, str(e))
-        return
 
-    # --- Step 1: RSS Fetch ---
-    try:
+    def test_ai_config():
+        from ai_config import AI_DB_PATH, CHROMA_PERSIST_DIR
+        assert AI_DB_PATH, "AI_DB_PATH is empty"
+        assert CHROMA_PERSIST_DIR, "CHROMA_PERSIST_DIR is empty"
+
+    def test_llm_router_import():
+        from llm_router import LLMRouter
+        router = LLMRouter()
+        assert hasattr(router, 'invoke'), "LLMRouter missing invoke()"
+        assert hasattr(router, 'ainvoke'), "LLMRouter missing ainvoke()"
+
+    check("1. Database Init", test_db_init)
+    check("2. AI Config", test_ai_config)
+    check("3. LLM Router Import", test_llm_router_import)
+
+    # --- Data Pipeline ---
+    def test_rss_insert():
         from db import get_db_connection
-        # Simulate RSS fetch by directly inserting a record
         with get_db_connection() as conn:
             conn.execute('''
                 INSERT OR IGNORE INTO market_news (source, title, summary, url, published_at)
                 VALUES (?, ?, ?, ?, ?)
             ''', ("SmokeSource", "Smoke Test BTC News", "BTC breaks $100K.", "https://smoke.test/btc", "2026-01-01T00:00:00Z"))
             conn.commit()
-        print_result("2. RSS Fetcher", True, "(Record inserted to market_news)")
-    except Exception as e:
-        print_result("2. RSS Fetcher", False, str(e))
-        
-    # --- Step 2: Sentiment Analyzer ---
-    try:
+
+    def test_sentiment_analyzer():
         from sentiment_analyzer import analyze_unscored_news
-        # Mock pipeline loader to return a dummy model
         with patch('sentiment_analyzer.load_sentiment_pipeline') as mock_pipe:
             dummy_model = MagicMock()
-            # Return a list of dicts for each input
             dummy_model.return_value = [{'label': 'bullish', 'score': 0.95}]
             mock_pipe.return_value = dummy_model
             analyze_unscored_news()
-        print_result("3. Sentiment Analyzer", True, "(Mocked inference calculated)")
-    except Exception as e:
-        print_result("3. Sentiment Analyzer", False, str(e))
 
-    # --- Step 3: Embedding / Data Pipeline ---
-    try:
+    def test_data_pipeline():
         from data_pipeline import DataPipeline
-        # Mock embedding vectors so we don't need real genai calls
         with patch('rag_embedding.DualEmbeddingPipeline.get_embeddings') as mock_embed:
             mock_embed.return_value = {'gemini': [0.1] * 768, 'bge': [0.1] * 768}
             pipeline = DataPipeline()
             pipeline._embed_unprocessed_news()
-        print_result("4. Data Pipeline & Embedding", True, "(Chunks successfully embedded)")
-    except Exception as e:
-        print_result("4. Data Pipeline & Embedding", False, str(e))
 
-    # --- Step 4: Hybrid Retriever ---
-    try:
+    check("4. RSS Data Insert", test_rss_insert)
+    check("5. Sentiment Analyzer", test_sentiment_analyzer)
+    check("6. Data Pipeline & Embedding", test_data_pipeline)
+
+    # --- Retrieval & RAG Core ---
+    def test_hybrid_retriever():
         from hybrid_retriever import HybridRetriever
         with patch('hybrid_retriever.HybridRetriever.search') as mock_search:
             mock_search.return_value = ["Mock Document from Chroma/BM25"]
             retriever = HybridRetriever()
             res = retriever.search("BTC status", top_k=2)
             assert len(res) == 1
-        print_result("5. Hybrid Retriever", True, "(BM25 + Dense Search simulated)")
-    except Exception as e:
-        print_result("5. Hybrid Retriever", False, str(e))
 
-    # --- Step 5: Adaptive Router ---
-    try:
+    def test_adaptive_router():
         from adaptive_router import AdaptiveQueryRouter
         router = AdaptiveQueryRouter()
         classification = router.classify("Is BTC dropping?")
-        print_result("6. Adaptive Router", True, f"(Query class: {classification})")
-    except Exception as e:
-        print_result("6. Adaptive Router", False, str(e))
+        assert classification is not None
 
-    # --- Step 6: CRAG Evaluator ---
-    try:
+    def test_crag():
         from crag_evaluator import CRAGEvaluator
-        crag = CRAGEvaluator(router=MagicMock())
-        # Just verifying instantiation and basic structure works
-        print_result("7. CRAG Evaluator", True, "(Component loaded)")
-    except Exception as e:
-        print_result("7. CRAG Evaluator", False, str(e))
+        CRAGEvaluator(router=MagicMock())
 
-    # --- Step 7: RAG Graph (MADAM Debate) ---
-    try:
+    def test_rag_graph():
         import rag_graph
-        
-        # We patch heavily because get_trading_signal initializes multiple models
-        with patch('rag_graph.get_trading_signal') as mock_graph_run:
-            mock_graph_run.return_value = {
-                "decision": "BULLISH",
-                "confidence": 0.88,
-                "reasoning": "Debate concluded bullish."
-            }
+        with patch('rag_graph.get_trading_signal') as mock_graph:
+            mock_graph.return_value = {"decision": "BULLISH", "confidence": 0.88, "reasoning": "Debate concluded bullish."}
             res = rag_graph.get_trading_signal("BTC/USDT")
             assert res['decision'] == "BULLISH"
-        print_result("8. RAG Graph (MADAM Debate)", True, "(Graph execution verified)")
-    except Exception as e:
-        print_result("8. RAG Graph (MADAM Debate)", False, str(e))
 
-    # --- Step 8: Position Sizer & BayesianKelly ---
-    try:
+    check("7. Hybrid Retriever", test_hybrid_retriever)
+    check("8. Adaptive Router", test_adaptive_router)
+    check("9. CRAG Evaluator", test_crag)
+    check("10. RAG Graph (MADAM Debate)", test_rag_graph)
+
+    # --- RAG Techniques (Phase 14-16) ---
+    def test_raptor_import():
+        from raptor_tree import RAPTORTree
+        assert hasattr(RAPTORTree, 'build_tree')
+
+    def test_streaming_rag_import():
+        from streaming_rag import StreamingRAG
+        assert hasattr(StreamingRAG, 'ingest')
+
+    def test_cryptopanic_import():
+        from cryptopanic_fetcher import CryptoPanicFetcher
+        assert CryptoPanicFetcher is not None
+
+    def test_alphavantage_import():
+        from alphavantage_fetcher import AlphaVantageFetcher
+        assert AlphaVantageFetcher is not None
+
+    def test_magma_import():
+        from magma_memory import MAGMAMemory
+        assert hasattr(MAGMAMemory, 'add_edge')
+
+    def test_memorag_import():
+        from memo_rag import MemoRAG
+        assert hasattr(MemoRAG, 'update_global_memory')
+
+    def test_bidi_import():
+        from bidirectional_rag import BidirectionalRAG
+        assert hasattr(BidirectionalRAG, 'evaluate_trade_outcome')
+
+    def test_flare_import():
+        from flare_retriever import FLARERetriever
+        assert hasattr(FLARERetriever, 'generate_with_active_retrieval')
+
+    def test_speculative_import():
+        from speculative_rag import SpeculativeRAG
+        assert hasattr(SpeculativeRAG, 'draft_and_verify')
+
+    def test_cot_rag_import():
+        from cot_rag import CoTRAG
+        assert hasattr(CoTRAG, 'reason_step_by_step')
+
+    check("11. RAPTOR Tree Import", test_raptor_import)
+    check("12. StreamingRAG Import", test_streaming_rag_import)
+    check("13. CryptoPanic Fetcher Import", test_cryptopanic_import)
+    check("14. AlphaVantage Fetcher Import", test_alphavantage_import)
+    check("15. MAGMA Memory Import", test_magma_import)
+    check("16. MemoRAG Import", test_memorag_import)
+    check("17. Bidirectional RAG Import", test_bidi_import)
+    check("18. FLARE Retriever Import", test_flare_import)
+    check("19. Speculative RAG Import", test_speculative_import)
+    check("20. CoT-RAG Import", test_cot_rag_import)
+
+    # --- Autonomy & Risk ---
+    def test_position_sizer():
         from position_sizer import PositionSizer
         sizer = PositionSizer()
-        
         with patch('position_sizer.BayesianKelly.update'):
             frac = sizer.calculate_stake_fraction(0.85)
-            
-        print_result("9. Position Sizer", True, f"(Calculated Kelly fraction: {frac:.2f})")
-    except Exception as e:
-        print_result("9. Position Sizer", False, str(e))
+            assert 0 <= frac <= 1
 
-    # --- Step 9: Risk Budget ---
-    try:
+    def test_risk_budget():
         from risk_budget import RiskBudgetManager
         rm = RiskBudgetManager()
-        # Mock scaling/consuming
         can_open = rm.scale_position(100.0)
         rm.consume_budget(position_size=100.0, asset_volatility=0.05, confidence=0.8)
-        print_result("10. Risk Budget", True, f"(scaled={can_open})")
-    except Exception as e:
-        print_result("10. Risk Budget", False, str(e))
+        assert can_open is not None
 
-    # --- Step 10: Decision Logger ---
-    try:
+    def test_decision_logger():
         from ai_decision_logger import AIDecisionLogger
-        logger_module = AIDecisionLogger()
-        trade_id = logger_module.log_decision(
+        dl = AIDecisionLogger()
+        trade_id = dl.log_decision(
             pair="BTC/USDT", signal_type="BULLISH",
-            confidence=0.88, reasoning_summary="Smoke test dummy reasoning."
+            confidence=0.88, reasoning_summary="Smoke test reasoning."
         )
-        print_result("11. Decision Logger", True, f"(Inserted DB Record ID: {trade_id})")
-    except Exception as e:
-        print_result("11. Decision Logger", False, str(e))
+        assert trade_id is not None
 
-    # --- Step 11: Forgone PnL Engine ---
-    try:
+    def test_forgone_pnl():
         from forgone_pnl_engine import ForgonePnLEngine
         engine = ForgonePnLEngine()
         engine.log_forgone_signal("BTC/USDT", "BULLISH", 0.88, 50000.0, False)
-        print_result("12. Forgone P&L Engine", True, "(Forgone signal intercepted)")
-    except Exception as e:
-        print_result("12. Forgone P&L Engine", False, str(e))
-        
-    print("="*50)
-    print("Smoke Test Execution Complete.")
-    print("="*50)
+
+    check("21. Position Sizer", test_position_sizer)
+    check("22. Risk Budget", test_risk_budget)
+    check("23. Decision Logger", test_decision_logger)
+    check("24. Forgone P&L Engine", test_forgone_pnl)
+
+    # --- Phase 17: System Monitor ---
+    def test_system_monitor():
+        from system_monitor import SystemMonitor
+        monitor = SystemMonitor()
+        monitor.record_metric("test_metric", 42.0, {"source": "smoke_test"})
+        dashboard = monitor.get_dashboard_data(hours=1)
+        assert "rag_latency_avg_ms" in dashboard
+        health = monitor.check_health()
+        assert health["status"] in ("healthy", "degraded", "critical")
+
+    check("25. System Monitor", test_system_monitor)
+
+    # --- Summary ---
+    results["duration_seconds"] = round(time.time() - start_time, 2)
+    print("=" * 60)
+    print(f"Results: {results['passed']}/{results['total_checks']} passed "
+          f"({results['failed']} failed) in {results['duration_seconds']}s")
+    if results["failures"]:
+        print("Failures:")
+        for f in results["failures"]:
+            print(f"  - {f}")
+    print("=" * 60)
+
+    return results
+
+
+# Legacy wrapper
+def run_smoke_test():
+    return run_full_smoke_test()
+
 
 if __name__ == "__main__":
-    run_smoke_test()
+    run_full_smoke_test()

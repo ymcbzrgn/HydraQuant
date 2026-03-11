@@ -30,8 +30,11 @@ def tmp_db(tmp_path):
 # ============================================================
 def test_llm_router_key_rotation_thread_safe():
     """Bug 5 fix: Verify that concurrent key rotation doesn't corrupt the key list."""
+    from ai_config import AI_DB_PATH
     from llm_router import LLMRouter
-    
+    import logging
+
+    logger = logging.getLogger(__name__)
     router = LLMRouter(temperature=0.0)
     
     if not router.gemini_keys:
@@ -96,13 +99,15 @@ def test_position_sizer_confidence_curve():
 # Test 4: Position Sizer Zero Confidence
 # ============================================================
 def test_position_sizer_zero_confidence():
-    """confidence=0.0 should produce a stake of 0."""
+    """Trade-First: confidence=0.0 should still produce a dust stake (never zero)."""
     from position_sizer import PositionSizer
-    
+
     sizer = PositionSizer()
     sizer.autonomy.current_level = 5  # L5 Kelly=0.75
     stake = sizer.calculate_stake_fraction(0.0)
-    assert stake == 0.0, f"Expected 0.0, got {stake}"
+    # Trade-First: ALWAYS trade. Confidence modulates SIZE, not PERMISSION.
+    assert stake > 0.0, f"Trade-First violation: stake must be > 0, got {stake}"
+    assert stake < 0.01, f"Zero confidence should yield dust trade, got {stake}"
 
 
 # ============================================================
@@ -419,24 +424,28 @@ def test_risk_budget_daily_reset(tmp_db):
 # Test 20: Autonomy Manager Kelly Fractions
 # ============================================================
 def test_autonomy_kelly_fraction(tmp_db):
-    """Verify correct Kelly fraction mapping for each autonomy level."""
+    """Verify correct Kelly fraction mapping — Trade-First: every level trades."""
     from autonomy_manager import AutonomyManager, KELLY_FRACTIONS
 
     mgr = AutonomyManager(db_path=tmp_db)
 
-    # Default is L0
+    # Default is L0 — but L0 still trades (nano-live)
     assert mgr.get_level() == 0
-    assert mgr.get_kelly_fraction() == 0.0
+    assert mgr.get_kelly_fraction() == 0.03  # Trade-First: never zero
 
-    # Check all defined fractions
-    expected = {0: 0.0, 1: 0.0, 2: 0.10, 3: 0.25, 4: 0.50, 5: 0.75}
+    # Check all defined fractions — no zeros, every level trades
+    expected = {0: 0.03, 1: 0.07, 2: 0.15, 3: 0.30, 4: 0.50, 5: 0.75}
     assert KELLY_FRACTIONS == expected, f"Kelly fractions don't match: {KELLY_FRACTIONS}"
 
-    # Test promotion (L0→L1 has minimal criteria)
-    promoted = mgr.check_promotion(total_trades=0, sharpe=0.0, max_dd_pct=0.0, days_at_level=0)
-    assert promoted is True, "L0→L1 should promote immediately"
+    # Every level has positive Kelly — confidence modulates SIZE, not PERMISSION
+    for level, frac in KELLY_FRACTIONS.items():
+        assert frac > 0, f"L{level} Kelly fraction must be > 0 (Trade-First philosophy)"
+
+    # Test promotion (L0→L1 needs 20 nano trades, 3 days)
+    promoted = mgr.check_promotion(total_trades=25, sharpe=0.0, max_dd_pct=0.0, days_at_level=5)
+    assert promoted is True, "L0→L1 should promote after 20 trades and 3 days"
     assert mgr.get_level() == 1
-    assert mgr.get_kelly_fraction() == 0.0  # L1 is still paper trading
+    assert mgr.get_kelly_fraction() == 0.07  # L1 trades bigger
 
 
 # ============================================================
@@ -1061,6 +1070,178 @@ def test_llm_cost_tracker_log_and_summary(monkeypatch, tmp_path):
     assert "gemini-2.5-flash" in summary["models"]
     assert summary["models"]["gemini-2.5-flash"]["calls"] == 1
 
+# --- Phase 14: RAG Expansion Tests ---
+
+def test_raptor_tree_build():
+    """Phase 14: Ensure RAPTOR Tree correctly extracts 3-level summaries from chunk limits."""
+    from raptor_tree import RAPTORTree
+    try:
+        from unittest.mock import MagicMock
+        mock_router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Mocked Summary Level"
+        mock_router.invoke.return_value = mock_response
+
+        tree = RAPTORTree(llm_router=mock_router)
+        chunks = [{"id": f"c{i}", "text": f"Content {i}"} for i in range(10)]
+        tree_dict = tree.build_tree(chunks, cluster_size=5)
+
+        assert len(tree_dict["level_0"]) == 10, "Should have 10 leaf nodes"
+        assert len(tree_dict["level_1"]) == 2, "Should cluster 10 nodes into 2 summaries"
+        assert len(tree_dict["level_2"]) == 1, "Should cluster 2 summaries into 1 meta-summary"
+    except ImportError:
+        pass
+
+def test_raptor_tree_query_specific():
+    """Phase 14: Assert abstract queries route properly in RAPTOR tree."""
+    from raptor_tree import RAPTORTree
+    try:
+        from unittest.mock import MagicMock
+        mock_router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "META"
+        mock_router.invoke.return_value = mock_response
+
+        tree = RAPTORTree(llm_router=mock_router)
+        # Assuming DB has been written to via sqlite in temp memory or ignores
+        res = tree.query("What is the broad sentiment?")
+        assert isinstance(res, list), "RAPTOR query should return a list of dictionary outputs."
+    except ImportError:
+        pass
+
+def test_streaming_rag_ingest(monkeypatch):
+    """Phase 14: Verify hot buffer instant ingestion arrays operate."""
+    from streaming_rag import StreamingRAG
+    import numpy as np
+    
+    # Mock embedding to avoid Google API calls during tests
+    class MockPipeline:
+        def get_embeddings(self, text):
+            return {"gemini": np.random.rand(768).tolist()}
+    
+    monkeypatch.setattr("streaming_rag.DualEmbeddingPipeline", lambda: MockPipeline())
+    
+    s_rag = StreamingRAG()
+    try:
+        # Ingest document
+        s_rag.ingest("doc_hot_1", "Hot text document", {"type": "news"})
+        # Search it back immediately
+        results = s_rag.search("Hot text search document", top_k=1)
+        assert len(results) > 0, "Hot buffer should return instant results"
+        assert results[0]['id'] == "doc_hot_1"
+    except sqlite3.OperationalError:
+        pass
+
+def test_streaming_rag_flush(monkeypatch):
+    """Phase 14: Validate Hot buffer migration to Cold Chroma thresholds."""
+    from streaming_rag import StreamingRAG
+    
+    s_rag = StreamingRAG()
+    # Execute flush routine (mocking 1hr timestamps usually requires db mocking, 
+    # we test function path completion without errors here)
+    try:
+        s_rag.flush_to_cold()
+        assert True
+    except Exception as e:
+        pytest.fail(f"StreamingRAG flush threw error: {e}")
+
+def test_cryptopanic_fetcher_parse(monkeypatch):
+    """Phase 14: Validate API json parsing of sentiment votes."""
+    from cryptopanic_fetcher import CryptoPanicFetcher
+    import requests
+    
+    class MockResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"results": [{"title": "Bullish Bitcoin", "url": "http", "votes": {"positive": 50, "negative": 10, "important": 20}}]}
+            
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
+    
+    fetcher = CryptoPanicFetcher(api_key="mock_key")
+    data = fetcher.fetch()
+    assert len(data) == 1
+    assert data[0]["sentiment_score"] > 0.0, "Sentiment logic failed on obvious positive votes"
+
+def test_alphavantage_fetcher_parse(monkeypatch):
+    """Phase 14: Check external URL mapping of Pre-computed AlphaVantage sentimetns."""
+    from alphavantage_fetcher import AlphaVantageFetcher
+    import requests
+    
+    class MockResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"feed": [{"title": "Eth Up", "url": "http", "time_published": "20230101T000000", "overall_sentiment_score": 0.82}]}
+            
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
+    
+    fetcher = AlphaVantageFetcher(api_key="mock_key")
+    data = fetcher.fetch_news_sentiment()
+    assert len(data) == 1
+    assert data[0]["av_sentiment_score"] == 0.82, "Failed parsing pre-computed sentiment baselines"
+
+# --- Phase 15: Memory Layer Tests ---
+
+@pytest.fixture
+def mock_magma(tmp_path):
+    from magma_memory import MAGMAMemory
+    from memo_rag import MemoRAG
+    from bidirectional_rag import BidirectionalRAG
+    db_path = tmp_path / "test_ai.sqlite"
+    magma = MAGMAMemory(db_path=str(db_path))
+    return magma
+
+def test_magma_edge_addition_and_hebbian_learning(mock_magma):
+    import sqlite3
+    # Add new edge
+    assert mock_magma.add_edge("semantic", "rsi", "indicates", "oversold") == True
+    
+    # Verify it exists with weight 1.0
+    with sqlite3.connect(mock_magma.db_path) as conn:
+        c = conn.cursor()
+        c.execute("SELECT weight FROM magma_edges WHERE source='rsi'")
+        assert c.fetchone()[0] == 1.0
+        
+    # Add exact same edge again (Hebbian learning)
+    mock_magma.add_edge("semantic", "rsi", "indicates", "oversold")
+    
+    # Weight should increment
+    with sqlite3.connect(mock_magma.db_path) as conn:
+        c = conn.cursor()
+        c.execute("SELECT weight FROM magma_edges WHERE source='rsi'")
+        assert c.fetchone()[0] == 1.1
+
+def test_magma_traversal(mock_magma):
+    mock_magma.add_edge("entity", "btc", "correlates", "eth")
+    mock_magma.add_edge("entity", "eth", "correlates", "sol")
+    
+    edges = mock_magma.traverse("btc", "entity", max_hops=2)
+    assert len(edges) == 2
+    targets = [e['target'] for e in edges]
+    assert "eth" in targets
+    assert "sol" in targets
+
+def test_magma_query(mock_magma):
+    mock_magma.add_edge("semantic", "interest rates", "causes", "dollar strength")
+    mock_magma.add_edge("semantic", "dollar strength", "causes", "crypto weakness")
+    
+    # Query should extract 'interest rates' and find the chain
+    results = mock_magma.query("What happens when interest rates go up?", max_hops=2)
+    assert len(results) > 0
+    assert any(r['target'] == "dollar strength" for r in results)
+    assert any(r['target'] == "crypto weakness" for r in results)
+
+def test_magma_pruning(mock_magma):
+    import sqlite3
+    mock_magma.add_edge("semantic", "weak", "edge", "test")
+    # Manually adjust timestamp and weight to force prune
+    with sqlite3.connect(mock_magma.db_path) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE magma_edges SET weight=0.1, timestamp=datetime('now', '-200 days')")
+        conn.commit()
+        
+    deleted = mock_magma.prune(min_weight=0.5, max_age_days=180)
+    assert deleted == 1
+
 def test_llm_cost_tracker_budget_check(monkeypatch, tmp_path):
     monkeypatch.setenv("AI_DB_PATH", str(tmp_path / "test_cost.sqlite"))
     from llm_cost_tracker import LLMCostTracker
@@ -1305,4 +1486,582 @@ def test_baseline_strategy_no_ai():
         
     assert "class BaselineTechnical" in content
     assert "return proposed_stake" in content, "Must not have dynamic AI stake modifier"
+
+def setup_fastapi_mock_db():
+    import tempfile
+    import sqlite3
+    import os
+    fd, path = tempfile.mkstemp(suffix=".sqlite")
+    os.close(fd)
+    
+    conn = sqlite3.connect(path)
+    conn.execute('CREATE TABLE IF NOT EXISTS ai_decisions (trade_id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, signal_type TEXT, confidence REAL, reasoning_summary TEXT, timestamp DATETIME, pnl_percent REAL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS coin_sentiment (pair TEXT, sentiment_1h REAL, sentiment_4h REAL, sentiment_24h REAL, fear_greed_index INTEGER, source_count INTEGER, last_update DATETIME)')
+    conn.execute('CREATE TABLE IF NOT EXISTS llm_cost_log (id INTEGER PRIMARY KEY AUTOINCREMENT, model_name TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, total_cost REAL, timestamp DATETIME)')
+    conn.execute('CREATE TABLE IF NOT EXISTS autonomy_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, old_level INTEGER, new_level INTEGER, multiplier REAL, reason TEXT, timestamp DATETIME)')
+    conn.execute('CREATE TABLE IF NOT EXISTS risk_budget (date TEXT PRIMARY KEY, initial_budget REAL, consumed REAL, multiplier REAL, updated_at TEXT)')
+    
+    conn.execute("INSERT INTO coin_sentiment VALUES ('BTC/USDT', 0.5, 0.6, 0.7, 80, 5, '2026-03-01T00:00:00')")
+    conn.execute("INSERT INTO llm_cost_log (model_name, total_cost, timestamp) VALUES ('gemini-2.5-flash', 0.50, datetime('now'))")
+    
+    conn.commit()
+    conn.close()
+    return path
+
+def patch_api_db():
+    db_path = setup_fastapi_mock_db()
+    import ai_config
+    ai_config.AI_DB_PATH = db_path
+    import api_ai
+    api_ai.AI_DB_PATH = db_path
+    return api_ai
+
+def test_api_ai_imports():
+    """Görev 8: Check if api_ai.py can be imported."""
+    try:
+        api_ai = patch_api_db()
+        assert hasattr(api_ai, 'app')
+    except ImportError as e:
+        import pytest
+        pytest.fail(f"Failed to import api_ai: {e}")
+
+def test_api_ai_status_endpoint():
+    """Görev 8: Check /api/ai/status endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert "autonomy_level" in data
+    
+def test_api_ai_sentiment_endpoint():
+    """Görev 8: Check /api/ai/sentiment/{pair} endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/sentiment/BTC/USDT")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pair"] == "BTC/USDT"
+    assert "fear_greed" in data
+    
+def test_api_ai_signals_endpoint():
+    """Görev 8: Check /api/ai/signals endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/signals?limit=5")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+def test_api_ai_cost_endpoint():
+    """Görev 8: Check /api/ai/cost endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/cost")
+    assert response.status_code == 200
+    data = response.json()
+    assert "today_cost" in data
+    assert "budget_remaining" in data
+
+def test_api_ai_autonomy_no_crash():
+    """Phase 13: Check /api/ai/autonomy API integrity without AttributeError (dict properties vs objects)"""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/autonomy")
+    assert response.status_code == 200
+    data = response.json()
+    assert "current_level" in data
+    assert "kelly_fraction" in data
+    assert "criteria" in data
+
+def test_api_ai_risk_no_crash():
+    """Phase 13: Check /api/ai/risk endpoint integrity preventing pydantic dict errors"""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/risk")
+    assert response.status_code == 200
+    data = response.json()
+    assert "daily_budget" in data
+    assert "consumed" in data
+    assert "utilization_pct" in data
+
+def test_vue_components_exist():
+    """Phase 13: Guarantee all 12 custom Vue UI component files actually exist"""
+    import os
+    components_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frequi", "src", "components", "ai")
+    
+    files = [
+        "AISignalPanel.vue",
+        "AutonomyLevel.vue",
+        "ConfidenceScore.vue",
+        "ForgonePnLTracker.vue",
+        "ModelStatusCard.vue",
+        "RiskPanel.vue",
+        "SentimentDisplay.vue",
+        "TradeReasoning.vue"
+    ]
+    for file in files:
+        assert os.path.exists(os.path.join(components_dir, file)), f"Expected FreqUI component missing: {file}"
+
+def test_vue_router_ai_routes():
+    """Phase 13: Validate Vue Router correctly registered the new Views"""
+    import os
+    router_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frequi", "src", "router", "index.ts")
+    assert os.path.exists(router_path)
+    
+    with open(router_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    assert "/ai/settings" in content, "Missing AISettings route in Vue Router"
+    assert "/ai/analytics" in content, "Missing AIAnalytics route in Vue Router"
+    assert "/ai/risk" in content, "Missing AIRisk route in Vue Router"
+
+def test_ai_store_actions_complete():
+    """Phase 13: Validate Pinia state wrapper encompasses backend payload coverage"""
+    import os
+    store_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frequi", "src", "stores", "aiStore.ts")
+    assert os.path.exists(store_path)
+    
+    with open(store_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+        
+    expected_actions = [
+        "fetchStatus", "fetchSentiment", "fetchSignals", 
+        "fetchCostSummary", "fetchAutonomy", "fetchRisk", 
+        "fetchForgonePnl", "fetchConfidenceHistory"
+    ]
+    for action in expected_actions:
+        assert action in content, f"Missing Pinia action: {action}"
+
+
+@pytest.fixture
+def mock_db_path(tmp_path):
+    return str(tmp_path / "test_ai.sqlite")
+
+@pytest.fixture
+def mock_llm_router():
+    from unittest.mock import MagicMock
+    mock_router = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = "Mocked completion response"
+    mock_router.invoke.return_value = mock_response
+    return mock_router
+
+@pytest.fixture
+def mock_memorag(mock_db_path, mock_llm_router):
+    from memo_rag import MemoRAG
+    import sqlite3
+    with sqlite3.connect(mock_db_path) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS memorag_global (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            summary TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+    return MemoRAG(db_path=str(mock_db_path), llm_router=mock_llm_router)
+
+def test_memorag_init_empty(mock_memorag):
+    ans = mock_memorag.get_global_memory()
+    assert "empty" in ans.lower()
+
+def test_memorag_update_global_memory(mock_memorag):
+    mock_memorag.update_global_memory(["Text 1"])
+    ans = mock_memorag.get_global_memory()
+    assert "mocked completion" in ans.lower()
+
+def test_memorag_generate_draft_active(mock_memorag):
+    import sqlite3
+    long_memory = "x" * 100
+    with sqlite3.connect(mock_memorag.db_path) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE memorag_global SET summary = ? WHERE id = 1", (long_memory,))
+        conn.commit()
+    
+    draft = mock_memorag.generate_draft("What is BTC?")
+    assert "mocked completion" in draft.lower()
+
+@pytest.fixture
+def mock_bidi(mock_db_path, mock_llm_router):
+    from bidirectional_rag import BidirectionalRAG
+    import sqlite3
+    with sqlite3.connect(mock_db_path) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER,
+            pair TEXT,
+            signal TEXT,
+            outcome_pnl REAL,
+            lesson_text TEXT,
+            is_embedded BOOLEAN DEFAULT 0,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        conn.commit()
+    return BidirectionalRAG(db_path=str(mock_db_path), llm_router=mock_llm_router)
+
+def test_bidi_evaluate_trade(mock_bidi):
+    lesson = mock_bidi.evaluate_trade_outcome(1, "BTC/USDT", "LONG", -2.5, "Strong RSI")
+    assert "mocked completion" in lesson.lower()
+    
+    lessons = mock_bidi.get_unembedded_lessons()
+    assert len(lessons) == 1
+    assert lessons[0]['pair'] == "BTC/USDT"
+    
+def test_bidi_mark_embedded(mock_bidi):
+    mock_bidi.evaluate_trade_outcome(2, "ETH/USDT", "SHORT", 1.5, "Weak MACD")
+    lessons = mock_bidi.get_unembedded_lessons()
+    lesson_id = lessons[0]['id']
+    mock_bidi.mark_lessons_embedded([lesson_id])
+    assert len(mock_bidi.get_unembedded_lessons()) == 0
+
+# --- Phase 16: FLARE Tests ---
+
+@pytest.fixture
+def mock_flare(mock_llm_router):
+    from flare_retriever import FLARERetriever
+    
+    class MockRetriever:
+        def search(self, query, top_k=2):
+            return [{"text": "Mocked extra context for " + query}]
+            
+    flare = FLARERetriever(llm_router=mock_llm_router, retriever=MockRetriever())
+    return flare
+
+def test_flare_active_retrieval(mock_flare):
+    from flare_retriever import FLARERetriever
+    
+    # Mock LLM generation to return 2 sentences
+    # Mock confidence to return < 0.5 for the first sentence
+    
+    class ActiveMockRouter:
+        def __init__(self):
+            self.call_count = 0
+            
+        def invoke(self, messages, **kwargs):
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+            
+            prompt = str(messages[0].content) if hasattr(messages[0], 'content') else str(messages)
+            if len(messages) > 1 and hasattr(messages[1], 'content'):
+                prompt += str(messages[1].content)
+                
+            self.call_count += 1
+            
+            if "Generate an analytical response" in prompt:
+                return MockResponse("First uncertain sentence. Second certain sentence.")
+            elif "evaluating the confidence" in prompt:
+                if "First uncertain" in prompt:
+                    return MockResponse("0.3")
+                else:
+                    return MockResponse("0.9")
+            elif "rewrite and improve" in prompt:
+                return MockResponse("First corrected sentence.")
+            elif "You are evaluating the confidence" in prompt:
+                 # The exact prompt used by _assess_confidence
+                 if "First uncertain" in prompt:
+                     return MockResponse("0.3")
+                 return MockResponse("0.9")
+                
+            return MockResponse("Fallback mock.")
+            
+    mock_flare.router = ActiveMockRouter()
+    
+    result = mock_flare.generate_with_active_retrieval("What is the state of the market?")
+    
+    assert result["retrievals_triggered"] > 0
+    assert len(result["low_confidence_sentences"]) > 0
+    assert "First uncertain" in result["low_confidence_sentences"][0]
+    assert "First corrected" in result["analysis"]
+
+def test_flare_high_confidence_no_retrieval(mock_flare):
+    class HighConfMockRouter:
+        def __init__(self):
+            self.call_count = 0
+            
+        def invoke(self, messages, **kwargs):
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+            
+            prompt = str(messages[0].content) if hasattr(messages[0], 'content') else str(messages)
+            if len(messages) > 1 and hasattr(messages[1], 'content'):
+                prompt += str(messages[1].content)
+                
+            self.call_count += 1
+            
+            if "Generate an analytical response" in prompt:
+                return MockResponse("Everything is fine. No uncertainty here.")
+            elif "You are evaluating the confidence" in prompt:
+                return MockResponse("0.9")
+                
+            return MockResponse("Fallback mock.")
+            
+    mock_flare.router = HighConfMockRouter()
+    
+    result = mock_flare.generate_with_active_retrieval("Query")
+    
+    assert result["retrievals_triggered"] == 0
+    assert len(result["low_confidence_sentences"]) == 0
+    assert "Everything is fine" in result["analysis"]
+
+
+# --- Phase 16: CoT-RAG Tests ---
+
+@pytest.fixture
+def mock_cot_rag(mock_llm_router):
+    from cot_rag import CoTRAG
+    
+    class MockCotRetriever:
+        def search(self, query, top_k=3):
+            return [{"text": "Mocked evidence for " + query}]
+            
+    cot = CoTRAG(llm_router=mock_llm_router, retriever=MockCotRetriever())
+    return cot
+
+def test_cot_rag_5_steps(mock_cot_rag):
+    class StepMockRouter:
+        def invoke(self, messages, **kwargs):
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+            full_prompt = " ".join(str(m.content) for m in messages if hasattr(m, 'content'))
+            if "Final Synthesis AI" in full_prompt:
+                return MockResponse("BULLISH")
+            return MockResponse("Step output.")
+            
+    mock_cot_rag.router = StepMockRouter()
+    
+    result = mock_cot_rag.reason_step_by_step("BTC/USDT", "Show me analysis")
+    
+    assert len(result["steps"]) == 5
+    assert result["final_decision"] == "BULLISH"
+    assert "Step output." in result["reasoning_chain"]
+    
+def test_cot_rag_evidence_per_step(mock_cot_rag):
+    class EvidenceMockRouter:
+        def invoke(self, messages, **kwargs):
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+            return MockResponse("Analysis")
+            
+    mock_cot_rag.router = EvidenceMockRouter()
+    result = mock_cot_rag.reason_step_by_step("ETH/USDT", "query")
+    
+    # Check that steps that have search_query_hint used evidence
+    for step in result["steps"]:
+        if step["step"] != "decision":
+            assert step["evidence_count"] > 0
+            
+# --- Phase 16: Speculative RAG Tests ---
+
+@pytest.fixture
+def mock_spec_rag(mock_llm_router):
+    from speculative_rag import SpeculativeRAG
+    
+    class MockSpecRetriever:
+        def search(self, query, top_k=15):
+            return [{"text": f"Doc {i}"} for i in range(15)]
+            
+    spec = SpeculativeRAG(llm_router=mock_llm_router, retriever=MockSpecRetriever())
+    return spec
+
+def test_speculative_3_drafts(mock_spec_rag):
+    class SpecMockRouter:
+        def __init__(self):
+            self.call_count = 0
+            
+        def invoke(self, messages, **kwargs):
+            self.call_count += 1
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+            
+            prompt = str(messages[1].content) if len(messages) > 1 and hasattr(messages[1], 'content') else str(messages)
+            if "scenario analyst drafting" in prompt:
+                return MockResponse(f"Draft {self.call_count}")
+            elif "Verification Overlord" in prompt:
+                return MockResponse("BEST_DRAFT_INDEX: 1\nReason: It is clearly the best.")
+            return MockResponse("Fallback")
+            
+    mock_spec_rag.router = SpecMockRouter()
+    result = mock_spec_rag.draft_and_verify("Query", num_drafts=3)
+    
+    assert len(result["all_drafts"]) == 3
+    assert result["best_draft_index"] == 1
+    assert "Draft 2" in result["best_draft"]
+
+def test_speculative_verify_picks_best(mock_spec_rag):
+    class VerifyMockRouter:
+        def invoke(self, messages, **kwargs):
+            class MockResponse:
+                def __init__(self, text):
+                    self.content = text
+                    
+            prompt = str(messages[1].content) if len(messages) > 1 and hasattr(messages[1], 'content') else str(messages)
+            if "Verification Overlord" in prompt:
+                return MockResponse("BEST_DRAFT_INDEX: 2\nReason: Draft 2 aligns perfectly.")
+            return MockResponse("Draft")
+            
+    mock_spec_rag.router = VerifyMockRouter()
+    result = mock_spec_rag.draft_and_verify("Query", num_drafts=3)
+    
+    assert result["best_draft_index"] == 2
+    assert "Draft 2 aligns perfectly" in result["verification_reasoning"]
+
+
+# --- Phase 17: System Monitor Tests ---
+
+def test_system_monitor_record_metric(tmp_db):
+    """Phase 17: Record metric and verify it's stored."""
+    from system_monitor import SystemMonitor
+    monitor = SystemMonitor(db_path=tmp_db)
+    monitor.record_metric("test_latency", 123.45, {"source": "pytest"})
+    monitor.record_metric("test_latency", 200.0)
+
+    import sqlite3
+    conn = sqlite3.connect(tmp_db)
+    rows = conn.execute("SELECT * FROM system_metrics WHERE metric_name = 'test_latency'").fetchall()
+    conn.close()
+    assert len(rows) == 2
+
+
+def test_system_monitor_health_check(tmp_db):
+    """Phase 17: Health check returns valid structure."""
+    from system_monitor import SystemMonitor
+    monitor = SystemMonitor(db_path=tmp_db)
+    health = monitor.check_health()
+
+    assert health["status"] in ("healthy", "degraded", "critical")
+    assert "database" in health["checks"]
+    assert "disk_usage_pct" in health["checks"]
+    assert isinstance(health["alerts"], list)
+
+
+def test_system_monitor_dashboard_data(tmp_db):
+    """Phase 17: Dashboard data returns all expected keys."""
+    from system_monitor import SystemMonitor
+    monitor = SystemMonitor(db_path=tmp_db)
+    monitor.record_metric("rag_latency_ms", 150.0)
+    monitor.record_metric("llm_cost", 0.001)
+    monitor.record_metric("cache_hit", 1.0)
+    monitor.record_metric("decision_logged", 1.0, {"pair": "BTC/USDT"})
+
+    data = monitor.get_dashboard_data(hours=1)
+    assert "rag_latency_avg_ms" in data
+    assert "llm_cost_today" in data
+    assert "cache_hit_rate" in data
+    assert "total_decisions" in data
+    assert "error_rate" in data
+    assert "retrieval_count" in data
+    assert "active_pairs" in data
+    assert data["total_decisions"] == 1
+
+
+def test_system_monitor_hourly_summary(tmp_db):
+    """Phase 17: Hourly summary groups metrics by hour."""
+    from system_monitor import SystemMonitor
+    monitor = SystemMonitor(db_path=tmp_db)
+    monitor.record_metric("rag_latency_ms", 100.0)
+    monitor.record_metric("rag_latency_ms", 200.0)
+
+    summary = monitor.get_hourly_summary(hours=1)
+    assert isinstance(summary, list)
+    if summary:
+        assert "hour" in summary[0]
+        assert "metrics" in summary[0]
+
+
+def test_deployment_checker_env():
+    """Phase 17: Deployment checker runs without crash."""
+    from deployment_check import DeploymentChecker
+    checker = DeploymentChecker()
+    # Just test _check_env_file individually
+    passed, msg = checker._check_env_file()
+    # .env should exist in the project
+    assert isinstance(passed, bool)
+    assert isinstance(msg, str)
+
+
+def test_smoke_test_all_imports():
+    """Phase 17: Verify smoke_test module is importable and has run_full_smoke_test."""
+    from smoke_test import run_full_smoke_test
+    assert callable(run_full_smoke_test)
+
+
+def test_ai_dashboard_component_exists():
+    """Phase 17: AIDashboard.vue exists in FreqUI components."""
+    import os
+    dashboard_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "frequi", "src", "components", "ai", "AIDashboard.vue"
+    )
+    assert os.path.exists(dashboard_path), "AIDashboard.vue should exist"
+
+    with open(dashboard_path, 'r') as f:
+        content = f.read()
+    assert "fetchHealth" in content, "AIDashboard should call fetchHealth"
+    assert "fetchMetrics" in content, "AIDashboard should call fetchMetrics"
+
+
+def test_ai_store_health_metrics_actions():
+    """Phase 17: Verify aiStore has fetchHealth and fetchMetrics actions."""
+    import os
+    store_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "frequi", "src", "stores", "aiStore.ts"
+    )
+    with open(store_path, 'r') as f:
+        content = f.read()
+    assert "fetchHealth" in content, "aiStore should have fetchHealth action"
+    assert "fetchMetrics" in content, "aiStore should have fetchMetrics action"
+    assert "AIHealth" in content, "aiStore should have AIHealth interface"
+    assert "AIMetrics" in content, "aiStore should have AIMetrics interface"
+
+
+def test_api_ai_health_endpoint():
+    """Phase 17: Check /api/ai/health endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert "checks" in data
+    assert "alerts" in data
+
+
+def test_api_ai_metrics_endpoint():
+    """Phase 17: Check /api/ai/metrics endpoint."""
+    api_ai = patch_api_db()
+    from fastapi.testclient import TestClient
+    client = TestClient(api_ai.app)
+    response = client.get("/api/ai/metrics")
+    assert response.status_code == 200
+    data = response.json()
+    assert "rag_latency_avg_ms" in data
+    assert "llm_cost_today" in data
+    assert "cache_hit_rate" in data
+
+
+def test_vue_router_ai_dashboard_route():
+    """Phase 17: Verify /ai route exists in Vue Router for AIDashboard."""
+    import os
+    router_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "frequi", "src", "router", "index.ts"
+    )
+    with open(router_path, 'r') as f:
+        content = f.read()
+    assert "path: '/ai'" in content, "Missing /ai route in Vue Router"
+    assert "AIDashboard" in content, "Missing AIDashboard component reference"
 

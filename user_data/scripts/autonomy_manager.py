@@ -2,11 +2,15 @@
 Phase 3.5.4: Autonomy Level Management (L0-L5)
 Manages the bot's autonomy level based on track record.
 
+Trade-First Philosophy: Default=TRADE, not Default=BLOCK.
+Confidence modulates SIZE, never PERMISSION. Even L0 trades with minimum size.
+ONE hard constraint: max_position_cap (3% portfolio).
+
 Levels:
-  L0: Observer only — logs signals, no trades
-  L1: Paper trading — virtual positions tracked via Forgone P&L
-  L2: Micro-live — Kelly=0.10, max $50/trade
-  L3: Cautious-live — Kelly=0.25, max $200/trade
+  L0: Nano-live — Kelly=0.03, max $10/trade (minimum viable trade, full logging)
+  L1: Micro-live — Kelly=0.07, max $25/trade
+  L2: Small-live — Kelly=0.15, max $75/trade
+  L3: Cautious-live — Kelly=0.30, max $200/trade
   L4: Standard-live — Kelly=0.50, no cap
   L5: Full-auto — Kelly=0.75, no cap
 """
@@ -25,19 +29,20 @@ logger = logging.getLogger(__name__)
 from ai_config import AI_DB_PATH as DB_PATH
 
 # Kelly fraction mapping per autonomy level
+# Trade-First: EVERY level trades. Size grows with trust, never zero.
 KELLY_FRACTIONS = {
-    0: 0.0,   # Observer — no real trades
-    1: 0.0,   # Paper trading — virtual only
-    2: 0.10,  # Micro-live
-    3: 0.25,  # Cautious-live
+    0: 0.03,  # Nano-live — minimum viable trade, full logging
+    1: 0.07,  # Micro-live
+    2: 0.15,  # Small-live
+    3: 0.30,  # Cautious-live
     4: 0.50,  # Standard-live
     5: 0.75,  # Full-auto
 }
 
 # Promotion criteria: (min_trades, min_sharpe, max_dd_pct, min_days)
 PROMOTION_CRITERIA = {
-    0: (0, 0.0, 100.0, 0),       # L0→L1: Always immediately
-    1: (50, 0.0, 100.0, 7),      # L1→L2: 50 paper trades, 7 days
+    0: (20, 0.0, 100.0, 3),      # L0→L1: 20 real nano trades, 3 days (fast bootstrap)
+    1: (50, 0.0, 100.0, 7),      # L1→L2: 50 trades, 7 days
     2: (100, 0.5, 15.0, 30),     # L2→L3: 100 trades, Sharpe>0.5, DD<15%, 30 days
     3: (200, 0.8, 10.0, 60),     # L3→L4: 200 trades, Sharpe>0.8, DD<10%, 60 days
     4: (500, 1.0, 8.0, 90),      # L4→L5: 500 trades, Sharpe>1.0, DD<8%, 90 days
@@ -99,7 +104,7 @@ class AutonomyManager:
 
     def get_max_stake(self) -> Optional[float]:
         """Get max stake limit for current level. None = no limit."""
-        limits = {0: 0.0, 1: 0.0, 2: 50.0, 3: 200.0}
+        limits = {0: 10.0, 1: 25.0, 2: 75.0, 3: 200.0}
         return limits.get(self.current_level, None)
 
     def update_metrics(

@@ -22,6 +22,12 @@ class AIDecisionLogger:
         # Ensure DB is initialized (useful if running in isolated test)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._ensure_schema_up_to_date()
+        # Phase 15: Bidirectional RAG for post-trade lesson extraction
+        try:
+            from bidirectional_rag import BidirectionalRAG
+            self.bidi_rag = BidirectionalRAG(db_path=self.db_path)
+        except Exception:
+            self.bidi_rag = None
         
     def _ensure_schema_up_to_date(self):
         """Phase 6.1: Gracefully migrate old databases to contain outcome columns."""
@@ -161,8 +167,18 @@ class AIDecisionLogger:
                      logger.warning(f"Could not bind outcome to decision_id {decision_id}. ID not found.")
                      return False
                      
+                c.execute("SELECT pair, signal_type, reasoning_summary FROM ai_decisions WHERE id = ?", (decision_id,))
+                decision_info = c.fetchone()
+                     
                 conn.commit()
             
+            if decision_info and self.bidi_rag:
+                # Phase 15: Run Bidirectional RAG evaluation
+                pair = decision_info[0]
+                sig = decision_info[1]
+                reasoning = decision_info[2]
+                self.bidi_rag.evaluate_trade_outcome(decision_id, pair, sig, pnl_percent, reasoning)
+                
             logger.info(f"Successfully bound Trade Outcome [{pnl_percent:.2f}%] to Decision ID {decision_id}")
             return True
             

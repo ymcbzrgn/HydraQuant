@@ -21,6 +21,7 @@ from crag_evaluator import CRAGEvaluator
 from adaptive_router import AdaptiveQueryRouter
 from rag_fusion import RAGFusion
 from entity_extractor import KnowledgeGraphManager
+from magma_memory import MAGMAMemory
 
 # Load Env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -81,10 +82,22 @@ def analyze_technical(state: GraphState):
     except Exception as e:
         logger.warning(f"Technical Search Failed: {e}")
         search_res = "Unable to fetch live technical data."
+        
+    # Phase 15: MAGMA Graph Context (Semantic + Causal)
+    magma_context = ""
+    try:
+        magma = MAGMAMemory()
+        semantic_edges = magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
+        if semantic_edges:
+            ext_nodes = [f"{e['source']} -> {e['relation']} -> {e['target']}" for e in semantic_edges[:10]]
+            magma_context = "\\nMAGMA Historic Technical Correlations:\\n" + "\\n".join(ext_nodes)
+    except Exception as e:
+        logger.warning(f"MAGMA Technical lookup failed: {e}")
 
     prompt = f"""You are a master Crypto Technical Analyst. 
 Analyze these current technical indicators and market search results for {pair}:
 {search_res}
+{magma_context}
 
 Provide a dense, 2-3 sentence technical analysis. State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
 NEVER provide a final trading signal. ONLY provide your technical perspective."""
@@ -328,15 +341,46 @@ CONDUCT A STRUCTURED DEBATE:
 4. Make your final decision based on the WEIGHT OF EVIDENCE, not on any single agent.
 5. Confidence = bull_strength / (bull_strength + bear_strength), adjusted by analyst agreement.
 
+        
 Respond in valid JSON ONLY, no markdown:
 {{
    "signal": "BULLISH" | "BEARISH" | "NEUTRAL",
    "confidence": 0.00 to 1.00,
    "reasoning": "2-sentence synthesis of the debate outcome. Mention which agents agreed/disagreed."
 }}"""
-    
-    response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)])
-    
+
+    # Phase 16: CoT-RAG Integration
+    try:
+        from cot_rag import CoTRAG
+        cot_rag = CoTRAG(llm_router=exec_llm, retriever=retriever)
+        cot_results = cot_rag.reason_step_by_step(pair=pair, query=prompt)
+        cot_reasoning = cot_results.get("reasoning_chain", "")
+        if cot_reasoning:
+            prompt += f"\n\n[CoT-RAG 5-Step Deep Analysis]:\n{cot_reasoning}\nEnsure the final JSON decision factors in these evidence-backed step deductions."
+    except Exception as e:
+        logger.error(f"[CoT-RAG] Master Coordinator execution failed: {e}")
+    complexity = adaptive_router.classify(f"trading decision cross correlation {pair}")
+    if complexity == "COMPLEX":
+        logger.info("[MADAM-RAG] COMPLEX flow: Using Speculative RAG to draft scenarios.")
+        from speculative_rag import SpeculativeRAG
+        spec_rag = SpeculativeRAG(llm_router=exec_llm, retriever=retriever)
+        spec_result = spec_rag.draft_and_verify(query=prompt, num_drafts=3)
+        best_scenario = spec_result.get("best_draft", "")
+        if best_scenario:
+            prompt += f"\n\n[Speculative RAG Best Draft Scenario]:\n{best_scenario}"
+            
+        logger.info("[MADAM-RAG] COMPLEX flow: Using FLARE to verify reasoning before final JSON generation.")
+        flare_context = f"Tech: {tech}\nSent: {sent}\nNews: {news}\nBull: {bull}\nBear: {bear}"
+        flare_query = f"Synthesize a trading decision analysis for {pair} considering all evidence."
+        adaptive_router.flare.retriever = retriever
+        flare_res = adaptive_router.flare.generate_with_active_retrieval(query=flare_query, context=flare_context)
+        reasoning_draft = flare_res.get("analysis", "")
+        
+        json_prompt = prompt + f"\n\nUse this verified FLARE reasoning as a base: {reasoning_draft}"
+        response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=json_prompt)])
+    else:
+        response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)])
+
     content_raw = response.content
     if isinstance(content_raw, list):
         content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -409,10 +453,11 @@ def get_trading_signal(pair: str) -> dict:
     self_rag = SelfRAG()
     
     # b. Rule-based Retrieval Gating Check
-    if not self_rag.should_retrieve(query_str, {}):
-        minimal_resp = {"signal": "NEUTRAL", "confidence": 0.5, "reasoning": "Skipped retrieval due to gating rules."}
-        cache.put(query=query_str, response=json.dumps(minimal_resp), pair=pair)
-        return minimal_resp
+    # Trade-First: NEVER block a signal. If retrieval is skipped, proceed with reduced confidence.
+    # The position sizer will modulate size accordingly — confidence controls SIZE, not PERMISSION.
+    retrieval_gated = not self_rag.should_retrieve(query_str, {})
+    if retrieval_gated:
+        logger.info(f"[RAG] Retrieval gated for '{query_str[:40]}...' — proceeding with LLM-only analysis at reduced confidence.")
     
     # Initialize state
     inputs = {

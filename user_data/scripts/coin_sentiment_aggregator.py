@@ -21,11 +21,21 @@ COIN_MAPPINGS = {
 }
 
 # Phase 7: Tier Weighting - Give higher weight to established crypto news sites
+# Phase 14: Tier 2 (+0.8x) includes Crowd Sentiment from CryptoPanic
 TIER_WEIGHTS = {
+    # Tier 1
     "coindesk.com": 1.0, "cointelegraph.com": 1.0, "decrypt.co": 1.0, "theblock.co": 1.0,
+    # Tier 2
     "cryptoslate.com": 0.8, "cryptopotato.com": 0.8, "cryptonews.com": 0.8,
+    "cryptopanic": 0.8,  # Community sourced
+    "alphavantage": 0.8, # Pre-computed financial models
+    # Tier 3
     "chaingpt.org": 0.6, "finance.yahoo.com": 0.6
 }
+
+# Phase 14 imports
+from cryptopanic_fetcher import CryptoPanicFetcher
+from alphavantage_fetcher import AlphaVantageFetcher
 
 def _weighted_mean(df_subset: pd.DataFrame) -> float:
     """Calculates weighted sentiment mean based on news source tier."""
@@ -69,13 +79,46 @@ def compute_rolling_sentiment():
     """
     df = pd.read_sql_query(query, conn, parse_dates=['published_at'])
     
+    # Phase 14: AlphaVantage & CryptoPanic External Baseline Insertion
+    # Ideally these would be recorded into `market_news` immediately, 
+    # but we aggregate them directly here for real-time tier weighting
+    external_records = []
+    
+    # 1. CryptoPanic community votes
+    cp_fetcher = CryptoPanicFetcher()
+    for article in cp_fetcher.fetch(limit=20):
+        external_records.append({
+            'title': article['title'],
+            'summary': '',
+            'source': 'cryptopanic',
+            'published_at': pd.to_datetime(article['published_at']),
+            'sentiment_score': article['sentiment_score']
+        })
+        
+    # 2. AlphaVantage model sentiments
+    av_fetcher = AlphaVantageFetcher()
+    for article in av_fetcher.fetch_news_sentiment():
+        external_records.append({
+            'title': article['title'],
+            'summary': '',
+            'source': 'alphavantage',
+            # AlphaVantage uses 'YYYYMMDDTHHMMSS' format which needs parsing
+            'published_at': pd.to_datetime(article['published_at'], format='%Y%m%dT%H%M%S', errors='coerce').fillna(pd.Timestamp.utcnow()),
+            'sentiment_score': article['av_sentiment_score']
+        })
+        
+    if external_records:
+        df_ext = pd.DataFrame(external_records)
+        df = pd.concat([df, df_ext], ignore_index=True)
+        
     if df.empty:
         logger.info("No scored news found in the last 24h to aggregate.")
         conn.close()
         return
         
     # Ensure timezone-naive comparison for simplicity
-    df['published_at'] = df['published_at'].dt.tz_localize(None)
+    if df['published_at'].dt.tz is not None:
+        df['published_at'] = df['published_at'].dt.tz_localize(None)
     now = pd.Timestamp.utcnow().tz_localize(None)
     
     inserts = []

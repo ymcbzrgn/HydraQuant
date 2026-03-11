@@ -67,6 +67,15 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Phase 17: Every 5 minutes: System health check
+        self.scheduler.add_job(
+            self._health_check,
+            'interval', minutes=5,
+            id='health_check',
+            name='System Health Check',
+            replace_existing=True
+        )
+
         # Every 15 minutes: Embed new news into ChromaDB
         self.scheduler.add_job(
             self._embed_news,
@@ -74,6 +83,15 @@ class PipelineScheduler:
             id='embed_news',
             name='Embedding Pipeline',
             max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 14: Every 15 minutes: Flush StreamingRAG hot buffer to cold storage
+        self.scheduler.add_job(
+            self._flush_streaming_rag,
+            'interval', minutes=15,
+            id='flush_streaming',
+            name='StreamingRAG Hot->Cold Flush',
             replace_existing=True
         )
 
@@ -113,8 +131,26 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Phase 15: Sunday 03:00 UTC: Prune MAGMA Entity/Temporal Graphics
+        self.scheduler.add_job(
+            self._prune_magma_memory,
+            'cron', day_of_week='sun', hour=3, minute=0,
+            id='prune_magma',
+            name='MAGMAMemory Edge Pruning',
+            replace_existing=True
+        )
+
+        # Phase 15: Daily 04:30 UTC: Embed Bidirectional RAG lessons into VectorDB
+        self.scheduler.add_job(
+            self._embed_bidi_lessons,
+            'cron', hour=4, minute=30,
+            id='embed_bidi',
+            name='Bidirectional RAG Lesson Embedding',
+            replace_existing=True
+        )
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 6 jobs: fetch(5m), embed(15m), reset(day), cleanup(day), summary(day/week)")
+        logger.info("[Scheduler] Started with 11 jobs: fetch(5m), cache_cleanup(5m), health(5m), embed(15m), flush(15m), reset(day), cleanup(day), daily_summary(23:55), weekly_summary(sun), prune_magma(sun), embed_bidi(day)")
         return True
 
     def stop(self):
@@ -198,6 +234,85 @@ class PipelineScheduler:
             cache.cleanup_expired()
         except Exception as e:
             logger.error(f"[Scheduler:Job] Semantic cache cleanup failed: {e}")
+
+    def _flush_streaming_rag(self):
+        """Job: Flush expired hot documents from StreamingRAG into Chroma"""
+        logger.info("[Scheduler:Job] Flushing StreamingRAG hot buffer into cold storage...")
+        try:
+            from streaming_rag import StreamingRAG
+            s_rag = StreamingRAG()
+            s_rag.flush_to_cold()
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] StreamingRAG flush failed: {e}")
+
+    def _health_check(self):
+        """Job: Run system health check and record metrics."""
+        logger.info("[Scheduler:Job] Running health check...")
+        try:
+            from system_monitor import SystemMonitor
+            monitor = SystemMonitor()
+            health = monitor.check_health()
+            # Record scheduler heartbeat metric
+            monitor.record_metric("scheduler_job", 1.0, {"job": "health_check"})
+
+            if health["status"] == "critical":
+                logger.error(f"[Scheduler:Job] CRITICAL health: {health['alerts']}")
+                # Attempt Telegram alert
+                try:
+                    from telegram_notifier import AITelegramNotifier
+                    notifier = AITelegramNotifier()
+                    alert_msg = f"CRITICAL SYSTEM ALERT:\n" + "\n".join(health["alerts"])
+                    notifier.send_alert(alert_msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Health check failed: {e}")
+
+    def _embed_bidi_lessons(self):
+        """Job: Write back AI trade evaluation lessons into Vector DB."""
+        logger.info("[Scheduler:Job] Embedding Bidirectional RAG lessons...")
+        try:
+            from bidirectional_rag import BidirectionalRAG
+            bidi_rag = BidirectionalRAG()
+            lessons = bidi_rag.get_unembedded_lessons()
+            if not lessons:
+                return
+
+            # Push to VectorDB using same retriever
+            from hybrid_retriever import HybridRetriever
+            retriever = HybridRetriever(collection_name="crypto_news")
+            
+            docs, metas, ids = [], [], []
+            for l in lessons:
+                docs.append(l['lesson_text'])
+                metas.append({
+                    "type": "ai_lesson",
+                    "pair": l['pair'],
+                    "source": "bidirectional_rag",
+                    "signal": l['signal'],
+                    "outcome_pnl": float(l['outcome_pnl'])
+                })
+                ids.append(f"lesson_{l['id']}")
+                
+            retriever.add_documents(documents=docs, metadatas=metas, ids=ids)
+            
+            # Mark as embedded
+            bidi_rag.mark_lessons_embedded([l['id'] for l in lessons])
+            logger.info(f"[Scheduler:Job] Successfully integrated {len(lessons)} Bidirectional lessons.")
+            
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Bidirectional embedding failed: {e}")
+
+    def _prune_magma_memory(self):
+        """Job: Clean up old/weak linkages inside MAGMA memory tables."""
+        logger.info("[Scheduler:Job] Pruning MAGMAMemory edges...")
+        try:
+            from magma_memory import MAGMAMemory
+            magma = MAGMAMemory()
+            deleted = magma.prune(min_weight=0.5, max_age_days=180)
+            logger.info(f"[Scheduler:Job] Removed {deleted} MAGMA connections.")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] MAGMAMemory pruning failed: {e}")
 
     def _send_daily_summary(self):
         """Job: Aggregate stats and send daily Telegram summary."""
