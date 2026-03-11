@@ -142,7 +142,7 @@ class LLMRouter:
             self.fallback_2 = ChatOpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=self.openrouter_key,
-                model="deepseek/deepseek-r1:free", 
+                model="meta-llama/llama-3.3-70b-instruct:free",
                 temperature=self.temperature,
                 timeout=self.request_timeout,
                 max_retries=0
