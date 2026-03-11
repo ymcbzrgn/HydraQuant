@@ -78,6 +78,26 @@ const routes: Array<RouteRecordRaw> = [
     component: () => import('@/views/DownloadDataView.vue'),
   },
   {
+    path: '/ai',
+    name: 'AIDashboard',
+    component: () => import('@/components/ai/AIDashboard.vue'),
+  },
+  {
+    path: '/ai/settings',
+    name: 'AISettings',
+    component: () => import('@/views/AISettingsView.vue'),
+  },
+  {
+    path: '/ai/analytics',
+    name: 'AIAnalytics',
+    component: () => import('@/views/AIAnalyticsView.vue'),
+  },
+  {
+    path: '/ai/risk',
+    name: 'AIRisk',
+    component: () => import('@/views/RiskDashboardView.vue'),
+  },
+  {
     path: '/(.*)*',
     name: '404',
     component: () => import('@/views/Error404View.vue'),

@@ -135,15 +135,15 @@ class PositionSizer:
         self.bayesian_kelly = BayesianKelly()
         
     def _effective_max_risk(self) -> float:
-        """Max risk adjusted by autonomy level AND Bayesian Kelly."""
+        """Max risk adjusted by autonomy level AND Bayesian Kelly.
+        Trade-First: confidence modulates SIZE, never PERMISSION.
+        Every level trades — kelly_autonomy is always > 0.
+        """
         kelly_autonomy = self.autonomy.get_kelly_fraction()
-        if kelly_autonomy <= 0:
-            return 0.0  # L0/L1: no real trades
-        
         kelly_bayesian = self.bayesian_kelly.kelly_fraction()
         # Use the lesser of autonomy cap and Bayesian optimal fraction
-        # But never below 1% if autonomy allows trades
-        effective = min(self.max_risk, kelly_autonomy, max(kelly_bayesian, 0.01))
+        # But never below 0.5% — always trade, even if tiny
+        effective = min(self.max_risk, kelly_autonomy, max(kelly_bayesian, 0.005))
         return effective
         
     def calculate_stake_fraction(self, confidence: float, current_regime_modifier: float = 1.0) -> float:
@@ -160,15 +160,20 @@ class PositionSizer:
             float: A percentage multiplier for Freqtrade's custom_stake_amount (e.g. 0.02 is 2% of capital)
         """
         # 2. Apply the exponential trust curve (e.g. 0.5^2 = 0.25 penalty factor)
-        trust_curve_multiplier = math.pow(confidence, self.exponent)
-        
+        trust_curve_multiplier = math.pow(max(confidence, 0.01), self.exponent)
+
         # 3. Calculate raw fraction — capped by autonomy level's Kelly
         effective_risk = self._effective_max_risk()
         fraction = effective_risk * trust_curve_multiplier * current_regime_modifier
-        
-        # 4. Cap at Absolute Maximum Risk (Safety Net)
+
+        # 4. Trade-First floor: ALWAYS trade, even at dust size.
+        # Confidence modulates SIZE, never PERMISSION.
+        min_fraction = effective_risk * 0.01  # 1% of effective risk = dust trade
+        fraction = max(fraction, min_fraction)
+
+        # 5. Cap at Absolute Maximum Risk (Safety Net)
         final_fraction = min(fraction, effective_risk * 1.5)
-        
+
         return round(final_fraction, 4)
 
     def print_sizing_table(self):

@@ -7,7 +7,16 @@ import chromadb
 from flashrank import Ranker, RerankRequest
 from typing import List, Dict, Any
 
+from db import get_db_connection
 from rag_embedding import DualEmbeddingPipeline
+from rag_chunker import ContentChunker
+
+# Phase 14 & 15: StreamingRAG, RAPTOR, MAGMA
+from streaming_rag import StreamingRAG
+from raptor_tree import RAPTORTree
+from magma_memory import MAGMAMemory
+from memo_rag import MemoRAG
+from ai_config import AI_DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,12 @@ class HybridRetriever:
         except ImportError:
             logger.warning("BinaryQuantizer not available, disabling binary pre-filter.")
             self.binary_quantizer = None
+            
+        # Phase 14 Instantiations
+        self.streaming_rag = StreamingRAG()
+        self.raptor = RAPTORTree()
+        self.magma = MAGMAMemory()
+        self.memorag = MemoRAG()
 
     def _get_db_connection(self):
         conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -136,12 +151,22 @@ class HybridRetriever:
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         Executes the full Hybrid Search:
-        1. Query -> SQLite FTS5 (BM25) -> Top 300 candidates
-        2. Binary Quantization -> Pre-filter BM25 Top 300 to Top 30 via Hamming distance on BGE
-        3. Query -> Chroma (Dense Gemini) -> Top 30
-        4. RRF Fusion -> Top 20
-        5. FlashRank + ColBERT -> Top K
+        1. MemoRAG Draft -> Expands the original query with global conceptual context
+        2. Query -> SQLite FTS5 (BM25) -> Top 300 candidates
+        3. Binary Quantization -> Pre-filter BM25 Top 300 to Top 30 via Hamming distance on BGE
+        4. Query -> Chroma (Dense Gemini) -> Top 30
+        5. RRF Fusion -> Top 20
+        6. FlashRank + ColBERT -> Top K
         """
+        # Phase 15: Generate MemoRAG Global Draft Context
+        original_query = query
+        if self.memorag:
+            draft = self.memorag.generate_draft(query)
+            if draft and draft != query:
+                # Merge draft context for denser embedding vector extraction
+                query = f"{query} | Context Draft: {draft}"
+                logger.info("MemoRAG injected global draft into search query.")
+                
         query_embs = self.embedder.get_embeddings(query)
         
         # 1. Sparse Search (SQLite FTS5 BM25) - Widen the funnel
@@ -149,7 +174,7 @@ class HybridRetriever:
         try:
             with self._get_db_connection() as conn:
                 cursor = conn.cursor()
-                sanitized_query = query.replace('"', '').replace("'", "")
+                sanitized_query = original_query.replace('"', '').replace("'", "")
                 fts_query = f'"{sanitized_query}"'
                 
                 cursor.execute(
@@ -227,6 +252,51 @@ class HybridRetriever:
                         "text": display_text,
                         "meta": meta
                     })
+
+        if not passages:
+            passages = []
+
+        # Phase 14: StreamingRAG Integration (Boost recent hot memory)
+        try:
+            hot_docs = self.streaming_rag.search(query, top_k=3)
+            # Add directly to passages avoiding RRF decay
+            for hd in hot_docs:
+                # Add unique identifier preventing duplicate reranker issues
+                passages.append({
+                    "id": f"hot_{hd['id']}",
+                    "text": hd['content'],
+                    "meta": hd.get('metadata', {})
+                })
+                logger.info(f"StreamRAG injected '{hd['id']}' [Score: {hd['score']:.2f}]")
+        except Exception as e:
+            logger.error(f"StreamingRAG Search error: {e}")
+            
+        # Phase 14: RAPTOR Hierarchy Injection 
+        try:
+            raptor_summaries = self.raptor.query(query, tree_or_db=True)
+            for rs in raptor_summaries:
+                passages.append({
+                    "id": rs["id"],
+                    "text": rs["text"],
+                    "meta": {"type": "raptor_summary", "level": rs["level"]}
+                })
+        except Exception as e:
+            logger.error(f"RAPTOR Search error: {e}")
+            
+        # Phase 15: MAGMA Graph Context Extraction
+        try:
+            # Send the generic query into MAGMA memory searching all 4 graphs
+            magma_edges = self.magma.query(query, max_hops=1)
+            if magma_edges:
+                edge_strings = [f"{e['source']} --[{e['relation']}]--> {e['target']}" for e in magma_edges[:5]]
+                passages.append({
+                    "id": f"magma_context_{hash(query)}",
+                    "text": "MAGMA Multi-Graph Connections: " + "; ".join(edge_strings),
+                    "meta": {"type": "magma_context"}
+                })
+                logger.info(f"MAGMA added {len(edge_strings)} high-weight memory nodes to passages.")
+        except Exception as e:
+            logger.error(f"MAGMA Search error: {e}")
 
         if not passages:
             return []

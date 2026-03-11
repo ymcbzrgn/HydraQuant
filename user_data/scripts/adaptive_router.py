@@ -22,6 +22,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from hyde_generator import HyDEGenerator
 from rag_fusion import RAGFusion
 from self_rag import SelfRAG
+from flare_retriever import FLARERetriever
+from speculative_rag import SpeculativeRAG
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,10 @@ class AdaptiveQueryRouter:
         # Phase 3.4: RAG-Fusion for MEDIUM queries
         self.rag_fusion = RAGFusion(router=self.router)
         self.self_rag = SelfRAG(router=self.router)
+        # Phase 16: FLARE for dynamic generation augmentation
+        self.flare = FLARERetriever(llm_router=self.router)
+        # Phase 16: Speculative RAG for multi-draft generation
+        self.speculative_rag = SpeculativeRAG(llm_router=self.router)
 
     def classify(self, query: str) -> str:
         """

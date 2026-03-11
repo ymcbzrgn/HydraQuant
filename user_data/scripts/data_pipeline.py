@@ -14,12 +14,19 @@ sys.path.append(os.path.dirname(__file__))
 from rss_fetcher import fetch_rss_feeds
 from fng_fetcher import fetch_fng
 
-# NLP & Database Services
 from db import get_db_connection
 from sentiment_analyzer import analyze_unscored_news
 from rag_chunker import ContentChunker
 from hybrid_retriever import HybridRetriever
 from entity_extractor import KnowledgeGraphManager
+
+# Phase 14 Integrations
+from streaming_rag import StreamingRAG
+from raptor_tree import RAPTORTree
+from cryptopanic_fetcher import CryptoPanicFetcher
+from alphavantage_fetcher import AlphaVantageFetcher
+from magma_memory import MAGMAMemory
+from memo_rag import MemoRAG
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,12 @@ class DataPipeline:
     """
     def __init__(self):
         self.retriever = HybridRetriever(collection_name="crypto_news")
+        self.streaming_rag = StreamingRAG()
+        self.raptor = RAPTORTree()
+        self.crypto_panic = CryptoPanicFetcher()
+        self.alpha_vantage = AlphaVantageFetcher()
+        self.magma = MAGMAMemory()
+        self.memorag = MemoRAG()
         
     def run_pipeline(self):
         """Executes a single pass of the entire ingestion pipeline."""
@@ -41,6 +54,15 @@ class DataPipeline:
         try:
             fetch_fng()
             new_articles_count = fetch_rss_feeds()
+            
+            # Phase 14: Community & Pre-computed Sentiment Fetchers
+            crypto_panic_news = self.crypto_panic.fetch(limit=10)
+            alpha_news = self.alpha_vantage.fetch_news_sentiment()
+            
+            # We would typically inject these into the db or memory, 
+            # for Phase 14 we log integration metrics
+            logger.info(f"Fetched {len(crypto_panic_news)} CryptoPanic posts and {len(alpha_news)} from AlphaVantage.")
+            
         except Exception as e:
             logger.error(f"Failed during data fetch: {e}")
             new_articles_count = 0
@@ -155,20 +177,50 @@ class DataPipeline:
                     ids=ids_to_insert
                 )
                 
-            # Mark as embedded in SQLite
+            # Flag as embedded in SQLite
             if successful_db_ids:
                 format_strings = ','.join(['?'] * len(successful_db_ids))
                 c.execute(f"UPDATE market_news SET is_embedded = 1 WHERE id IN ({format_strings})", tuple(successful_db_ids))
                 conn.commit()
                 logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles.")
                 
-            # Phase 5.1: Extract Entities and build Knowledge Graph
+            # Phase 14: StreamingRAG Ingestion
+            for metadata, content, d_id in zip(metadatas_to_insert, docs_to_insert, ids_to_insert):
+                self.streaming_rag.ingest(doc_id=d_id, content=content, metadata=metadata)
+                
+            # Phase 14: Building RAPTOR Summary Tree locally in background
+            if docs_to_insert:
+                raptor_chunks = [{"id": r_id, "text": txt, "metadata": meta} 
+                                 for r_id, txt, meta in zip(ids_to_insert, docs_to_insert, metadatas_to_insert)]
+                # Bounded by 10 to not exhaust API constraints immediately upon bulk loads
+                self.raptor.build_tree(raptor_chunks[:10])
+                
+            # Phase 15: Update MemoRAG Global Summary
+            if docs_to_insert:
+                # Passing raw texts allows LLM to continuously shrink new info into the global context
+                self.memorag.update_global_memory(docs_to_insert)
+
+            # Phase 5.1 & Phase 15: Extract Entities and build MAGMA Knowledge Graph
             for article in articles:
                 if article['id'] in successful_db_ids:
                     try:
                         extracted = kg.extract_from_text(article['summary'], source_reference=article['url'])
-                        if extracted:
-                            logger.info(f"Extracted {len(extracted.get('entities', []))} entities for art_{article['id']}")
+                        if extracted and isinstance(extracted, dict) and 'entities' in extracted:
+                            entities = extracted['entities']
+                            logger.info(f"Extracted {len(entities)} entities for art_{article['id']}")
+                            
+                            # Phase 15: MAGMA Entity Graph
+                            # If two entities are extracted from the same article, we assume an 'entity' correlation edge
+                            if isinstance(entities, list):
+                                for i in range(len(entities)):
+                                    for j in range(i + 1, len(entities)):
+                                        if isinstance(entities[i], dict) and isinstance(entities[j], dict):
+                                            source_e = entities[i].get('name', 'UNKNOWN')
+                                            target_e = entities[j].get('name', 'UNKNOWN')
+                                            if source_e != 'UNKNOWN' and target_e != 'UNKNOWN':
+                                                # Bidirectional correlation
+                                                self.magma.add_edge("entity", source_e, "correlates", target_e, metadata={"source": article['url']})
+                                                self.magma.add_edge("entity", target_e, "correlates", source_e, metadata={"source": article['url']})
                     except Exception as e:
                         logger.warning(f"Entity extraction failed for art_{article['id']}: {e}")
                 
