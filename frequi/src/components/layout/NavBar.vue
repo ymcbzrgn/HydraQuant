@@ -5,8 +5,10 @@ import { useRoute } from 'vue-router';
 import Menu from 'primevue/menu';
 import type { MenuItem } from 'primevue/menuitem';
 import { breakpointsTailwind } from '@vueuse/core';
+import { useAiStore } from '@/stores/aiStore';
 
 const botStore = useBotStore();
+const aiStore = useAiStore();
 
 const settingsStore = useSettingsStore();
 const layoutStore = useLayoutStore();
@@ -14,6 +16,7 @@ const route = useRoute();
 const router = useRouter();
 const favicon = ref<Favico | undefined>(undefined);
 const pingInterval = ref<number>();
+const aiPollInterval = ref<number>();
 
 const breakpoints = useBreakpoints(breakpointsTailwind);
 
@@ -69,11 +72,19 @@ onBeforeUnmount(() => {
   if (pingInterval.value) {
     clearInterval(pingInterval.value);
   }
+  if (aiPollInterval.value) {
+    clearInterval(aiPollInterval.value);
+  }
 });
 
 onMounted(async () => {
   await settingsStore.loadUIVersion();
   pingInterval.value = window.setInterval(botStore.pingAll, 60000);
+  // AI Dashboard: fetch initial data + poll every 30 seconds
+  aiStore.fetchAll().catch(() => {});
+  aiPollInterval.value = window.setInterval(() => {
+    aiStore.fetchAll().catch(() => {});
+  }, 30000);
 });
 
 settingsStore.$subscribe((_, state) => {
@@ -153,12 +164,51 @@ const navItems = ref([
         botStore.activeBot.botFeatures.pairlistConfig,
     ),
   },
+  {
+    label: 'AI',
+    to: '/ai',
+    icon: 'i-mdi-robot',
+  },
 ]);
+
+const aiHealthBadge = computed(() => {
+  const status = aiStore.health?.status;
+  if (status === 'healthy') return 'online';
+  if (status === 'degraded') return 'degraded';
+  if (status === 'critical') return 'critical';
+  return '';
+});
 
 const menuItems = computed<MenuItem[]>(() => [
   {
     label: `V: ${settingsStore.uiVersion}`,
     disabled: true,
+  },
+  {
+    separator: true,
+  },
+  {
+    label: 'AI Dashboard',
+    icon: 'i-mdi-robot',
+    command: () => router.push('/ai'),
+  },
+  {
+    label: 'AI Analytics',
+    icon: 'i-mdi-chart-bar',
+    command: () => router.push('/ai/analytics'),
+  },
+  {
+    label: 'AI Risk',
+    icon: 'i-mdi-shield-alert',
+    command: () => router.push('/ai/risk'),
+  },
+  {
+    label: 'AI Settings',
+    icon: 'i-mdi-cog-outline',
+    command: () => router.push('/ai/settings'),
+  },
+  {
+    separator: true,
   },
   {
     label: 'Settings',

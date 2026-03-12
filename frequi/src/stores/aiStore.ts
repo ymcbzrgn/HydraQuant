@@ -43,6 +43,7 @@ export interface AIAutonomy {
 }
 
 export interface AIRisk {
+    portfolio_value: number;
     daily_budget: number;
     consumed: number;
     utilization_pct: number;
@@ -73,6 +74,25 @@ export interface AIMetrics {
     last_updated: string;
 }
 
+export interface AIPortfolio {
+    stake_currency: string;
+    total_balance: number;
+    free_balance: number;
+    in_trades: number;
+    assets: Record<string, any>;
+    total_portfolio_usd: number;
+    updated_at: string;
+}
+
+// Detect AI API URL: same host as the browser, port 8890
+function getDefaultAiApiUrl(): string {
+    if (typeof window !== 'undefined' && window.location) {
+        const host = window.location.hostname;
+        return `http://${host}:8890`;
+    }
+    return 'http://localhost:8890';
+}
+
 export const useAiStore = defineStore('ai', {
     state: () => ({
         status: null as AIStatus | null,
@@ -85,18 +105,33 @@ export const useAiStore = defineStore('ai', {
         confidenceHistory: [] as any[],
         health: null as AIHealth | null,
         metrics: null as AIMetrics | null,
+        portfolio: null as AIPortfolio | null,
         loading: false,
         error: null as string | null,
-        aiApiUrl: 'http://localhost:8890',
+        aiApiUrl: getDefaultAiApiUrl(),
+        lastFetchTime: null as Date | null,
+        isAiOnline: false,
     }),
+
+    getters: {
+        aiStatusBadge: (state) => {
+            if (!state.isAiOnline) return 'offline';
+            return state.health?.status || 'unknown';
+        },
+        portfolioValueFormatted: (state) => {
+            const val = state.portfolio?.total_portfolio_usd || state.risk?.portfolio_value || 0;
+            return `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        },
+    },
 
     actions: {
         async fetchStatus() {
             try {
                 const { data } = await axios.get<AIStatus>(`${this.aiApiUrl}/api/ai/status`);
                 this.status = data;
+                this.isAiOnline = true;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching status';
+                this.isAiOnline = false;
                 console.error('Failed to fetch AI Status', err);
             }
         },
@@ -108,7 +143,6 @@ export const useAiStore = defineStore('ai', {
                     this.sentiment[data.pair] = data;
                 }
             } catch (err: any) {
-                this.error = err.message || 'Error fetching sentiment';
                 console.error(`Failed to fetch AI Sentiment for ${pair}`, err);
             }
         },
@@ -117,7 +151,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AISignal[]>(`${this.aiApiUrl}/api/ai/signals?limit=${limit}`);
                 this.signals = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching signals';
                 console.error('Failed to fetch AI Signals', err);
             }
         },
@@ -126,7 +159,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AICostSummary>(`${this.aiApiUrl}/api/ai/cost`);
                 this.costSummary = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching cost summary';
                 console.error('Failed to fetch AI Cost', err);
             }
         },
@@ -135,7 +167,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AIAutonomy>(`${this.aiApiUrl}/api/ai/autonomy`);
                 this.autonomy = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching autonomy level';
                 console.error('Failed to fetch AI Autonomy', err);
             }
         },
@@ -144,7 +175,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AIRisk>(`${this.aiApiUrl}/api/ai/risk`);
                 this.risk = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching risk info';
                 console.error('Failed to fetch AI Risk', err);
             }
         },
@@ -153,7 +183,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AIForgonePnl>(`${this.aiApiUrl}/api/ai/forgone`);
                 this.forgonePnl = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching forgone PNL';
                 console.error('Failed to fetch AI Forgone PNL', err);
             }
         },
@@ -166,7 +195,6 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<any[]>(url);
                 this.confidenceHistory = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching confidence history';
                 console.error('Failed to fetch Confidence History', err);
             }
         },
@@ -174,8 +202,9 @@ export const useAiStore = defineStore('ai', {
             try {
                 const { data } = await axios.get<AIHealth>(`${this.aiApiUrl}/api/ai/health`);
                 this.health = data;
+                this.isAiOnline = true;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching health';
+                this.isAiOnline = false;
                 console.error('Failed to fetch AI Health', err);
             }
         },
@@ -184,8 +213,15 @@ export const useAiStore = defineStore('ai', {
                 const { data } = await axios.get<AIMetrics>(`${this.aiApiUrl}/api/ai/metrics`);
                 this.metrics = data;
             } catch (err: any) {
-                this.error = err.message || 'Error fetching metrics';
                 console.error('Failed to fetch AI Metrics', err);
+            }
+        },
+        async fetchPortfolio() {
+            try {
+                const { data } = await axios.get<AIPortfolio>(`${this.aiApiUrl}/api/ai/portfolio`);
+                this.portfolio = data;
+            } catch (err: any) {
+                console.error('Failed to fetch AI Portfolio', err);
             }
         },
         async fetchAll() {
@@ -194,17 +230,21 @@ export const useAiStore = defineStore('ai', {
             try {
                 await Promise.all([
                     this.fetchStatus(),
+                    this.fetchHealth(),
+                    this.fetchMetrics(),
                     this.fetchSignals(50),
                     this.fetchCostSummary(),
                     this.fetchAutonomy(),
                     this.fetchRisk(),
-                    this.fetchForgonePnl()
+                    this.fetchForgonePnl(),
+                    this.fetchPortfolio(),
                 ]);
+                this.lastFetchTime = new Date();
             } catch (err: any) {
-                this.error = 'Error fetching multiple AI endpoints';
+                this.error = 'Error fetching AI data';
             } finally {
                 this.loading = false;
             }
-        }
-    }
+        },
+    },
 });

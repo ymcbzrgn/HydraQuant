@@ -24,19 +24,19 @@ logger = logging.getLogger(__name__)
 
 class AIFreqtradeSizer(IStrategy):
     """
-    FreqAI-powered strategy focusing on the "Sizing not Blocking" motto.
-    Uses LightGBM under the hood and injects real-time SQLite sentiment
-    metrics into the feature set.
+    AI-powered strategy focusing on the "Sizing not Blocking" motto.
+    Uses our own LLM Router + RAG pipeline (not FreqAI) for trade decisions.
+    Injects real-time SQLite sentiment metrics into the feature set.
     """
     
     INTERFACE_VERSION = 3
 
-    # Enable FreqAI
     process_only_new_candles = True
     use_exit_signal = True
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
-    startup_candle_count = 200
+    can_short = True  # Futures: enable both LONG and SHORT
+    startup_candle_count = 60  # Enough for SMA 50 + ATR 14
 
     # Minimal ROI (handled mostly by AI and custom stoploss)
     minimal_roi = {
@@ -142,47 +142,39 @@ class AIFreqtradeSizer(IStrategy):
         self.ai_signal_cache[pair] = signal_data
         return signal_data
 
-    def feature_engineering_expand_all(self, dataframe: pd.DataFrame, period: int,
-                                       metadata: dict, **kwargs) -> pd.DataFrame:
-        """
-        Populate features for the AI model. Includes technicals AND our custom Sentiment DB metrics.
-        """
-        # --- 1. Technical Features ---
-        dataframe['%-rsi'] = ta.RSI(dataframe, timeperiod=14)
-        dataframe['%-mfi'] = ta.MFI(dataframe, timeperiod=14)
-        dataframe['%-adx'] = ta.ADX(dataframe, timeperiod=14)
-        dataframe['%-sma'] = ta.SMA(dataframe, timeperiod=20)
-        dataframe['%-ema'] = ta.EMA(dataframe, timeperiod=20)
-        
-        # Bollinger Bands
-        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
-        dataframe['%-bb_lowerband'] = bollinger['lowerband']
-        dataframe['%-bb_middleband'] = bollinger['middleband']
-        dataframe['%-bb_upperband'] = bollinger['upperband']
+    def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        """Compute technical indicators and sentiment features for sizing/stoploss."""
+        # Technical indicators
+        dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
+        dataframe['adx'] = ta.ADX(dataframe, timeperiod=14)
+        dataframe['ema_20'] = ta.EMA(dataframe, timeperiod=20)
+        dataframe['sma_50'] = ta.SMA(dataframe, timeperiod=50)
 
         macd = ta.MACD(dataframe)
-        dataframe['%-macd'] = macd['macd']
-        dataframe['%-macdsignal'] = macd['macdsignal']
-        dataframe['%-macdhist'] = macd['macdhist']
+        dataframe['macd'] = macd['macd']
+        dataframe['macdsignal'] = macd['macdsignal']
+        dataframe['macdhist'] = macd['macdhist']
 
-        # --- 2. Sentiment Features (DB Integration) ---
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
+        dataframe['bb_lower'] = bollinger['lowerband']
+        dataframe['bb_upper'] = bollinger['upperband']
+
+        # Sentiment features from SQLite (used by custom_stake_amount)
         conn = self._get_sqlite_connection()
         if conn:
             pair = metadata['pair']
-            base_coin = pair.split('/')[0] # e.g. BTC from BTC/USDT
-            
-            # Fetch Fear and Greed Index
+            base_coin = pair.split('/')[0]
             try:
-                fng_df = pd.read_sql_query("SELECT value as fng_value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1", conn)
-                current_fng = fng_df['fng_value'].iloc[0] if not fng_df.empty else 50
-                dataframe['%-fng_index'] = current_fng
-            except Exception as e:
-                logger.error(f"F&G fetch failed: {e}")
+                fng_df = pd.read_sql_query(
+                    "SELECT value as fng_value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1", conn)
+                dataframe['%-fng_index'] = fng_df['fng_value'].iloc[0] if not fng_df.empty else 50
+            except Exception:
                 dataframe['%-fng_index'] = 50
-
-            # Fetch Coin Rolling Sentiment
             try:
-                sent_df = pd.read_sql_query("SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", conn, params=(base_coin,))
+                sent_df = pd.read_sql_query(
+                    "SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling "
+                    "WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", conn, params=(base_coin,))
                 if not sent_df.empty:
                     dataframe['%-sentiment_1h'] = sent_df['sentiment_1h'].iloc[0]
                     dataframe['%-sentiment_4h'] = sent_df['sentiment_4h'].iloc[0]
@@ -191,15 +183,12 @@ class AIFreqtradeSizer(IStrategy):
                     dataframe['%-sentiment_1h'] = 0.0
                     dataframe['%-sentiment_4h'] = 0.0
                     dataframe['%-sentiment_24h'] = 0.0
-            except Exception as e:
-                logger.error(f"Sentiment fetch failed: {e}")
+            except Exception:
                 dataframe['%-sentiment_1h'] = 0.0
                 dataframe['%-sentiment_4h'] = 0.0
                 dataframe['%-sentiment_24h'] = 0.0
-
             conn.close()
         else:
-            # Fallback if DB is locked/missing
             dataframe['%-fng_index'] = 50
             dataframe['%-sentiment_1h'] = 0.0
             dataframe['%-sentiment_4h'] = 0.0
@@ -207,90 +196,76 @@ class AIFreqtradeSizer(IStrategy):
 
         return dataframe
 
-    def feature_engineering_expand_basic(self, dataframe: pd.DataFrame, metadata: dict, **kwargs) -> pd.DataFrame:
-        """Add non-shiftable features for FreqAI"""
-        dataframe['%-day_of_week'] = dataframe['date'].dt.dayofweek
-        dataframe['%-hour_of_day'] = dataframe['date'].dt.hour
-        return dataframe
-
-    def feature_engineering_standard(self, dataframe: pd.DataFrame, metadata: dict, **kwargs) -> pd.DataFrame:
-        """Standardizing features (already handled largely by FreqAI)"""
-        return dataframe
-
-    def set_freqai_targets(self, dataframe: pd.DataFrame, metadata: dict, **kwargs) -> pd.DataFrame:
-        """
-        Define what the model should predict.
-        Here we predict the max high and min low in the next 10 candles.
-        """
-        dataframe['&s-up_or_down'] = np.where(dataframe['close'].shift(-10) > dataframe['close'], "up", "down")
-        return dataframe
-
-    def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        dataframe = self.freqai.start(dataframe, metadata, self)
-        
-        # Basic indicators for stoploss/sizing logic outside AI
-        dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
-        return dataframe
-
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        enter_long = np.zeros(len(df), dtype=int)
         pair = metadata['pair']
-        
-        # Check if FreqAI predictions are available
-        if "do_predict" in df.columns:
-            # Sizing not blocking: If Technicals (AI) predicts "up", we ask the RAG Brain.
-            tech_up = (df['do_predict'] == 1) & (df['&s-up_or_down'] == "up")
-            
-            if self.dp.runmode.value in ('dry_run', 'live'):
-                last_time = df['date'].iloc[-1]
-                current_rate = df['close'].iloc[-1]
-                
-                # Phase 10: Invalidate semantic cache if sudden market movement is >3%
-                if len(df) > 1:
-                    prev_close = df['close'].iloc[-2]
-                    if prev_close > 0 and abs(current_rate - prev_close) / prev_close > 0.03:
-                        logger.info(f"Significant price movement >3% detected for {pair}. Invalidating semantic cache.")
-                        if not hasattr(self, '_semantic_cache'):
-                            from semantic_cache import SemanticCache
-                            self._semantic_cache = SemanticCache(db_path=self.db_path)
-                        self._semantic_cache.invalidate(pair=pair)
-                
-                ai_decision = self._get_ai_signal(pair, last_time)
-                
-                is_bullish = ai_decision['signal'] == 'BULLISH'
-                confidence = ai_decision.get('confidence', 0.0)
-                signal_type = ai_decision.get('signal', 'NEUTRAL')
-                
-                # Forgone P&L: Log EVERY AI signal — executed or not
-                if signal_type != 'NEUTRAL':
-                    was_executed = bool(tech_up.iloc[-1]) and is_bullish
-                    fid = self.forgone_engine.log_forgone_signal(
-                        pair=pair,
-                        signal_type="BULL" if signal_type == "BULLISH" else "BEAR",
-                        confidence=confidence,
-                        entry_price=float(current_rate),
-                        was_executed=was_executed
-                    )
-                    if fid and not was_executed:
-                        # Store for later resolution
-                        self._forgone_ids[pair] = fid
-                
-                enter_long = tech_up & is_bullish
-            else:
-                # Backtesting: Ignore RAG graph delay, just follow tech
-                enter_long = tech_up
-            
-        df['enter_long'] = enter_long
+        df['enter_long'] = 0
+        df['enter_short'] = 0
+
+        if self.dp.runmode.value in ('dry_run', 'live'):
+            last_time = df['date'].iloc[-1]
+            current_rate = df['close'].iloc[-1]
+
+            # Phase 10: Invalidate semantic cache if sudden market movement is >3%
+            if len(df) > 1:
+                prev_close = df['close'].iloc[-2]
+                if prev_close > 0 and abs(current_rate - prev_close) / prev_close > 0.03:
+                    logger.info(f"Significant price movement >3% detected for {pair}. Invalidating semantic cache.")
+                    if not hasattr(self, '_semantic_cache'):
+                        from semantic_cache import SemanticCache
+                        self._semantic_cache = SemanticCache(db_path=self.db_path)
+                    self._semantic_cache.invalidate(pair=pair)
+
+            ai_decision = self._get_ai_signal(pair, last_time)
+            signal_type = ai_decision.get('signal', 'NEUTRAL')
+            confidence = ai_decision.get('confidence', 0.0)
+            is_bullish = signal_type == 'BULLISH'
+            is_bearish = signal_type == 'BEARISH'
+
+            # Forgone P&L: Log EVERY AI signal — executed or not
+            if signal_type != 'NEUTRAL':
+                was_executed = is_bullish or is_bearish
+                fid = self.forgone_engine.log_forgone_signal(
+                    pair=pair,
+                    signal_type="BULL" if is_bullish else "BEAR",
+                    confidence=confidence,
+                    entry_price=float(current_rate),
+                    was_executed=was_executed
+                )
+                if fid and not was_executed:
+                    self._forgone_ids[pair] = fid
+
+            # Set entry signals based on AI decision (only last candle)
+            if is_bullish:
+                df.iloc[-1, df.columns.get_loc('enter_long')] = 1
+            elif is_bearish:
+                df.iloc[-1, df.columns.get_loc('enter_short')] = 1
+        else:
+            # Backtesting: Simple technical signals
+            if 'rsi' in df.columns and 'macd' in df.columns:
+                df.loc[(df['rsi'] < 35) & (df['macd'] > df['macdsignal']), 'enter_long'] = 1
+                df.loc[(df['rsi'] > 65) & (df['macd'] < df['macdsignal']), 'enter_short'] = 1
+
         return df
 
     def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        exit_long = np.zeros(len(df), dtype=int)
-        
-        if "do_predict" in df.columns:
-            # Exit if AI changes its mind to down
-            exit_long = (df['do_predict'] == 1) & (df['&s-up_or_down'] == "down")
-            
-        df['exit_long'] = exit_long
+        df['exit_long'] = 0
+        df['exit_short'] = 0
+
+        if self.dp.runmode.value in ('dry_run', 'live'):
+            # In live mode, exits are handled by custom_stoploss + ROI + AI reversal signals
+            pair = metadata['pair']
+            cached = self.ai_signal_cache.get(pair)
+            if cached:
+                if cached['signal'] == 'BEARISH':
+                    df.iloc[-1, df.columns.get_loc('exit_long')] = 1
+                elif cached['signal'] == 'BULLISH':
+                    df.iloc[-1, df.columns.get_loc('exit_short')] = 1
+        else:
+            # Backtesting: Technical exit signals
+            if 'rsi' in df.columns and 'macd' in df.columns:
+                df.loc[(df['rsi'] > 70) & (df['macd'] < df['macdsignal']), 'exit_long'] = 1
+                df.loc[(df['rsi'] < 30) & (df['macd'] > df['macdsignal']), 'exit_short'] = 1
+
         return df
 
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
