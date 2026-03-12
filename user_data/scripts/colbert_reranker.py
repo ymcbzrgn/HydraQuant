@@ -9,8 +9,8 @@ class ColBERTReranker:
     """ColBERTv2 Late Interaction Reranker. Evaluates fine-grained token-level match scores."""
     def __init__(self, model_name="jinaai/jina-colbert-v2"):
         logger.info(f"Loading ColBERT locally: {model_name} (CPU mode)")
-        # trust_remote_code=True is required for jina-colbert
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # trust_remote_code=True is required for jina-colbert (both tokenizer and model)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
         self.model.eval()
 

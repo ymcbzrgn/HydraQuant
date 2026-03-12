@@ -525,25 +525,19 @@ def get_trading_signal(pair: str) -> dict:
     
     return result_dict
 
-import signal as signal_module
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+_signal_executor = ThreadPoolExecutor(max_workers=2)
 
 def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 120) -> dict:
-    """Wraps get_trading_signal with a global timeout to prevent infinite hangs."""
-    def _timeout_handler(signum, frame):
-        raise TimeoutError(f"RAG pipeline exceeded {timeout_seconds}s for {pair}")
-
+    """Wraps get_trading_signal with a thread-based timeout (uvicorn-safe)."""
     try:
-        old_handler = signal_module.signal(signal_module.SIGALRM, _timeout_handler)
-        signal_module.alarm(timeout_seconds)
-        result = get_trading_signal(pair)
-        signal_module.alarm(0)
-        signal_module.signal(signal_module.SIGALRM, old_handler)
-        return result
-    except TimeoutError:
+        future = _signal_executor.submit(get_trading_signal, pair)
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError:
         logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Returning NEUTRAL.")
         return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "Pipeline timeout"}
     except Exception as e:
-        signal_module.alarm(0)
         logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
         return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"Pipeline error: {e}"}
 
