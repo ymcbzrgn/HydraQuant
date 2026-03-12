@@ -92,7 +92,7 @@ class RAGQualityEvaluator:
     """
 
     def __init__(self, router: Optional[LLMRouter] = None, db_path: str = DB_PATH):
-        self.router = router or LLMRouter(temperature=0.0, request_timeout=15)
+        self.router = router or LLMRouter(temperature=0.1, request_timeout=30)
         self.db_path = db_path
         self._ensure_table()
 
