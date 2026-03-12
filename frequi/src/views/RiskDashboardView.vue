@@ -1,97 +1,69 @@
 <template>
   <div class="p-6 max-w-7xl mx-auto space-y-6">
     <div class="flex items-center justify-between">
-      <h1 class="text-3xl font-bold flex items-center gap-3">
-        <i class="pi pi-shield text-primary"></i> Risk Oversight Dashboard
+      <h1 class="text-2xl font-bold flex items-center gap-2">
+        <i class="pi pi-shield text-primary"></i> Risk Oversight
       </h1>
-      <Tag severity="danger" value="Live Market Constraints"></Tag>
+      <Tag severity="danger" value="Live Constraints" />
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      
-      <!-- Primary Risk Controls -->
+
+      <!-- Left: Risk + Autonomy -->
       <div class="space-y-6">
         <RiskPanel />
         <AutonomyLevel />
       </div>
 
-      <!-- Secondary Risk Distributions -->
+      <!-- Right: Positions + Portfolio -->
       <div class="space-y-6">
-        <div class="card p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700">
-          <h2 class="text-xl font-bold mb-4">Position Allocation Risk</h2>
-          
-          <div class="flex flex-col gap-4">
-            <!-- Simulated Positions since actual pairs aren't tracked historically per risk endpoint yet -->
-            <div class="flex items-center justify-between p-3 border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 rounded">
-              <div class="flex items-center gap-3">
-                <i class="pi pi-bitcoin text-orange-500 text-xl"></i>
-                <div>
-                  <div class="font-bold">BTC/USDT</div>
-                  <div class="text-xs text-gray-500">Long • 2.5x Leverage</div>
-                </div>
-              </div>
-              <div class="text-right">
-                <div class="font-bold text-red-500">$500.00 at Risk</div>
-                <div class="text-xs text-gray-400">2.5% VaR Contribution</div>
+        <!-- Active Positions -->
+        <div class="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700">
+          <h2 class="text-lg font-bold mb-4">Active Positions</h2>
+
+          <div v-if="activePositions > 0" class="text-center py-4">
+            <div class="text-4xl font-black text-primary">{{ activePositions }}</div>
+            <div class="text-sm text-gray-500 mt-1">open positions (last 24h signals)</div>
+          </div>
+          <div v-else class="text-center py-6 text-gray-400 text-sm">
+            No active positions. AI pipeline is waiting for signals.
+          </div>
+
+          <!-- Portfolio breakdown if available -->
+          <div v-if="portfolioAssets.length > 0" class="mt-4 border-t dark:border-gray-700 pt-4">
+            <h3 class="text-sm font-semibold text-gray-500 mb-3">Portfolio Assets</h3>
+            <div class="space-y-2">
+              <div v-for="asset in portfolioAssets" :key="asset.currency"
+                   class="flex items-center justify-between p-2 border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 rounded text-sm">
+                <span class="font-bold font-mono">{{ asset.currency }}</span>
+                <span class="text-gray-500">${{ asset.usd.toFixed(2) }}</span>
               </div>
             </div>
-
-            <div class="flex items-center justify-between p-3 border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 rounded">
-              <div class="flex items-center gap-3">
-                <i class="pi pi-ethereum text-blue-500 text-xl"></i>
-                <div>
-                  <div class="font-bold">ETH/USDT</div>
-                  <div class="text-xs text-gray-500">Short • 1.0x Leverage</div>
-                </div>
-              </div>
-              <div class="text-right">
-                <div class="font-bold text-red-500">$250.00 at Risk</div>
-                <div class="text-xs text-gray-400">1.2% VaR Contribution</div>
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between p-3 border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 rounded opacity-50">
-              <div class="flex items-center gap-3">
-                <i class="pi pi-bolt text-yellow-500 text-xl"></i>
-                <div>
-                  <div class="font-bold">SOL/USDT</div>
-                  <div class="text-xs text-gray-500">Pending Execution</div>
-                </div>
-              </div>
-              <div class="text-right">
-                <div class="font-bold text-orange-500">$850.00 Allocated</div>
-                <div class="text-xs text-gray-400">Awaiting Autonomy Clearance</div>
-              </div>
-            </div>
-
           </div>
         </div>
 
-        <div class="card p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700">
-          <h2 class="text-xl font-bold mb-4">30-Day Drawdown Threshold</h2>
-          
-          <!-- Mock Chart visualization -->
-          <div class="h-48 w-full border-b border-l border-gray-200 dark:border-gray-700 relative p-4 pl-0">
-            <!-- Simulated safety lines -->
-            <div class="absolute w-full border-t border-dashed border-red-500 top-1/2 opacity-50 z-0"></div>
-            <div class="absolute text-[10px] text-red-500 right-2 top-[45%] z-0">Max Allowed (-15%)</div>
-            
-            <div class="absolute w-full border-t border-dashed border-orange-500 top-3/4 opacity-50 z-0"></div>
-            <div class="absolute text-[10px] text-orange-500 right-2 top-[70%] z-0">Warning Zone (-10%)</div>
-
-            <div class="w-full h-full flex items-end gap-1 relative z-10 px-8">
-              <div v-for="(val, index) in mockDrawdowns" :key="index"
-                   class="flex-1 bg-green-500 border-t"
-                   :class="{'bg-red-500': val < -10, 'bg-orange-500': val < -5 && val >= -10}"
-                   :style="{ height: `${100 + val}%` }"
-                   :title="`DD: ${val.toFixed(2)}%`">
-              </div>
+        <!-- Risk Summary -->
+        <div class="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700">
+          <h2 class="text-lg font-bold mb-4">Risk Summary</h2>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+            <div>
+              <div class="text-gray-500">Portfolio Value</div>
+              <div class="font-bold font-mono">${{ (aiStore.risk?.portfolio_value || 0).toLocaleString() }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500">Daily VaR Budget</div>
+              <div class="font-bold font-mono">${{ (aiStore.risk?.daily_budget || 0).toFixed(2) }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500">Budget Consumed</div>
+              <div class="font-bold font-mono">${{ (aiStore.risk?.consumed || 0).toFixed(2) }}</div>
+            </div>
+            <div>
+              <div class="text-gray-500">Error Rate (24h)</div>
+              <div class="font-bold font-mono">{{ ((aiStore.metrics?.error_rate || 0) * 100).toFixed(1) }}%</div>
             </div>
           </div>
-          <div class="text-center text-xs text-gray-400 mt-2">Historical Drawdown %</div>
-
         </div>
-
       </div>
 
     </div>
@@ -99,15 +71,39 @@
 </template>
 
 <script setup lang="ts">
+import { computed, onMounted } from 'vue';
+import { useAiStore } from '@/stores/aiStore';
+
 import RiskPanel from '@/components/ai/RiskPanel.vue';
 import AutonomyLevel from '@/components/ai/AutonomyLevel.vue';
-
 import Tag from 'primevue/tag';
 
-// Mock values simulating a stable baseline curving down into drawdown briefly 
-const mockDrawdowns = [
-  -1, -1.2, -0.8, -2.5, -4.0, -4.5, -8.2, -11.0, -12.5, -9.0, 
-  -7.5, -5.0, -4.2, -3.1, -2.0, -1.5, -0.5, 0, 0, -1.0, 
-  -0.5, -0.2, -2.0, -2.5, -1.0, -0.5, 0, -0.2, 0, 0
-];
+const aiStore = useAiStore();
+
+onMounted(async () => {
+  await Promise.all([
+    aiStore.fetchRisk(),
+    aiStore.fetchAutonomy(),
+    aiStore.fetchPortfolio(),
+    aiStore.fetchMetrics(),
+  ]);
+});
+
+const activePositions = computed(() => aiStore.risk?.active_positions || 0);
+
+const portfolioAssets = computed(() => {
+  const assets = aiStore.portfolio?.assets || {};
+  return Object.entries(assets)
+    .filter(([, info]) => {
+      if (typeof info === 'object' && info !== null && 'usd' in info) {
+        return (info as any).usd >= 1.0;
+      }
+      return false;
+    })
+    .map(([currency, info]) => ({
+      currency,
+      usd: (info as any).usd as number,
+    }))
+    .sort((a, b) => b.usd - a.usd);
+});
 </script>

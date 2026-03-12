@@ -90,9 +90,23 @@ def get_memorag_global():
     except Exception as e:
         return {"global_memory": f"Error loading memory: {e}", "status": "error"}
 
+def _get_fear_greed() -> int:
+    """Read latest Fear & Greed Index from DB."""
+    try:
+        with get_db_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                return int(row["value"])
+    except Exception:
+        pass
+    return 50  # neutral fallback
+
 @app.get("/api/ai/sentiment/{pair:path}")
 def get_sentiment(pair: str):
     """Belirli pair için sentiment verisi."""
+    fng = _get_fear_greed()
     with get_db_conn() as conn:
         try:
             row = conn.execute(
@@ -107,19 +121,19 @@ def get_sentiment(pair: str):
                     "sentiment_1h": row["sentiment_1h"],
                     "sentiment_4h": row["sentiment_4h"],
                     "sentiment_24h": row["sentiment_24h"],
-                    "fear_greed": 50,
+                    "fear_greed": fng,
                     "source_count": row["news_count_24h"],
                     "last_update": row["timestamp"]
                 }
         except sqlite3.OperationalError:
             pass
-            
+
     return {
         "pair": pair,
         "sentiment_1h": 0.0,
         "sentiment_4h": 0.0,
         "sentiment_24h": 0.0,
-        "fear_greed": 50,
+        "fear_greed": fng,
         "source_count": 0,
         "last_update": datetime.now(tz=timezone.utc).isoformat()
     }
@@ -162,21 +176,60 @@ def get_cost_summary():
     """LLM maliyet özeti."""
     cost_tracker = LLMCostTracker(db_path=AI_DB_PATH)
     summary = cost_tracker.get_daily_summary()
+    today_cost = summary.get("total_cost", 0.0)
+
+    # Read real daily budget from RiskBudgetManager (1% of portfolio by default)
+    try:
+        risk_mgr = RiskBudgetManager(db_path=AI_DB_PATH)
+        daily_budget = float(risk_mgr.daily_budget)
+    except Exception:
+        daily_budget = 10.0  # fallback
+
     return {
-        "today_cost": summary.get("total_cost", 0.0),
+        "today_cost": today_cost,
         "models": summary.get("calls_by_model", {}),
-        "budget_remaining": max(0.0, 1.0 - summary.get("total_cost", 0.0))
+        "budget_remaining": max(0.0, daily_budget - today_cost)
     }
 
 @app.get("/api/ai/autonomy")
 def get_autonomy():
     """Autonomy level detayları."""
     autonomy = AutonomyManager(db_path=AI_DB_PATH)
+
+    # Fetch promotion criteria as dict for frontend
+    raw_criteria = PROMOTION_CRITERIA.get(autonomy.current_level, ())
+    criteria_dict = {}
+    if len(raw_criteria) >= 4:
+        criteria_dict = {
+            "min_trades": raw_criteria[0],
+            "min_sharpe": raw_criteria[1],
+            "max_drawdown": raw_criteria[2] / 100.0,
+            "min_days": raw_criteria[3],
+        }
+
+    # Read autonomy state for basic history
+    history = []
+    try:
+        with get_db_conn() as conn:
+            row = conn.execute(
+                "SELECT level, promoted_at, total_trades, sharpe_estimate, "
+                "max_drawdown_pct, days_at_level, updated_at FROM autonomy_state WHERE id = 1"
+            ).fetchone()
+            if row and row["promoted_at"]:
+                history.append({
+                    "old_level": max(0, row["level"] - 1),
+                    "new_level": row["level"],
+                    "timestamp": row["promoted_at"],
+                    "reason": f"Promoted after {row['total_trades']} trades, Sharpe {row['sharpe_estimate']:.2f}"
+                })
+    except Exception:
+        pass
+
     return {
         "current_level": autonomy.current_level,
         "kelly_fraction": autonomy.get_kelly_fraction(),
-        "criteria": PROMOTION_CRITERIA.get(autonomy.current_level, {}),
-        "history": [] # Historic events placeholder
+        "criteria": criteria_dict,
+        "history": history
     }
 
 @app.get("/api/ai/risk")
@@ -197,12 +250,25 @@ def get_risk():
     consumed = float(risk_manager._consumed)
     utilization_pct = min(100.0, (consumed / daily_budget) * 100) if daily_budget > 0 else 0.0
 
+    # Count active positions (recent signals that are still pending outcome)
+    active_positions = 0
+    try:
+        with get_db_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM ai_decisions WHERE outcome_pnl IS NULL "
+                "AND timestamp >= datetime('now', '-24 hours')"
+            ).fetchone()
+            if row:
+                active_positions = row["cnt"]
+    except Exception:
+        pass
+
     return {
         "portfolio_value": portfolio_value,
         "daily_budget": daily_budget,
         "consumed": consumed,
         "utilization_pct": utilization_pct,
-        "active_positions": 0
+        "active_positions": active_positions
     }
 
 @app.get("/api/ai/forgone")
@@ -288,6 +354,187 @@ def get_portfolio():
             return {"total_balance": 0, "note": "No portfolio data yet. Bot has not synced."}
         except sqlite3.OperationalError:
             return {"total_balance": 0, "note": "portfolio_state table not created yet."}
+
+@app.get("/api/ai/market-sentiment")
+def get_market_sentiment():
+    """Genel piyasa sentiment özeti (Fear & Greed + top coins)."""
+    fng = _get_fear_greed()
+    sentiment_data = {"fear_greed": fng, "coins": {}}
+
+    try:
+        with get_db_conn() as conn:
+            rows = conn.execute(
+                "SELECT coin, sentiment_1h, sentiment_4h, sentiment_24h, news_count_24h, timestamp "
+                "FROM coin_sentiment_rolling ORDER BY timestamp DESC LIMIT 20"
+            ).fetchall()
+            seen = set()
+            for r in rows:
+                coin = r["coin"]
+                if coin not in seen:
+                    seen.add(coin)
+                    sentiment_data["coins"][coin] = {
+                        "sentiment_1h": r["sentiment_1h"],
+                        "sentiment_4h": r["sentiment_4h"],
+                        "sentiment_24h": r["sentiment_24h"],
+                        "news_count": r["news_count_24h"],
+                    }
+    except Exception:
+        pass
+
+    return sentiment_data
+
+@app.get("/api/ai/settings")
+def get_ai_settings():
+    """AI config read-only view."""
+    autonomy = AutonomyManager(db_path=AI_DB_PATH)
+    try:
+        risk_mgr = RiskBudgetManager(db_path=AI_DB_PATH)
+        daily_var_pct = risk_mgr.daily_var_pct
+        daily_budget = float(risk_mgr.daily_budget)
+    except Exception:
+        daily_var_pct = 0.01
+        daily_budget = 100.0
+
+    return {
+        "autonomy_level": autonomy.current_level,
+        "daily_var_pct": daily_var_pct,
+        "daily_budget": daily_budget,
+        "semantic_cache_ttl": 300,
+        "confidence_exponent": 2.0,
+        "rag_chunk_overlap": 100,
+    }
+
+@app.get("/api/ai/daily-stats")
+def get_daily_stats():
+    """Bugünkü trade istatistikleri (Daily P&L)."""
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    stats = {
+        "daily_pnl": 0.0,
+        "daily_pnl_pct": 0.0,
+        "closed_today": 0,
+        "wins": 0,
+        "losses": 0,
+        "best_trade": None,
+    }
+
+    try:
+        with get_db_conn() as conn:
+            rows = conn.execute(
+                "SELECT pair, outcome_pnl FROM ai_decisions "
+                "WHERE outcome_pnl IS NOT NULL AND date(timestamp) = ?",
+                (today,)
+            ).fetchall()
+
+            if rows:
+                total_pnl = 0.0
+                best_pnl = -float('inf')
+                best_pair = ""
+                for r in rows:
+                    pnl = float(r["outcome_pnl"])
+                    total_pnl += pnl
+                    if pnl > 0:
+                        stats["wins"] += 1
+                    elif pnl < 0:
+                        stats["losses"] += 1
+                    if pnl > best_pnl:
+                        best_pnl = pnl
+                        best_pair = r["pair"]
+                stats["closed_today"] = len(rows)
+                stats["daily_pnl"] = round(total_pnl, 2)
+
+                # Compute pct from portfolio value
+                portfolio_value = 10000.0
+                try:
+                    prow = conn.execute("SELECT total_balance FROM portfolio_state WHERE id = 1").fetchone()
+                    if prow and float(prow['total_balance']) > 0:
+                        portfolio_value = float(prow['total_balance'])
+                except Exception:
+                    pass
+                stats["daily_pnl_pct"] = round((total_pnl / portfolio_value) * 100, 2)
+                stats["best_trade"] = f"+${best_pnl:.2f} ({best_pair})" if best_pnl > 0 else f"${best_pnl:.2f} ({best_pair})"
+    except Exception:
+        pass
+
+    return stats
+
+
+@app.get("/api/ai/alerts")
+def get_alerts(limit: int = 20):
+    """Son sistem alertleri (health + autonomy + risk)."""
+    alerts: list = []
+
+    # Health alerts
+    try:
+        monitor = SystemMonitor(db_path=AI_DB_PATH)
+        health = monitor.check_health()
+        for a in health.get("alerts", []):
+            alerts.append({"level": "WARNING", "message": a, "timestamp": datetime.now(tz=timezone.utc).isoformat()})
+    except Exception:
+        pass
+
+    # Budget alert
+    try:
+        risk_mgr = RiskBudgetManager(db_path=AI_DB_PATH)
+        util = risk_mgr.budget_utilization()
+        if util >= 1.0:
+            alerts.append({"level": "ERROR", "message": f"Risk budget exceeded ({util*100:.0f}%)", "timestamp": datetime.now(tz=timezone.utc).isoformat()})
+        elif util >= 0.75:
+            alerts.append({"level": "WARNING", "message": f"Risk budget {util*100:.0f}% consumed", "timestamp": datetime.now(tz=timezone.utc).isoformat()})
+    except Exception:
+        pass
+
+    # Cost alert
+    try:
+        cost_tracker = LLMCostTracker(db_path=AI_DB_PATH)
+        daily_cost = cost_tracker.get_daily_cost()
+        if daily_cost > 5.0:
+            alerts.append({"level": "ERROR", "message": f"Daily API cost ${daily_cost:.2f} exceeds $5 budget", "timestamp": datetime.now(tz=timezone.utc).isoformat()})
+    except Exception:
+        pass
+
+    return alerts[:limit]
+
+
+@app.get("/api/ai/hypothetical")
+def get_hypothetical():
+    """$100 simülasyon portföyü durumu."""
+    result = {
+        "current_balance": 100.0,
+        "total_return_pct": 0.0,
+        "total_trades": 0,
+        "today_pnl_pct": 0.0,
+    }
+
+    try:
+        engine = ForgonePnLEngine(db_path=AI_DB_PATH)
+        hyp = engine.get_hypothetical_portfolio()
+        if hyp:
+            result.update(hyp)
+    except Exception:
+        pass
+
+    # Fallback: compute from ai_decisions if forgone engine doesn't have it
+    if result["total_trades"] == 0:
+        try:
+            with get_db_conn() as conn:
+                rows = conn.execute(
+                    "SELECT outcome_pnl FROM ai_decisions WHERE outcome_pnl IS NOT NULL ORDER BY timestamp ASC"
+                ).fetchall()
+                if rows:
+                    balance = 100.0
+                    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+                    today_pnl = 0.0
+                    for r in rows:
+                        pnl_pct = float(r["outcome_pnl"]) / 100.0
+                        balance *= (1 + pnl_pct * 0.01)  # Weighted
+                    result["current_balance"] = round(balance, 2)
+                    result["total_return_pct"] = round(balance - 100.0, 2)
+                    result["total_trades"] = len(rows)
+        except Exception:
+            pass
+
+    return result
+
 
 if __name__ == "__main__":
     import uvicorn

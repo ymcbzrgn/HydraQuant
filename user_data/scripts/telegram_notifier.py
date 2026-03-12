@@ -1,4 +1,5 @@
 import os
+import time
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 import httpx
@@ -6,11 +7,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Module-level alert cooldown: maps message_key → last_sent_timestamp
+_ALERT_COOLDOWNS: dict[str, float] = {}
+# Default cooldown: 6 hours (21600 seconds)
+_ALERT_COOLDOWN_SECS = 6 * 3600
+
 class AITelegramNotifier:
     def __init__(self, bot_token=None, chat_id=None):
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-        
+
         if not self.bot_token or not self.chat_id:
             logger.warning("Telegram bot token or chat ID not set. Notifications will be disabled.")
 
@@ -130,13 +136,27 @@ class AITelegramNotifier:
 
         self._send_message(msg)
 
-    def send_alert(self, message: str, level: str = "INFO"):
-        """Send critical alerts like budget warnings or autonomy level changes."""
+    def send_alert(self, message: str, level: str = "INFO", cooldown_secs: int = None):
+        """Send critical alerts with dedup cooldown to prevent spam.
+
+        Same alert message won't be re-sent within cooldown window (default 6h).
+        """
+        cooldown = cooldown_secs if cooldown_secs is not None else _ALERT_COOLDOWN_SECS
+
+        # Dedup check: skip if same message was sent recently
+        now = time.time()
+        if message in _ALERT_COOLDOWNS:
+            elapsed = now - _ALERT_COOLDOWNS[message]
+            if elapsed < cooldown:
+                logger.debug(f"Alert suppressed (cooldown {cooldown - elapsed:.0f}s remaining): {message}")
+                return
+
         icon = "⚠️"
         if level.upper() == "CRITICAL" or level.upper() == "ERROR":
             icon = "🔴"
         elif level.upper() == "WARNING":
             icon = "🟡"
-            
+
         msg = f"{icon} *ALERT*: {message}"
         self._send_message(msg)
+        _ALERT_COOLDOWNS[message] = now

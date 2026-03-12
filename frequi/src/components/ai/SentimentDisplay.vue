@@ -17,7 +17,7 @@
       </div>
       
       <!-- Multi-Timeframe -->
-      <div class="grid grid-cols-3 gap-2 pt-2 border-t dark:border-gray-700">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t dark:border-gray-700">
         <div class="text-center">
           <div class="text-xs text-gray-500">1H</div>
           <div class="font-bold text-sm" :class="getSentimentColor(sentiment.sentiment_1h)">{{ formatScore(sentiment.sentiment_1h) }}</div>
@@ -37,11 +37,10 @@
 </template>
 
 <script setup lang="ts">
-import { defineProps } from 'vue';
 import type { AISentiment } from '@/stores/aiStore';
 import ProgressBar from 'primevue/progressbar';
 
-const props = defineProps<{
+defineProps<{
   pair: string,
   sentiment: AISentiment | null
 }>();

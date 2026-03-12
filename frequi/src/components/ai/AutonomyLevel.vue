@@ -30,27 +30,27 @@
         </h3>
         <div class="grid grid-cols-2 gap-4 text-sm mt-2">
           <div>
-            <div class="text-gray-500">Min Win Rate</div>
-            <div class="font-medium font-mono text-green-600 dark:text-green-400">
-              {{ (aiStore.autonomy.criteria.min_win_rate * 100).toFixed(0) }}%
-            </div>
-          </div>
-          <div>
             <div class="text-gray-500">Min Trades</div>
             <div class="font-medium font-mono text-blue-600 dark:text-blue-400">
-              {{ aiStore.autonomy.criteria.min_trades }}
-            </div>
-          </div>
-          <div>
-            <div class="text-gray-500">Max Drawdown</div>
-            <div class="font-medium font-mono text-red-600 dark:text-red-400">
-              {{ (aiStore.autonomy.criteria.max_drawdown * 100).toFixed(1) }}%
+              {{ aiStore.autonomy.criteria.min_trades ?? '-' }}
             </div>
           </div>
           <div>
             <div class="text-gray-500">Min Sharpe</div>
             <div class="font-medium font-mono text-purple-600 dark:text-purple-400">
-              {{ aiStore.autonomy.criteria.min_sharpe.toFixed(2) }}
+              {{ aiStore.autonomy.criteria.min_sharpe?.toFixed(2) ?? '-' }}
+            </div>
+          </div>
+          <div>
+            <div class="text-gray-500">Max Drawdown</div>
+            <div class="font-medium font-mono text-red-600 dark:text-red-400">
+              {{ aiStore.autonomy.criteria.max_drawdown != null ? (aiStore.autonomy.criteria.max_drawdown * 100).toFixed(1) + '%' : '-' }}
+            </div>
+          </div>
+          <div>
+            <div class="text-gray-500">Min Days</div>
+            <div class="font-medium font-mono text-green-600 dark:text-green-400">
+              {{ aiStore.autonomy.criteria.min_days ?? '-' }}
             </div>
           </div>
         </div>
