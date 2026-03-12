@@ -82,6 +82,13 @@ class Binance(Exchange):
         super().__init__(*args, **kwargs)
         self._spot_delist_schedule_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
 
+    def _init_ccxt(self, exchange_config, sync, ccxt_kwargs):
+        api = super()._init_ccxt(exchange_config, sync, ccxt_kwargs)
+        # Binance Demo/Testnet: skip fetch_currencies (hits spot API, rejects futures-only keys)
+        if self._config.get("testnet", False):
+            api.has["fetchCurrencies"] = False
+        return api
+
     def get_proxy_coin(self) -> str:
         """
         Get the proxy coin for the given coin
