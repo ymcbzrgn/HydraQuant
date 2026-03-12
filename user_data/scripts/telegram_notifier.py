@@ -64,8 +64,25 @@ class AITelegramNotifier:
         msg += f"Autonomy level: {autonomy_level}\n"
         
         forgone_pnl = stats.get("forgone_pnl", 0.0)
-        msg += f"Forgone PNL: ${forgone_pnl:.2f} (signals NOT taken)"
-        
+        msg += f"Forgone PNL: ${forgone_pnl:.2f} (signals NOT taken)\n"
+
+        # $100 Hypothetical Portfolio
+        hyp = stats.get("hypothetical", {})
+        if hyp.get("total_trades", 0) > 0:
+            balance = hyp["current_balance"]
+            total_ret = hyp["total_return_pct"]
+            total_trades = hyp["total_trades"]
+            today_trades = hyp.get("today_trades", 0)
+            today_pnl = hyp.get("today_pnl_pct", 0.0)
+            sign = "+" if total_ret >= 0 else ""
+            today_sign = "+" if today_pnl >= 0 else ""
+            msg += f"\n{'='*24}\n"
+            msg += f"*$100 ile oynasaydin:*\n"
+            msg += f"Bakiye: *${balance:.2f}* ({sign}{total_ret:.2f}%)\n"
+            msg += f"Toplam: {total_trades} trade\n"
+            if today_trades > 0:
+                msg += f"Bugun: {today_trades} trade ({today_sign}{today_pnl:.2f}%)"
+
         self._send_message(msg)
 
     def send_weekly_summary(self, stats: dict):
@@ -76,8 +93,21 @@ class AITelegramNotifier:
         msg += f"Max Drawdown: {stats.get('max_drawdown', 0):.2f}%\n"
         
         forgone = stats.get("forgone_pnl_total", 0.0)
-        msg += f"Forgone PNL Total: ${forgone:.2f}"
-        
+        msg += f"Forgone PNL Total: ${forgone:.2f}\n"
+
+        # $100 Hypothetical Portfolio (Weekly)
+        hyp = stats.get("hypothetical", {})
+        if hyp.get("total_trades", 0) > 0:
+            balance = hyp["current_balance"]
+            total_ret = hyp["total_return_pct"]
+            best = hyp.get("best_trade_pct", 0.0)
+            worst = hyp.get("worst_trade_pct", 0.0)
+            sign = "+" if total_ret >= 0 else ""
+            msg += f"\n*$100 Simulasyon:*\n"
+            msg += f"Bakiye: *${balance:.2f}* ({sign}{total_ret:.2f}%)\n"
+            msg += f"En iyi trade: {best:+.2f}%\n"
+            msg += f"En kotu trade: {worst:+.2f}%"
+
         self._send_message(msg)
 
     def send_alert(self, message: str, level: str = "INFO"):

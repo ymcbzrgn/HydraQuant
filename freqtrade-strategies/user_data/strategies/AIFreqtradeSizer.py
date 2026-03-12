@@ -430,5 +430,12 @@ class AIFreqtradeSizer(IStrategy):
             logger.info(f"[BayesianKelly] Updated: {'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → win_p={self._bayesian_kelly.win_probability():.3f} kelly_f={self._bayesian_kelly.kelly_fraction():.4f}")
         except Exception as e:
             logger.warning(f"[BayesianKelly] Update failed: {e}")
-        
+
+        # Hypothetical $100 Portfolio: compound every closed trade
+        try:
+            pnl_pct_raw = (trade.calc_profit_ratio(rate) * 100) if hasattr(trade, 'calc_profit_ratio') else 0.0
+            self.forgone_engine.record_trade_for_portfolio(pair, pnl_pct_raw)
+        except Exception as e:
+            logger.warning(f"[Portfolio] Update failed: {e}")
+
         return True

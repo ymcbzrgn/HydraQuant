@@ -343,9 +343,12 @@ class PipelineScheduler:
             stats["autonomy_level"] = f"L{autonomy.current_level}"
             
             forgone_engine = ForgonePnLEngine()
-            f_summary = forgone_engine.generate_weekly_summary() # using weekly function to get total pnl
-            stats["forgone_pnl"] = f_summary.get("total_forgone_pnl", 0.0)
-            
+            f_summary = forgone_engine.weekly_summary()
+            stats["forgone_pnl"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
+
+            # $100 Hypothetical Portfolio
+            stats["hypothetical"] = forgone_engine.get_hypothetical_balance()
+
             notifier = AITelegramNotifier()
             notifier.send_daily_summary(stats)
             
@@ -366,9 +369,12 @@ class PipelineScheduler:
             }
             
             forgone_engine = ForgonePnLEngine()
-            f_summary = forgone_engine.generate_weekly_summary()
-            stats["forgone_pnl_total"] = f_summary.get("total_forgone_pnl", 0.0)
-            
+            f_summary = forgone_engine.weekly_summary()
+            stats["forgone_pnl_total"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
+
+            # $100 Hypothetical Portfolio
+            stats["hypothetical"] = forgone_engine.get_hypothetical_balance()
+
             notifier = AITelegramNotifier()
             notifier.send_weekly_summary(stats)
             

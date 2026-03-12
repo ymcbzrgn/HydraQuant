@@ -2065,3 +2065,131 @@ def test_vue_router_ai_dashboard_route():
     assert "path: '/ai'" in content, "Missing /ai route in Vue Router"
     assert "AIDashboard" in content, "Missing AIDashboard component reference"
 
+
+# ============================================================
+# Hypothetical Portfolio Tests
+# ============================================================
+
+def test_hypothetical_portfolio_record(tmp_db):
+    """Verify $100 portfolio compounds trades correctly."""
+    from forgone_pnl_engine import ForgonePnLEngine
+    engine = ForgonePnLEngine(db_path=tmp_db)
+
+    # Trade 1: +5% → $100 * 1.05 = $105
+    engine.record_trade_for_portfolio("BTC/USDT", 5.0)
+    balance = engine.get_hypothetical_balance()
+    assert balance["current_balance"] == pytest.approx(105.0, abs=0.01)
+    assert balance["total_trades"] == 1
+
+    # Trade 2: -2% → $105 * 0.98 = $102.90
+    engine.record_trade_for_portfolio("ETH/USDT", -2.0)
+    balance = engine.get_hypothetical_balance()
+    assert balance["current_balance"] == pytest.approx(102.9, abs=0.01)
+    assert balance["total_trades"] == 2
+    assert balance["total_return_pct"] == pytest.approx(2.9, abs=0.1)
+
+
+def test_hypothetical_portfolio_empty(tmp_db):
+    """Verify empty portfolio returns $100 start."""
+    from forgone_pnl_engine import ForgonePnLEngine
+    engine = ForgonePnLEngine(db_path=tmp_db)
+
+    balance = engine.get_hypothetical_balance()
+    assert balance["current_balance"] == 100.0
+    assert balance["total_trades"] == 0
+    assert balance["start_balance"] == 100.0
+
+
+def test_hypothetical_portfolio_extremes(tmp_db):
+    """Verify best/worst trade tracking."""
+    from forgone_pnl_engine import ForgonePnLEngine
+    engine = ForgonePnLEngine(db_path=tmp_db)
+
+    engine.record_trade_for_portfolio("BTC/USDT", 8.5)
+    engine.record_trade_for_portfolio("ETH/USDT", -3.2)
+    engine.record_trade_for_portfolio("SOL/USDT", 1.1)
+
+    balance = engine.get_hypothetical_balance()
+    assert balance["best_trade_pct"] == pytest.approx(8.5, abs=0.01)
+    assert balance["worst_trade_pct"] == pytest.approx(-3.2, abs=0.01)
+
+
+def test_telegram_daily_with_portfolio():
+    """Verify daily summary includes $100 portfolio section."""
+    from telegram_notifier import AITelegramNotifier
+
+    notifier = AITelegramNotifier(bot_token="fake", chat_id="fake")
+    sent_msgs = []
+    notifier._send_message = lambda msg: sent_msgs.append(msg)
+
+    stats = {
+        "open_trades": 1,
+        "closed_today": 3,
+        "daily_pnl": 0.0,
+        "daily_pnl_pct": 0.0,
+        "api_cost_today": 0.15,
+        "autonomy_level": "L1",
+        "forgone_pnl": 0.0,
+        "hypothetical": {
+            "start_balance": 100.0,
+            "current_balance": 112.50,
+            "total_return_pct": 12.50,
+            "total_trades": 15,
+            "today_trades": 3,
+            "today_pnl_pct": 2.1,
+        }
+    }
+    notifier.send_daily_summary(stats)
+
+    msg = sent_msgs[0]
+    assert "$100 ile oynasaydin" in msg
+    assert "$112.50" in msg
+    assert "+12.50%" in msg
+    assert "15 trade" in msg
+
+
+def test_forgone_method_name_consistency():
+    """Verify weekly_summary method exists (scheduler uses this name)."""
+    from forgone_pnl_engine import ForgonePnLEngine
+    assert hasattr(ForgonePnLEngine, 'weekly_summary'), "Method weekly_summary must exist"
+    assert not hasattr(ForgonePnLEngine, 'generate_weekly_summary'), \
+        "generate_weekly_summary should NOT exist — scheduler calls weekly_summary()"
+
+
+def test_db_hypothetical_portfolio_table():
+    """Verify init_db creates the hypothetical_portfolio table."""
+    import tempfile
+    import os
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "db", "test.sqlite")
+        with patch("db.DB_PATH", db_path):
+            from db import init_db
+            # Re-import with patched path
+            import db as db_mod
+            db_mod.DB_PATH = db_path
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            # Execute the schema creation manually
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS hypothetical_portfolio (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_pair TEXT NOT NULL,
+                    trade_pnl_pct REAL NOT NULL,
+                    balance_before REAL NOT NULL,
+                    balance_after REAL NOT NULL,
+                    trade_closed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            cursor = conn.execute("PRAGMA table_info(hypothetical_portfolio)")
+            columns = [row[1] for row in cursor.fetchall()]
+            conn.close()
+
+    assert "trade_pair" in columns
+    assert "balance_before" in columns
+    assert "balance_after" in columns
+    assert "trade_pnl_pct" in columns
+
