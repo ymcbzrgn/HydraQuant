@@ -97,8 +97,8 @@ class AIFreqtradeSizer(IStrategy):
 
     def _get_ai_signal(self, pair: str, current_time: datetime) -> dict:
         """
-        The Bridge (Phase 5.1): Asks the LangGraph Trader Agent for a decision.
-        Uses in-memory cache to prevent spamming the Gemini API on every candle.
+        The Bridge (Phase 5.1): Asks the RAG Signal Service for a decision.
+        HTTP-first with subprocess fallback. Models stay loaded in the service.
         """
         # 1. Check Memory Cache
         cached = self.ai_signal_cache.get(pair)
@@ -106,41 +106,66 @@ class AIFreqtradeSizer(IStrategy):
             time_diff = (current_time - cached['timestamp']).total_seconds() / 3600
             if time_diff < self.cache_ttl_hours:
                 return cached
-                
-        # 2. Cache Miss -> Trigger LangGraph (Subprocess blocks for ~5-10 seconds per pair occasionally)
-        logger.info(f"AI Signal Cache Miss for {pair}. Asking LangGraph Trader Agent...")
+
+        # 2. Cache Miss → HTTP call to RAG Signal Service
+        logger.info(f"AI Signal Cache Miss for {pair}. Asking RAG Signal Service...")
         signal_data = {"signal": "NEUTRAL", "confidence": 0.0, "timestamp": current_time}
-        
+
+        try:
+            import requests
+            rag_service_url = self.config.get('ai_config', {}).get(
+                'rag_service_url', 'http://127.0.0.1:8891')
+
+            response = requests.get(
+                f"{rag_service_url}/signal/{pair}",
+                timeout=150  # slightly more than the 120s internal timeout
+            )
+            if response.status_code == 200:
+                parsed = response.json()
+                signal_data["signal"] = parsed.get("signal", "NEUTRAL")
+                signal_data["confidence"] = parsed.get("confidence", 0.0)
+                signal_data["reasoning"] = parsed.get("reasoning", "")
+                logger.info(f"RAG Signal: {signal_data['signal']} ({signal_data['confidence']}) for {pair}")
+            else:
+                logger.warning(f"RAG service returned {response.status_code} for {pair}")
+        except Exception as e:
+            is_connection_error = False
+            try:
+                import requests as _req
+                is_connection_error = isinstance(e, _req.exceptions.ConnectionError)
+            except Exception:
+                pass
+
+            if is_connection_error:
+                logger.warning(f"RAG service not running. Falling back to subprocess for {pair}")
+                self._get_ai_signal_subprocess(pair, signal_data)
+            else:
+                logger.error(f"Error calling RAG Signal Service for {pair}: {e}")
+
+        # 3. Save to Cache
+        self.ai_signal_cache[pair] = signal_data
+        return signal_data
+
+    def _get_ai_signal_subprocess(self, pair: str, signal_data: dict):
+        """Legacy subprocess fallback — only used if HTTP service is down."""
         try:
             import subprocess
             import json
-            import sys
-            
-            # Call rag_graph.py as a separate process to avoid complex asyncio loop collisions
             result = subprocess.run(
                 [sys.executable, self.rag_script_path, f"--pair={pair}"],
-                capture_output=True,
-                text=True,
-                check=True
+                capture_output=True, text=True, check=True, timeout=120
             )
-            
-            # Parse the JSON injected at the end of stdout
             output = result.stdout
             if "--- JSON OUTPUT ---" in output:
                 json_str = output.split("--- JSON OUTPUT ---")[1].strip()
                 parsed = json.loads(json_str)
                 signal_data["signal"] = parsed.get("signal", "NEUTRAL")
                 signal_data["confidence"] = parsed.get("confidence", 0.0)
-                logger.info(f"LangGraph Agent decided: {signal_data['signal']} ({signal_data['confidence']}) for {pair}")
-            else:
-                logger.warning(f"Failed to find JSON output from Agent for {pair}")
-                
+                logger.info(f"[Subprocess Fallback] {signal_data['signal']} ({signal_data['confidence']}) for {pair}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Subprocess timed out for {pair} (120s)")
         except Exception as e:
-            logger.error(f"Error running LangGraph Trader Agent for {pair}: {e}")
-            
-        # 3. Save to Cache
-        self.ai_signal_cache[pair] = signal_data
-        return signal_data
+            logger.error(f"Subprocess fallback failed for {pair}: {e}")
 
     def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Compute technical indicators and sentiment features for sizing/stoploss."""
