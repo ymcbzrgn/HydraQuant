@@ -21,6 +21,8 @@ class SemanticCache:
         import ai_config
         self.db_path = db_path if db_path is not None else ai_config.AI_DB_PATH
         self.similarity_threshold = similarity_threshold
+        # Cache genai client — was creating new httpx client per _get_embedding() call
+        self._genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         self._init_db()
 
     def _init_db(self):
@@ -49,13 +51,12 @@ class SemanticCache:
     ]
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         for model_cfg in self._EMBEDDING_MODELS:
             try:
                 kwargs = {"model": model_cfg["name"], "contents": text}
                 if model_cfg.get("dims"):
                     kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
-                result = client.models.embed_content(**kwargs)
+                result = self._genai_client.models.embed_content(**kwargs)
                 emb = np.array(result.embeddings[0].values, dtype=np.float32)
                 return emb
             except Exception as e:

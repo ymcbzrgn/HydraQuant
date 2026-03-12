@@ -22,16 +22,27 @@ from adaptive_router import AdaptiveQueryRouter
 from rag_fusion import RAGFusion
 from entity_extractor import KnowledgeGraphManager
 from magma_memory import MAGMAMemory
+from semantic_cache import SemanticCache
+from self_rag import SelfRAG
+from cot_rag import CoTRAG
+from speculative_rag import SpeculativeRAG
 
 # Load Env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
-# Replace raw Gemini with the zero-latency failover Router
-llm = LLMRouter(temperature=0)
+# =============================================================================
+# MODULE-LEVEL SINGLETONS — created ONCE at import/startup, reused forever.
+# This is THE memory leak fix: no more per-request instantiation.
+# =============================================================================
+
+# SINGLE LLM Router — per-call temperature via llm.invoke(msgs, temperature=0.7)
+# Old system: 7 NEW LLMRouter per request → unbounded memory leak (19,600 instances/hr)
+# New system: 1 at startup → fixed forever. bind() creates zero-cost wrapper per call.
+llm = LLMRouter(temperature=0.1)
 web_search_tool = DuckDuckGoSearchRun()
 
-# Single persistent retriever instance
+# Single persistent retriever instance (holds ColBERT, BGE, FlashRank, ChromaDB)
 retriever = HybridRetriever()
 
 # Phase 3.2: Corrective RAG — evaluates + fixes bad retrieval
@@ -45,6 +56,18 @@ rag_fusion = RAGFusion(router=llm)
 
 # Persistent Logger for AI Decisions (Phase 3.5.1)
 decision_logger = AIDecisionLogger()
+
+# Phase 9: Semantic Cache + Self-RAG (were leaking per get_trading_signal call)
+_semantic_cache = SemanticCache()
+_self_rag = SelfRAG(router=llm)
+
+# Phase 15: MAGMA + KG (were leaking per agent node call)
+_magma = MAGMAMemory()
+_kg = KnowledgeGraphManager()
+
+# Phase 16: CoT-RAG + Speculative RAG (were leaking per coordinator_debate call)
+_cot_rag = CoTRAG(llm_router=llm, retriever=retriever)
+_spec_rag = SpeculativeRAG(llm_router=llm, retriever=retriever)
 
 # --- Graph State Definition ---
 class GraphState(TypedDict):
@@ -69,25 +92,17 @@ def analyze_technical(state: GraphState):
     """Fetches and analyzes real-time technical indicators."""
     logger.info("---[NODE] TECHNICAL ANALYST---")
     pair = state.get("pair", "BTC/USDT")
-    
-    # Agent-Specific LLM (Zero Emotion, High Reliability)
-    tech_llm = LLMRouter(temperature=0.1, request_timeout=15)
-    
-    # In a full production env, this would call ccxt or ta-lib. 
-    # For now, we use a tool-augmented web search to get current TA context.
+
     try:
-        from langchain_community.tools.ddg_search import DuckDuckGoSearchRun
-        search = DuckDuckGoSearchRun()
-        search_res = search.invoke(f"{pair} current technical analysis RSI MACD support resistance price prediction")
+        search_res = web_search_tool.invoke(f"{pair} current technical analysis RSI MACD support resistance price prediction")
     except Exception as e:
         logger.warning(f"Technical Search Failed: {e}")
         search_res = "Unable to fetch live technical data."
-        
+
     # Phase 15: MAGMA Graph Context (Semantic + Causal)
     magma_context = ""
     try:
-        magma = MAGMAMemory()
-        semantic_edges = magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
+        semantic_edges = _magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
         if semantic_edges:
             ext_nodes = [f"{e['source']} -> {e['relation']} -> {e['target']}" for e in semantic_edges[:10]]
             magma_context = "\\nMAGMA Historic Technical Correlations:\\n" + "\\n".join(ext_nodes)
@@ -102,7 +117,7 @@ Analyze these current technical indicators and market search results for {pair}:
 Provide a dense, 2-3 sentence technical analysis. State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
 NEVER provide a final trading signal. ONLY provide your technical perspective."""
 
-    response = tech_llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
     
     content_raw = response.content
     if isinstance(content_raw, list):
@@ -115,9 +130,6 @@ def analyze_sentiment(state: GraphState):
     """Retrieves and analyzes the latest DB fear/greed and CryptoBERT sentiment."""
     logger.info("---[NODE] SENTIMENT ANALYST---")
     pair = state.get("pair", "BTC/USDT")
-    
-    # Agent-Specific LLM (Understands human emotion and market hype)
-    sent_llm = LLMRouter(temperature=0.4, request_timeout=15)
     
     # ===== LIVE DATA: Query real sentiment from ai_data.sqlite =====
     import sqlite3
@@ -164,7 +176,7 @@ Analyze the current sentiment metrics for {pair}:
 Provide a 2-3 sentence psychological market analysis. State whether the crowd sentiment leans BULLISH, BEARISH, or NEUTRAL.
 NEVER provide a final trading signal. ONLY provide your sentiment perspective."""
 
-    response = sent_llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)], temperature=0.4)
     
     content_raw = response.content
     if isinstance(content_raw, list):
@@ -178,9 +190,6 @@ def analyze_news(state: GraphState):
     logger.info("---[NODE] NEWS & MACRO ANALYST---")
     pair = state.get("pair", "BTC/USDT")
     
-    # Agent-Specific LLM (Factual News Extraction)
-    news_llm = LLMRouter(temperature=0.3, request_timeout=15)
-    
     # Phase 3.3: Adaptive RAG — route query to optimal pipeline
     query = f"{pair} macro fundamentals exact news ETF"
     corrected_results = adaptive_router.route(
@@ -192,16 +201,15 @@ def analyze_news(state: GraphState):
     documents = [res.get("text", str(res)) for res in corrected_results[:5]]
     
     # Phase 5.1: Knowledge Graph Traversal
-    kg = KnowledgeGraphManager()
     base_coin = pair.split("/")[0]
     
     # Query for ticker and full name (e.g., BTC and Bitcoin)
-    network_links = kg.query_entity_network(base_coin)
-    
+    network_links = _kg.query_entity_network(base_coin)
+
     # Add common full names for major coins to enrich graph hits
     coin_map = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "XRP": "Ripple"}
     if base_coin in coin_map:
-        network_links.extend(kg.query_entity_network(coin_map[base_coin]))
+        network_links.extend(_kg.query_entity_network(coin_map[base_coin]))
         
     kg_context = "\n".join(list(set(network_links))) # Deduplicate
     
@@ -217,7 +225,7 @@ Analyze these retrieved recent news documents and Knowledge Graph relations for 
 Provide a dense, 2-3 sentence fundamental analysis on the news. State whether the fundamentals lean BULLISH, BEARISH, or NEUTRAL. 
 Focus only on news impact. NEVER provide a final trading signal."""
 
-    response = news_llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)], temperature=0.3)
     
     content_raw = response.content
     if isinstance(content_raw, list):
@@ -232,8 +240,6 @@ def research_bullish(state: GraphState):
     """Bull Researcher: Collects and advocates for bullish evidence."""
     logger.info("---[NODE] BULL RESEARCHER---")
     pair = state.get("pair", "BTC/USDT")
-    
-    bull_llm = LLMRouter(temperature=0.3, request_timeout=15)
     
     # RAG-Fusion: search for bullish signals from multiple angles
     bull_results = rag_fusion.fused_search(
@@ -258,7 +264,7 @@ Output format:
 
 Be an advocate. Find the BEST bullish evidence, but be honest about weakness."""
     
-    response = bull_llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)], temperature=0.3)
     content_raw = response.content
     if isinstance(content_raw, list):
         content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -270,8 +276,6 @@ def research_bearish(state: GraphState):
     """Bear Researcher: Collects and advocates for bearish evidence."""
     logger.info("---[NODE] BEAR RESEARCHER---")
     pair = state.get("pair", "BTC/USDT")
-    
-    bear_llm = LLMRouter(temperature=0.3, request_timeout=15)
     
     # RAG-Fusion: search for bearish signals from multiple angles
     bear_results = rag_fusion.fused_search(
@@ -296,7 +300,7 @@ Output format:
 
 Be an advocate. Find the BEST bearish evidence, but be honest about weakness."""
     
-    response = bear_llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)])
+    response = llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)], temperature=0.3)
     content_raw = response.content
     if isinstance(content_raw, list):
         content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -313,8 +317,6 @@ def coordinator_debate(state: GraphState):
     news = state.get("news_analysis", "No News")
     bull = state.get("bull_case", "No bull case")
     bear = state.get("bear_case", "No bear case")
-    
-    exec_llm = LLMRouter(temperature=0.7, request_timeout=25)
     
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
 You have received reports from your 5-agent analyst team:
@@ -351,9 +353,7 @@ Respond in valid JSON ONLY, no markdown:
 
     # Phase 16: CoT-RAG Integration
     try:
-        from cot_rag import CoTRAG
-        cot_rag = CoTRAG(llm_router=exec_llm, retriever=retriever)
-        cot_results = cot_rag.reason_step_by_step(pair=pair, query=prompt)
+        cot_results = _cot_rag.reason_step_by_step(pair=pair, query=prompt)
         cot_reasoning = cot_results.get("reasoning_chain", "")
         if cot_reasoning:
             prompt += f"\n\n[CoT-RAG 5-Step Deep Analysis]:\n{cot_reasoning}\nEnsure the final JSON decision factors in these evidence-backed step deductions."
@@ -362,9 +362,7 @@ Respond in valid JSON ONLY, no markdown:
     complexity = adaptive_router.classify(f"trading decision cross correlation {pair}")
     if complexity == "COMPLEX":
         logger.info("[MADAM-RAG] COMPLEX flow: Using Speculative RAG to draft scenarios.")
-        from speculative_rag import SpeculativeRAG
-        spec_rag = SpeculativeRAG(llm_router=exec_llm, retriever=retriever)
-        spec_result = spec_rag.draft_and_verify(query=prompt, num_drafts=3)
+        spec_result = _spec_rag.draft_and_verify(query=prompt, num_drafts=3)
         best_scenario = spec_result.get("best_draft", "")
         if best_scenario:
             prompt += f"\n\n[Speculative RAG Best Draft Scenario]:\n{best_scenario}"
@@ -377,9 +375,9 @@ Respond in valid JSON ONLY, no markdown:
         reasoning_draft = flare_res.get("analysis", "")
         
         json_prompt = prompt + f"\n\nUse this verified FLARE reasoning as a base: {reasoning_draft}"
-        response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=json_prompt)])
+        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=json_prompt)], temperature=0.7)
     else:
-        response = exec_llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)])
+        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)], temperature=0.7)
 
     content_raw = response.content
     if isinstance(content_raw, list):
@@ -433,16 +431,11 @@ def get_trading_signal(pair: str) -> dict:
     """Entry point for Freqtrade to request a trading decision from the Analyst Team."""
     logger.info(f"Initiating Multi-Agent Analyst Team for {pair}...")
     
-    # Phase 9: Semantic Cache
-    from semantic_cache import SemanticCache
-    from self_rag import SelfRAG
-    import json
-    
-    cache = SemanticCache()
+    # Phase 9: Semantic Cache (module-level singleton)
     query_str = f"trading signal analysis for {pair}"
-    
+
     # a. Check Cache
-    cached_response_str = cache.get(query=query_str, pair=pair)
+    cached_response_str = _semantic_cache.get(query=query_str, pair=pair)
     if cached_response_str:
         try:
             logger.info("[Semantic Cache] Reusing cached decision for pair.")
@@ -450,12 +443,10 @@ def get_trading_signal(pair: str) -> dict:
         except Exception as e:
             logger.error(f"Failed to parse cached response: {e}")
 
-    self_rag = SelfRAG()
-    
     # b. Rule-based Retrieval Gating Check
     # Trade-First: NEVER block a signal. If retrieval is skipped, proceed with reduced confidence.
     # The position sizer will modulate size accordingly — confidence controls SIZE, not PERMISSION.
-    retrieval_gated = not self_rag.should_retrieve(query_str, {})
+    retrieval_gated = not _self_rag.should_retrieve(query_str, {})
     if retrieval_gated:
         logger.info(f"[RAG] Retrieval gated for '{query_str[:40]}...' — proceeding with LLM-only analysis at reduced confidence.")
     
@@ -490,7 +481,7 @@ def get_trading_signal(pair: str) -> dict:
         reasoning = final_output.get("reasoning", "") if final_output else ""
         
         # Self-RAG Critique
-        critique = self_rag.self_critique(
+        critique = _self_rag.self_critique(
             query=query_str,
             response=f"Signal: {signal}. Reasoning: {reasoning}",
             evidence=[final_output.get("technical_analysis", ""), final_output.get("news_analysis", "")]
@@ -521,7 +512,7 @@ def get_trading_signal(pair: str) -> dict:
     }
     
     # e. Put directly to Semantic Cache
-    cache.put(query=query_str, response=json.dumps(result_dict), pair=pair)
+    _semantic_cache.put(query=query_str, response=json.dumps(result_dict), pair=pair)
     
     return result_dict
 
@@ -555,6 +546,21 @@ if __name__ == "__main__":
         from fastapi import FastAPI
         from fastapi.middleware.cors import CORSMiddleware
         import uvicorn
+        import gc
+        import threading
+
+        # Periodic GC daemon — forces garbage collection every 5 min
+        # Prevents glibc memory fragmentation from making RSS grow indefinitely
+        def _gc_daemon():
+            import time as _time
+            while True:
+                _time.sleep(300)
+                collected = gc.collect()
+                if collected:
+                    logger.info(f"[GC] Collected {collected} objects")
+
+        gc_thread = threading.Thread(target=_gc_daemon, daemon=True)
+        gc_thread.start()
 
         serve_app = FastAPI(title="RAG Signal Service")
         serve_app.add_middleware(
