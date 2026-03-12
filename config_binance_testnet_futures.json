@@ -21,16 +21,6 @@
         "key": "env:BINANCE_TESTNET_KEY",
         "secret": "env:BINANCE_TESTNET_SECRET",
         "ccxt_config": {
-            "urls": {
-                "api": {
-                    "fapiPublic": "https://demo-fapi.binance.com/fapi",
-                    "fapiPrivate": "https://demo-fapi.binance.com/fapi",
-                    "fapiPublicV2": "https://demo-fapi.binance.com/fapi",
-                    "fapiPrivateV2": "https://demo-fapi.binance.com/fapi",
-                    "fapiPublicV3": "https://demo-fapi.binance.com/fapi",
-                    "fapiPrivateV3": "https://demo-fapi.binance.com/fapi"
-                }
-            },
             "options": {
                 "defaultType": "future"
             }
