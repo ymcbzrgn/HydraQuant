@@ -525,16 +525,69 @@ def get_trading_signal(pair: str) -> dict:
     
     return result_dict
 
+import signal as signal_module
+
+def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 120) -> dict:
+    """Wraps get_trading_signal with a global timeout to prevent infinite hangs."""
+    def _timeout_handler(signum, frame):
+        raise TimeoutError(f"RAG pipeline exceeded {timeout_seconds}s for {pair}")
+
+    try:
+        old_handler = signal_module.signal(signal_module.SIGALRM, _timeout_handler)
+        signal_module.alarm(timeout_seconds)
+        result = get_trading_signal(pair)
+        signal_module.alarm(0)
+        signal_module.signal(signal_module.SIGALRM, old_handler)
+        return result
+    except TimeoutError:
+        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Returning NEUTRAL.")
+        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "Pipeline timeout"}
+    except Exception as e:
+        signal_module.alarm(0)
+        logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
+        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"Pipeline error: {e}"}
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    
-    # Allow CLI execution for testing or Freqtrade subprocess call
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--pair", type=str, default="BTC/USDT", help="Pair to analyze")
+    parser.add_argument("--serve", action="store_true", help="Run as HTTP service (models loaded once)")
+    parser.add_argument("--port", type=int, default=8891, help="Port for HTTP service")
     args = parser.parse_args()
-    
-    result = get_trading_signal(args.pair)
-    # Print clean JSON to stdout so subprocess can read it
-    print("\n--- JSON OUTPUT ---")
-    print(json.dumps(result))
+
+    if args.serve:
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+        import uvicorn
+
+        serve_app = FastAPI(title="RAG Signal Service")
+        serve_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        @serve_app.get("/signal/{pair:path}")
+        def signal_endpoint(pair: str):
+            return get_trading_signal_with_timeout(pair, timeout_seconds=120)
+
+        @serve_app.get("/health")
+        def health():
+            return {
+                "status": "online",
+                "models_loaded": True,
+                "colbert": "active" if retriever.colbert_reranker else "disabled",
+                "flashrank": "active" if retriever.reranker else "disabled",
+            }
+
+        logger.info(f"RAG Signal Service starting on port {args.port}")
+        logger.info(f"Models loaded: ColBERT={'active' if retriever.colbert_reranker else 'disabled'}, "
+                     f"FlashRank={'active' if retriever.reranker else 'disabled'}")
+        uvicorn.run(serve_app, host="0.0.0.0", port=args.port)
+    else:
+        result = get_trading_signal(args.pair)
+        print("\n--- JSON OUTPUT ---")
+        print(json.dumps(result))

@@ -25,6 +25,7 @@ _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 # Sadece bu hatalarda (Rate Limit, Server Çokmesi, Timeout, Geçersiz Key) sistem bir sonraki yedek LLM'e atlar.
 # Eğer hata '400 Bad Request' (aşırı uzun prompt, bozuk JSON) ise failover yapılmayıp anında çöker ki hatayı görelim.
 FAILOVER_EXCEPTIONS = (
+    google_exc.NotFound,
     google_exc.TooManyRequests,
     google_exc.ResourceExhausted,
     google_exc.ServiceUnavailable,
@@ -89,24 +90,9 @@ class LLMRouter:
 
         self.gemini_models_by_key = {}
         if self.gemini_keys:
-            # List of all available text-capable models to maximize free tier limits
-            gemini_model_names = [
-                "models/gemini-3.1-flash-lite-preview",
-                "models/gemini-3.1-pro-preview",
-                "models/gemini-3-flash-preview",
-                "models/gemini-3-pro-preview",
-                "models/gemini-2.5-flash-lite",
-                "models/gemini-2.5-flash",
-                "models/gemini-2.5-pro",
-                "models/gemini-2.0-flash-lite",
-                "models/gemini-2.0-flash",
-                "models/gemini-2.0-flash-001",
-                "models/gemini-2.0-flash-lite-001",
-                "models/gemini-flash-lite-latest",
-                "models/gemini-flash-latest",
-                "models/gemini-pro-latest"
-            ]
-            
+            # Dynamic model discovery — fetch real available models from Gemini API
+            gemini_model_names = self._discover_gemini_models(self.gemini_keys[0])
+
             # Group initialized models by their key
             for key in self.gemini_keys:
                 models_for_key = []
@@ -119,8 +105,9 @@ class LLMRouter:
                         max_retries=0
                     ))
                 self.gemini_models_by_key[key] = models_for_key
-            
-            logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys. Prepared dynamic load balancer.")
+
+            logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys × {len(gemini_model_names)} models. "
+                         f"Models: {gemini_model_names}")
             
         # 2. First Fallback: Groq (Llama-3.1 8B Instant)
         self.groq_key = os.environ.get("GROQ_API_KEY")
@@ -148,6 +135,43 @@ class LLMRouter:
                 max_retries=0
             )
         
+    @staticmethod
+    def _discover_gemini_models(api_key: str) -> list:
+        """Discover available text generation models from Gemini API at runtime."""
+        FALLBACK_MODELS = [
+            "models/gemini-2.5-flash",
+            "models/gemini-2.0-flash",
+        ]
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+
+            discovered = []
+            for m in client.models.list():
+                name = m.name if hasattr(m, 'name') else str(m)
+                actions = m.supported_actions if hasattr(m, 'supported_actions') else []
+
+                # Only text generation models
+                if 'generateContent' not in (actions or []):
+                    continue
+                # Skip non-text models
+                if any(skip in name for skip in ['image', 'embedding', 'vision', 'audio', 'computer-use']):
+                    continue
+
+                discovered.append(name)
+
+            if discovered:
+                # Newest models first (3.x > 2.5 > 2.0)
+                discovered.sort(reverse=True)
+                logger.info(f"Discovered {len(discovered)} Gemini text models from API")
+                return discovered
+            else:
+                logger.warning("No models discovered from API. Using fallback list.")
+                return FALLBACK_MODELS
+        except Exception as e:
+            logger.warning(f"Model discovery failed: {e}. Using fallback list.")
+            return FALLBACK_MODELS
+
     def _get_chain(self) -> List[Any]:
         """Constructs and returns the active LangChain fallbacks without rate-limited keys."""
         chain = []
