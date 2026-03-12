@@ -216,6 +216,96 @@ class ForgonePnLEngine:
             return {"error": str(e)}
 
 
+    def record_trade_for_portfolio(self, pair: str, pnl_pct: float):
+        """
+        Record a closed trade into the $100 hypothetical portfolio.
+        Compounds the PnL onto the running balance.
+        Called from AIFreqtradeSizer.confirm_trade_exit().
+        """
+        try:
+            with self._get_db_connection() as conn:
+                c = conn.cursor()
+                # Ensure table exists
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS hypothetical_portfolio (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_pair TEXT NOT NULL,
+                        trade_pnl_pct REAL NOT NULL,
+                        balance_before REAL NOT NULL,
+                        balance_after REAL NOT NULL,
+                        trade_closed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                # Get current balance (last entry, or $100 if first trade)
+                c.execute("SELECT balance_after FROM hypothetical_portfolio ORDER BY id DESC LIMIT 1")
+                row = c.fetchone()
+                balance_before = float(row['balance_after']) if row else 100.0
+
+                # Compound: new_balance = old_balance * (1 + pnl_pct/100)
+                balance_after = round(balance_before * (1 + pnl_pct / 100), 4)
+
+                c.execute('''
+                    INSERT INTO hypothetical_portfolio (trade_pair, trade_pnl_pct, balance_before, balance_after)
+                    VALUES (?, ?, ?, ?)
+                ''', (pair, round(pnl_pct, 4), balance_before, balance_after))
+                conn.commit()
+
+            logger.info(f"[Portfolio] {pair} PnL={pnl_pct:+.2f}% → ${balance_before:.2f} → ${balance_after:.2f}")
+        except Exception as e:
+            logger.error(f"[Portfolio] Failed to record trade: {e}")
+
+    def get_hypothetical_balance(self) -> dict:
+        """
+        Returns the current hypothetical portfolio state.
+        "$100 ile başlasaydın şuan ne olurdu?"
+        """
+        try:
+            with self._get_db_connection() as conn:
+                c = conn.cursor()
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS hypothetical_portfolio (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_pair TEXT NOT NULL,
+                        trade_pnl_pct REAL NOT NULL,
+                        balance_before REAL NOT NULL,
+                        balance_after REAL NOT NULL,
+                        trade_closed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                c.execute("SELECT balance_after FROM hypothetical_portfolio ORDER BY id DESC LIMIT 1")
+                row = c.fetchone()
+                current_balance = float(row['balance_after']) if row else 100.0
+
+                c.execute("SELECT COUNT(*) as cnt FROM hypothetical_portfolio")
+                total_trades = c.fetchone()['cnt']
+
+                # Best and worst single trade
+                c.execute("SELECT MAX(trade_pnl_pct) as best, MIN(trade_pnl_pct) as worst FROM hypothetical_portfolio")
+                extremes = c.fetchone()
+
+                # Today's trades
+                c.execute("""
+                    SELECT COUNT(*) as cnt, COALESCE(SUM(trade_pnl_pct), 0) as today_pnl
+                    FROM hypothetical_portfolio
+                    WHERE date(trade_closed_at) = date('now')
+                """)
+                today = c.fetchone()
+
+            return {
+                "start_balance": 100.0,
+                "current_balance": current_balance,
+                "total_return_pct": round(((current_balance / 100.0) - 1) * 100, 2),
+                "total_trades": total_trades,
+                "today_trades": today['cnt'] if today else 0,
+                "today_pnl_pct": round(float(today['today_pnl']), 2) if today else 0.0,
+                "best_trade_pct": round(float(extremes['best']), 2) if extremes and extremes['best'] else 0.0,
+                "worst_trade_pct": round(float(extremes['worst']), 2) if extremes and extremes['worst'] else 0.0,
+            }
+        except Exception as e:
+            logger.error(f"[Portfolio] Failed to get balance: {e}")
+            return {"start_balance": 100.0, "current_balance": 100.0, "total_return_pct": 0.0, "total_trades": 0}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     engine = ForgonePnLEngine()

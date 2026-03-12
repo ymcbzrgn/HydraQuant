@@ -104,6 +104,18 @@ def init_db():
         )
     ''')
 
+    # Hypothetical Portfolio: "$100 ile başlasaydın şuan ne olurdu?" tracking
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS hypothetical_portfolio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_pair TEXT NOT NULL,
+            trade_pnl_pct REAL NOT NULL,
+            balance_before REAL NOT NULL,
+            balance_after REAL NOT NULL,
+            trade_closed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # Create indices
     c.execute('CREATE INDEX IF NOT EXISTS idx_market_news_published ON market_news(published_at)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_ai_decisions_pair ON ai_decisions(pair)')
