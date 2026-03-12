@@ -118,7 +118,7 @@ class AIFreqtradeSizer(IStrategy):
 
             response = requests.get(
                 f"{rag_service_url}/signal/{pair}",
-                timeout=150  # slightly more than the 120s internal timeout
+                timeout=330  # slightly more than the 300s internal pipeline timeout
             )
             if response.status_code == 200:
                 parsed = response.json()

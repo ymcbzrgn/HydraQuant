@@ -26,6 +26,9 @@ class DualEmbeddingPipeline:
         {"name": "gemini-embedding-2-preview", "dims": 768},
     ]
 
+    # Class-level singleton: BGE model loaded ONCE, shared across all instances
+    _bge_model = None
+
     def __init__(self):
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in .env")
@@ -33,8 +36,10 @@ class DualEmbeddingPipeline:
         # Phase 7: google.genai migration
         self.client = genai.Client(api_key=GEMINI_API_KEY)
 
-        logger.info("Loading local BGE-Financial embedding model...")
-        self.local_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
+        if DualEmbeddingPipeline._bge_model is None:
+            logger.info("Loading local BGE-Financial embedding model (one-time)...")
+            DualEmbeddingPipeline._bge_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
+        self.local_model = DualEmbeddingPipeline._bge_model
         
     def _get_db_connection(self):
         conn = sqlite3.connect(DB_PATH, timeout=30)
