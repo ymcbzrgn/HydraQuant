@@ -83,7 +83,8 @@ class AIFreqtradeSizer(IStrategy):
         self._position_sizer.autonomy = self.autonomy_manager
         
         self._telegram = AITelegramNotifier()
-        
+        self._last_portfolio_sync = None  # Track last sync time
+
         logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget & Telegram.")
 
     def _get_sqlite_connection(self):
@@ -311,6 +312,68 @@ class AIFreqtradeSizer(IStrategy):
             
         return self.stoploss
 
+    def _sync_portfolio_to_ai(self):
+        """Bridge: Sync real exchange balance → AI modules (RiskBudget, Autonomy)."""
+        try:
+            stake = self.config.get('stake_currency', 'USDT')
+            total = self.wallets.get_total(stake)
+            free = self.wallets.get_free(stake)
+
+            if total <= 0:
+                return
+
+            # Update RiskBudget with real portfolio value
+            self.risk_budget.update_portfolio_value(total)
+
+            # Persist to SQLite so scheduler/API can read it
+            import json
+            all_balances = {}
+            total_portfolio_usd = total  # Start with stake currency
+
+            for currency, wallet in self.wallets._wallets.items():
+                if wallet.total > 0:
+                    amount = round(wallet.total, 8)
+                    if currency == stake:
+                        all_balances[currency] = {"amount": amount, "usd": round(amount, 2)}
+                    else:
+                        usd = 0.0
+                        try:
+                            pair = f"{currency}/{stake}"
+                            ticker = self.wallets._exchange.fetch_ticker(pair)
+                            price = ticker.get('last', 0) or 0
+                            usd = round(amount * price, 2)
+                            total_portfolio_usd += usd
+                        except Exception:
+                            pass
+                        all_balances[currency] = {"amount": amount, "usd": usd}
+
+            conn = self._get_sqlite_connection()
+            if conn:
+                try:
+                    conn.execute('''
+                        CREATE TABLE IF NOT EXISTS portfolio_state (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            stake_currency TEXT, total_balance REAL,
+                            free_balance REAL, in_trades REAL,
+                            assets_json TEXT, updated_at TEXT
+                        )
+                    ''')
+                    in_trades = total - free
+                    conn.execute('''
+                        INSERT OR REPLACE INTO portfolio_state
+                        (id, stake_currency, total_balance, free_balance, in_trades, assets_json, updated_at)
+                        VALUES (1, ?, ?, ?, ?, ?, ?)
+                    ''', (stake, total, free, in_trades, json.dumps(all_balances),
+                          datetime.utcnow().isoformat()))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            self._last_portfolio_sync = current_time if hasattr(self, '_last_portfolio_sync') else datetime.utcnow()
+            logger.debug(f"[Portfolio Sync] {stake}: stake=${total:.2f} total_usd=${total_portfolio_usd:.2f} assets={len(all_balances)}")
+        except Exception as e:
+            logger.debug(f"[Portfolio Sync] Skipped: {e}")
+
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float, max_stake: float,
                             leverage: float, entry_tag: str, side: str,
@@ -319,9 +382,12 @@ class AIFreqtradeSizer(IStrategy):
         CORE PRINCIPLE: TRADE-FIRST AUTONOMY (Sizing not blocking).
         Instead of blocking a trade, we scale the size based on FreqAI confidence/market regime.
         """
+        # Sync real exchange balance to AI modules (every trade entry)
+        self._sync_portfolio_to_ai()
+
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
-        
+
         # Base multiplier
         multiplier = 1.0
         
@@ -366,11 +432,17 @@ class AIFreqtradeSizer(IStrategy):
             
             # Phase 3.5.3: Risk Budget scaling — shrink if budget running low
             final_stake = self.risk_budget.scale_position(final_stake)
-            
+
+            # Autonomy max_stake cap (scales with real portfolio)
+            portfolio_val = self.risk_budget.portfolio_value
+            autonomy_cap = self.autonomy_manager.get_max_stake(portfolio_value=portfolio_val)
+            if autonomy_cap is not None:
+                final_stake = min(final_stake, autonomy_cap)
+
             # Consume budget for this trade
             atr_volatility = last_candle.get('atr', 0.02) / current_rate if current_rate > 0 else 0.02
             self.risk_budget.consume_budget(final_stake, atr_volatility, confidence)
-            
+
         if final_stake < min_stake:
             # To honor exchange API limits, if dust is too small, Freqtrade rejects it internally.
             pass
@@ -393,13 +465,7 @@ class AIFreqtradeSizer(IStrategy):
             entry_price=rate,
             was_executed=True
         )
-        if self._telegram:
-            self._telegram.send_trade_signal(
-                pair=pair, 
-                signal="long" if side == "long" else "short", 
-                confidence=confidence, 
-                reasoning_summary=reasoning
-            )
+        logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} — {reasoning}")
         return True
 
     def confirm_trade_exit(self, pair: str, trade: 'Trade', order_type: str, amount: float,
@@ -411,15 +477,7 @@ class AIFreqtradeSizer(IStrategy):
         if fid:
             self.forgone_engine.resolve_forgone_trade(fid, exit_price=rate)
         
-        # Telegram notification
-        if self._telegram:
-            try:
-                pnl_pct = trade.calc_profit_ratio(rate) * 100 if hasattr(trade, 'calc_profit_ratio') else 0.0
-                pnl_abs = trade.calc_profit(rate) if hasattr(trade, 'calc_profit') else 0.0
-                sign = "+" if pnl_pct > 0 else ""
-                self._telegram.send_alert(f"Trade Exited: {pair}\nReason: {exit_reason}\nPNL: {sign}${pnl_abs:.2f} ({sign}{pnl_pct:.2f}%)", level="INFO")
-            except Exception:
-                pass
+        logger.info(f"[Trade Exit] {pair} reason={exit_reason}")
 
         # Phase 3.5.2: Bayesian Kelly update — learn from this trade
         try:
@@ -431,10 +489,14 @@ class AIFreqtradeSizer(IStrategy):
         except Exception as e:
             logger.warning(f"[BayesianKelly] Update failed: {e}")
 
-        # Hypothetical $100 Portfolio: compound every closed trade
+        # Hypothetical $100 Portfolio: compound every closed trade (position-size weighted)
         try:
-            pnl_pct_raw = (trade.calc_profit_ratio(rate) * 100) if hasattr(trade, 'calc_profit_ratio') else 0.0
-            self.forgone_engine.record_trade_for_portfolio(pair, pnl_pct_raw)
+            trade_pnl_pct = (trade.calc_profit_ratio(rate) * 100) if hasattr(trade, 'calc_profit_ratio') else 0.0
+            # Weight by position size fraction so $100 sim mirrors real sizing
+            portfolio_value = self.risk_budget.portfolio_value
+            stake_fraction = (trade.stake_amount / portfolio_value) if portfolio_value > 0 else 0.01
+            portfolio_pnl_pct = trade_pnl_pct * stake_fraction
+            self.forgone_engine.record_trade_for_portfolio(pair, portfolio_pnl_pct)
         except Exception as e:
             logger.warning(f"[Portfolio] Update failed: {e}")
 

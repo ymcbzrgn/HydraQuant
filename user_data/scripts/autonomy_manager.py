@@ -102,10 +102,26 @@ class AutonomyManager:
         """Get the Kelly fraction for the current autonomy level."""
         return KELLY_FRACTIONS.get(self.current_level, 0.0)
 
-    def get_max_stake(self) -> Optional[float]:
-        """Get max stake limit for current level. None = no limit."""
-        limits = {0: 10.0, 1: 25.0, 2: 75.0, 3: 200.0}
-        return limits.get(self.current_level, None)
+    def get_max_stake(self, portfolio_value: float = 0.0) -> Optional[float]:
+        """
+        Get max stake limit for current level, scaled to portfolio size.
+        If portfolio_value given, returns percentage-based cap.
+        Fallback to fixed minimums if portfolio unknown.
+        """
+        # Percentage of portfolio per level (scales with account size)
+        pct_limits = {0: 0.01, 1: 0.025, 2: 0.05, 3: 0.10}
+        # Absolute minimums (floor, never below these even on tiny accounts)
+        abs_minimums = {0: 10.0, 1: 25.0, 2: 75.0, 3: 200.0}
+
+        if self.current_level >= 4:
+            return None  # L4/L5: no cap
+
+        pct = pct_limits.get(self.current_level, 0.03)
+        abs_min = abs_minimums.get(self.current_level, 10.0)
+
+        if portfolio_value > 0:
+            return max(portfolio_value * pct, abs_min)
+        return abs_min
 
     def update_metrics(
         self,

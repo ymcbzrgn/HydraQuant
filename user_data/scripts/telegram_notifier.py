@@ -63,6 +63,24 @@ class AITelegramNotifier:
         autonomy_level = stats.get("autonomy_level", "L1")
         msg += f"Autonomy level: {autonomy_level}\n"
         
+        portfolio_val = stats.get("portfolio_value", 0.0)
+        if portfolio_val > 0:
+            msg += f"Portfolio: *${portfolio_val:,.2f}*\n"
+
+        # Asset breakdown with USD values
+        assets = stats.get("assets", {})
+        total_usd = 0.0
+        asset_parts = []
+        for currency, info in assets.items():
+            if isinstance(info, dict) and "usd" in info:
+                usd = info["usd"]
+                total_usd += usd
+                if usd >= 1.0:
+                    asset_parts.append(f"{currency}: ${usd:,.2f}")
+        if len(asset_parts) > 1:
+            msg += "Varliklar: " + " | ".join(asset_parts) + "\n"
+            msg += f"Toplam: *${total_usd:,.2f}*\n"
+
         forgone_pnl = stats.get("forgone_pnl", 0.0)
         msg += f"Forgone PNL: ${forgone_pnl:.2f} (signals NOT taken)\n"
 

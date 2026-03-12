@@ -171,13 +171,24 @@ def get_autonomy():
 
 @app.get("/api/ai/risk")
 def get_risk():
-    """Risk budget durumu."""
-    risk_manager = RiskBudgetManager(db_path=AI_DB_PATH)
+    """Risk budget durumu (gerçek portfolio bakiyesiyle)."""
+    # Read real portfolio from SQLite (synced by strategy)
+    portfolio_value = 10000.0
+    with get_db_conn() as conn:
+        try:
+            row = conn.execute("SELECT total_balance FROM portfolio_state WHERE id = 1").fetchone()
+            if row and float(row['total_balance']) > 0:
+                portfolio_value = float(row['total_balance'])
+        except Exception:
+            pass
+
+    risk_manager = RiskBudgetManager(portfolio_value=portfolio_value, db_path=AI_DB_PATH)
     daily_budget = float(risk_manager.daily_budget)
     consumed = float(risk_manager._consumed)
     utilization_pct = min(100.0, (consumed / daily_budget) * 100) if daily_budget > 0 else 0.0
-    
+
     return {
+        "portfolio_value": portfolio_value,
         "daily_budget": daily_budget,
         "consumed": consumed,
         "utilization_pct": utilization_pct,
@@ -226,6 +237,35 @@ def get_confidence_history(pair: str = None, days: int = 7):
             return [dict(r) for r in rows]
         except sqlite3.OperationalError:
             return []
+
+@app.get("/api/ai/portfolio")
+def get_portfolio():
+    """Gerçek exchange bakiyesi (strategy tarafından persist ediliyor)."""
+    with get_db_conn() as conn:
+        try:
+            row = conn.execute("SELECT * FROM portfolio_state WHERE id = 1").fetchone()
+            if row:
+                import json
+                assets = json.loads(row["assets_json"]) if row["assets_json"] else {}
+                # Compute total USD from enriched assets
+                total_usd = 0.0
+                for info in assets.values():
+                    if isinstance(info, dict) and "usd" in info:
+                        total_usd += info["usd"]
+                    elif isinstance(info, (int, float)):
+                        total_usd += info  # Old format: assume stake currency
+                return {
+                    "stake_currency": row["stake_currency"],
+                    "total_balance": row["total_balance"],
+                    "free_balance": row["free_balance"],
+                    "in_trades": row["in_trades"],
+                    "assets": assets,
+                    "total_portfolio_usd": round(total_usd, 2),
+                    "updated_at": row["updated_at"],
+                }
+            return {"total_balance": 0, "note": "No portfolio data yet. Bot has not synced."}
+        except sqlite3.OperationalError:
+            return {"total_balance": 0, "note": "portfolio_state table not created yet."}
 
 if __name__ == "__main__":
     import uvicorn
