@@ -22,6 +22,10 @@ KEY_COOLDOWNS: Dict[str, float] = {}
 COOLDOWN_DURATION = 60.0  # seconds
 _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 
+# Module-level model discovery cache — shared across ALL LLMRouter instances
+_GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
+_MODEL_CACHE_TTL = 600.0  # 10 minutes
+
 # Sadece bu hatalarda (Rate Limit, Server Çokmesi, Timeout, Geçersiz Key) sistem bir sonraki yedek LLM'e atlar.
 # Eğer hata '400 Bad Request' (aşırı uzun prompt, bozuk JSON) ise failover yapılmayıp anında çöker ki hatayı görelim.
 FAILOVER_EXCEPTIONS = (
@@ -137,11 +141,18 @@ class LLMRouter:
         
     @staticmethod
     def _discover_gemini_models(api_key: str) -> list:
-        """Discover available text generation models from Gemini API at runtime."""
+        """Discover available Gemini chat models from API. Cached for 10 minutes."""
         FALLBACK_MODELS = [
             "models/gemini-2.5-flash",
             "models/gemini-2.0-flash",
         ]
+
+        # Return cached result if fresh
+        now = time.time()
+        if _GEMINI_MODEL_CACHE["models"] and (now - _GEMINI_MODEL_CACHE["timestamp"]) < _MODEL_CACHE_TTL:
+            logger.info(f"Using cached model list ({len(_GEMINI_MODEL_CACHE['models'])} models)")
+            return _GEMINI_MODEL_CACHE["models"]
+
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
@@ -151,22 +162,27 @@ class LLMRouter:
                 name = m.name if hasattr(m, 'name') else str(m)
                 actions = m.supported_actions if hasattr(m, 'supported_actions') else []
 
-                # Only text generation models
                 if 'generateContent' not in (actions or []):
                     continue
-                # Skip non-text models
-                if any(skip in name for skip in ['image', 'embedding', 'vision', 'audio', 'computer-use']):
+
+                # Only keep actual Gemini chat models — filter out gemma, nano, robotics, tts, etc.
+                # name format: "models/gemini-2.5-flash" or "models/gemini-3-pro-preview"
+                model_short = name.replace("models/", "")
+                if not model_short.startswith("gemini-"):
+                    continue
+                if any(skip in model_short for skip in ['tts', 'robotics', 'image', 'embedding', 'vision', 'audio', 'computer-use']):
                     continue
 
                 discovered.append(name)
 
             if discovered:
-                # Newest models first (3.x > 2.5 > 2.0)
                 discovered.sort(reverse=True)
-                logger.info(f"Discovered {len(discovered)} Gemini text models from API")
+                logger.info(f"Discovered {len(discovered)} Gemini chat models: {discovered}")
+                _GEMINI_MODEL_CACHE["models"] = discovered
+                _GEMINI_MODEL_CACHE["timestamp"] = now
                 return discovered
             else:
-                logger.warning("No models discovered from API. Using fallback list.")
+                logger.warning("No Gemini chat models discovered. Using fallback list.")
                 return FALLBACK_MODELS
         except Exception as e:
             logger.warning(f"Model discovery failed: {e}. Using fallback list.")

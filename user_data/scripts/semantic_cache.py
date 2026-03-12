@@ -42,19 +42,27 @@ class SemanticCache:
         except Exception as e:
             logger.error(f"Failed to init semantic_cache table: {e}")
 
+    # Embedding model failover list (same as rag_embedding.py)
+    _EMBEDDING_MODELS = [
+        {"name": "gemini-embedding-001", "dims": 768},
+        {"name": "gemini-embedding-2-preview", "dims": 768},
+    ]
+
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        try:
-            client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-            # Using basic Gemini embedding for cache matching to avoid loading heavy transformers
-            result = client.models.embed_content(
-                model="text-embedding-004",
-                contents=text,
-            )
-            emb = np.array(result.embeddings[0].values, dtype=np.float32)
-            return emb
-        except Exception as e:
-            logger.error(f"Error generating embedding for cache: {e}")
-            return None
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for model_cfg in self._EMBEDDING_MODELS:
+            try:
+                kwargs = {"model": model_cfg["name"], "contents": text}
+                if model_cfg.get("dims"):
+                    kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
+                result = client.models.embed_content(**kwargs)
+                emb = np.array(result.embeddings[0].values, dtype=np.float32)
+                return emb
+            except Exception as e:
+                logger.warning(f"Embedding {model_cfg['name']} failed for cache: {e}")
+                continue
+        logger.error("All embedding models failed for semantic cache")
+        return None
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         norm_a = np.linalg.norm(a)

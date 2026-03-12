@@ -19,7 +19,8 @@ class LLMCostTracker:
         "gemini-2.5-flash-lite": {"input": 0.075, "output": 0.30},
         "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
         "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
-        "models/text-embedding-004": {"input": 0.0, "output": 0.0}, # Minimal/free for low volume
+        "gemini-embedding-001": {"input": 0.0, "output": 0.0},  # Free tier
+        "gemini-embedding-2-preview": {"input": 0.0, "output": 0.0},  # Free tier
     }
 
     def __init__(self, db_path=None):
