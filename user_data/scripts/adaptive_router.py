@@ -45,7 +45,7 @@ class AdaptiveQueryRouter:
     """
 
     def __init__(self, router: Optional[LLMRouter] = None):
-        self.router = router or LLMRouter(temperature=0.0, request_timeout=10)
+        self.router = router or LLMRouter(temperature=0.1, request_timeout=10)
         # Keyword-based fast classification (avoids LLM call for obvious cases)
         self._simple_keywords = ["price", "fiyat", "market cap", "volume", "hacim"]
         self._no_rag_keywords = ["nedir", "nasıl", "what is", "how does", "explain", "definition"]

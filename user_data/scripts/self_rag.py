@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Any, List
+from langchain_core.messages import HumanMessage, SystemMessage
 from llm_router import LLMRouter
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,10 @@ class SelfRAG:
         }}
         """
         try:
-            critique_response = self.router.invoke(prompt, model_type="fast", response_format="json")
+            critique_response = self.router.invoke([
+                SystemMessage(content="You are a strict JSON evaluator. Output ONLY valid JSON."),
+                HumanMessage(content=prompt)
+            ])
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)
             
             import json

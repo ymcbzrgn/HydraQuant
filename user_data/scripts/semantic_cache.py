@@ -40,6 +40,15 @@ class SemanticCache:
                         ttl_seconds INTEGER DEFAULT 300
                     )
                 """)
+                # Startup sanitization: purge poisoned entries with low/null confidence
+                cursor.execute("""
+                    DELETE FROM semantic_cache
+                    WHERE json_extract(response, '$.confidence') < 0.3
+                       OR json_extract(response, '$.confidence') IS NULL
+                """)
+                purged = cursor.rowcount
+                if purged > 0:
+                    logger.warning(f"[Cache Startup] Purged {purged} poisoned cache entries (confidence < 0.3 or null)")
                 conn.commit()
         except Exception as e:
             logger.error(f"Failed to init semantic_cache table: {e}")
@@ -103,6 +112,16 @@ class SemanticCache:
                                 best_match_response = response
                                 
             if best_match_response:
+                # Reject cached results with low confidence (poisoned cache entries)
+                try:
+                    cached_data = json.loads(best_match_response)
+                    confidence_val = cached_data.get("confidence")
+                    cached_conf = float(confidence_val) if confidence_val is not None else 0.0
+                    if cached_conf < 0.3:
+                        logger.warning(f"Semantic Cache Hit REJECTED — cached confidence too low ({cached_conf:.2f}). Forcing fresh pipeline.")
+                        return None
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass  # Non-JSON cache entry, return as-is
                 logger.info(f"Semantic Cache Hit! Similarity: {highest_sim:.4f}")
                 return best_match_response
         except Exception as e:
@@ -111,7 +130,18 @@ class SemanticCache:
         return None
 
     def put(self, query: str, response: str, pair: Optional[str] = None, ttl: int = 300):
-        """Store a response in the cache."""
+        """Store a response in the cache. Rejects low-confidence results to prevent cache poisoning."""
+        # Never cache low-confidence results — they poison future lookups
+        try:
+            resp_data = json.loads(response)
+            confidence_val = resp_data.get("confidence")
+            resp_conf = float(confidence_val) if confidence_val is not None else 0.0
+            if resp_conf < 0.3:
+                logger.warning(f"Semantic Cache PUT REJECTED — confidence too low ({resp_conf:.2f}). Not caching to prevent poisoning.")
+                return
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass  # Non-JSON response, allow caching
+
         query_emb = self._get_embedding(query)
         if query_emb is None:
             return

@@ -61,13 +61,31 @@ decision_logger = AIDecisionLogger()
 _semantic_cache = SemanticCache()
 _self_rag = SelfRAG(router=llm)
 
-# Phase 15: MAGMA + KG (were leaking per agent node call)
-_magma = MAGMAMemory()
-_kg = KnowledgeGraphManager()
+# Phase 15: MAGMA + KG — optional, graceful degradation if init fails
+try:
+    _magma = MAGMAMemory()
+except Exception as e:
+    logger.error(f"[INIT] MAGMAMemory failed to initialize: {e}. MAGMA context disabled.")
+    _magma = None
 
-# Phase 16: CoT-RAG + Speculative RAG (were leaking per coordinator_debate call)
-_cot_rag = CoTRAG(llm_router=llm, retriever=retriever)
-_spec_rag = SpeculativeRAG(llm_router=llm, retriever=retriever)
+try:
+    _kg = KnowledgeGraphManager()
+except Exception as e:
+    logger.error(f"[INIT] KnowledgeGraphManager failed to initialize: {e}. KG context disabled.")
+    _kg = None
+
+# Phase 16: CoT-RAG + Speculative RAG — optional, graceful degradation if init fails
+try:
+    _cot_rag = CoTRAG(llm_router=llm, retriever=retriever)
+except Exception as e:
+    logger.error(f"[INIT] CoTRAG failed to initialize: {e}. CoT-RAG disabled.")
+    _cot_rag = None
+
+try:
+    _spec_rag = SpeculativeRAG(llm_router=llm, retriever=retriever)
+except Exception as e:
+    logger.error(f"[INIT] SpeculativeRAG failed to initialize: {e}. Speculative RAG disabled.")
+    _spec_rag = None
 
 # --- Graph State Definition ---
 class GraphState(TypedDict):
@@ -101,13 +119,14 @@ def analyze_technical(state: GraphState):
 
     # Phase 15: MAGMA Graph Context (Semantic + Causal)
     magma_context = ""
-    try:
-        semantic_edges = _magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
-        if semantic_edges:
-            ext_nodes = [f"{e['source']} -> {e['relation']} -> {e['target']}" for e in semantic_edges[:10]]
-            magma_context = "\\nMAGMA Historic Technical Correlations:\\n" + "\\n".join(ext_nodes)
-    except Exception as e:
-        logger.warning(f"MAGMA Technical lookup failed: {e}")
+    if _magma is not None:
+        try:
+            semantic_edges = _magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
+            if semantic_edges:
+                ext_nodes = [f"{e['source']} -> {e['relation']} -> {e['target']}" for e in semantic_edges[:10]]
+                magma_context = "\\nMAGMA Historic Technical Correlations:\\n" + "\\n".join(ext_nodes)
+        except Exception as e:
+            logger.warning(f"MAGMA Technical lookup failed: {e}")
 
     prompt = f"""You are a master Crypto Technical Analyst. 
 Analyze these current technical indicators and market search results for {pair}:
@@ -117,13 +136,15 @@ Analyze these current technical indicators and market search results for {pair}:
 Provide a dense, 2-3 sentence technical analysis. State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
 NEVER provide a final trading signal. ONLY provide your technical perspective."""
 
-    response = llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
-    
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-        
-    return {"technical_analysis": content_raw.strip()}
+    try:
+        response = llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        return {"technical_analysis": content_raw.strip()}
+    except Exception as e:
+        logger.error(f"[NODE] Technical Analyst LLM invoke failed: {e}")
+        return {"technical_analysis": f"Technical analysis unavailable (LLM error: {type(e).__name__})"}
 
 
 def analyze_sentiment(state: GraphState):
@@ -176,13 +197,15 @@ Analyze the current sentiment metrics for {pair}:
 Provide a 2-3 sentence psychological market analysis. State whether the crowd sentiment leans BULLISH, BEARISH, or NEUTRAL.
 NEVER provide a final trading signal. ONLY provide your sentiment perspective."""
 
-    response = llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)], temperature=0.4)
-    
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-        
-    return {"sentiment_analysis": content_raw.strip()}
+    try:
+        response = llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)], temperature=0.4)
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        return {"sentiment_analysis": content_raw.strip()}
+    except Exception as e:
+        logger.error(f"[NODE] Sentiment Analyst LLM invoke failed: {e}")
+        return {"sentiment_analysis": f"Sentiment analysis unavailable (LLM error: {type(e).__name__})"}
 
 
 def analyze_news(state: GraphState):
@@ -202,14 +225,19 @@ def analyze_news(state: GraphState):
     
     # Phase 5.1: Knowledge Graph Traversal
     base_coin = pair.split("/")[0]
-    
-    # Query for ticker and full name (e.g., BTC and Bitcoin)
-    network_links = _kg.query_entity_network(base_coin)
+    network_links = []
 
-    # Add common full names for major coins to enrich graph hits
-    coin_map = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "XRP": "Ripple"}
-    if base_coin in coin_map:
-        network_links.extend(_kg.query_entity_network(coin_map[base_coin]))
+    if _kg is not None:
+        try:
+            # Query for ticker and full name (e.g., BTC and Bitcoin)
+            network_links = _kg.query_entity_network(base_coin)
+
+            # Add common full names for major coins to enrich graph hits
+            coin_map = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "XRP": "Ripple"}
+            if base_coin in coin_map:
+                network_links.extend(_kg.query_entity_network(coin_map[base_coin]))
+        except Exception as e:
+            logger.warning(f"KG entity network lookup failed: {e}")
         
     kg_context = "\n".join(list(set(network_links))) # Deduplicate
     
@@ -225,13 +253,15 @@ Analyze these retrieved recent news documents and Knowledge Graph relations for 
 Provide a dense, 2-3 sentence fundamental analysis on the news. State whether the fundamentals lean BULLISH, BEARISH, or NEUTRAL. 
 Focus only on news impact. NEVER provide a final trading signal."""
 
-    response = llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)], temperature=0.3)
-    
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-        
-    return {"news_analysis": content_raw.strip(), "documents": documents}
+    try:
+        response = llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)], temperature=0.3)
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        return {"news_analysis": content_raw.strip(), "documents": documents}
+    except Exception as e:
+        logger.error(f"[NODE] News Analyst LLM invoke failed: {e}")
+        return {"news_analysis": f"News analysis unavailable (LLM error: {type(e).__name__})", "documents": documents}
 
 
 # --- Phase 5.2: Bull/Bear Researcher Nodes ---
@@ -264,12 +294,15 @@ Output format:
 
 Be an advocate. Find the BEST bullish evidence, but be honest about weakness."""
     
-    response = llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)], temperature=0.3)
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-    
-    return {"bull_case": content_raw.strip()}
+    try:
+        response = llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)], temperature=0.3)
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        return {"bull_case": content_raw.strip()}
+    except Exception as e:
+        logger.error(f"[NODE] Bull Researcher LLM invoke failed: {e}")
+        return {"bull_case": f"Bull case unavailable (LLM error: {type(e).__name__})"}
 
 
 def research_bearish(state: GraphState):
@@ -300,12 +333,15 @@ Output format:
 
 Be an advocate. Find the BEST bearish evidence, but be honest about weakness."""
     
-    response = llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)], temperature=0.3)
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-    
-    return {"bear_case": content_raw.strip()}
+    try:
+        response = llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)], temperature=0.3)
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+        return {"bear_case": content_raw.strip()}
+    except Exception as e:
+        logger.error(f"[NODE] Bear Researcher LLM invoke failed: {e}")
+        return {"bear_case": f"Bear case unavailable (LLM error: {type(e).__name__})"}
 
 
 def coordinator_debate(state: GraphState):
@@ -352,48 +388,57 @@ Respond in valid JSON ONLY, no markdown:
 }}"""
 
     # Phase 16: CoT-RAG Integration
-    try:
-        cot_results = _cot_rag.reason_step_by_step(pair=pair, query=prompt)
-        cot_reasoning = cot_results.get("reasoning_chain", "")
-        if cot_reasoning:
-            prompt += f"\n\n[CoT-RAG 5-Step Deep Analysis]:\n{cot_reasoning}\nEnsure the final JSON decision factors in these evidence-backed step deductions."
-    except Exception as e:
-        logger.error(f"[CoT-RAG] Master Coordinator execution failed: {e}")
+    if _cot_rag is not None:
+        try:
+            cot_results = _cot_rag.reason_step_by_step(pair=pair, query=prompt)
+            cot_reasoning = cot_results.get("reasoning_chain", "")
+            if cot_reasoning:
+                prompt += f"\n\n[CoT-RAG 5-Step Deep Analysis]:\n{cot_reasoning}\nEnsure the final JSON decision factors in these evidence-backed step deductions."
+        except Exception as e:
+            logger.error(f"[CoT-RAG] Master Coordinator execution failed: {e}")
     complexity = adaptive_router.classify(f"trading decision cross correlation {pair}")
-    if complexity == "COMPLEX":
+    if complexity == "COMPLEX" and _spec_rag is not None:
         logger.info("[MADAM-RAG] COMPLEX flow: Using Speculative RAG to draft scenarios.")
-        spec_result = _spec_rag.draft_and_verify(query=prompt, num_drafts=3)
-        best_scenario = spec_result.get("best_draft", "")
-        if best_scenario:
-            prompt += f"\n\n[Speculative RAG Best Draft Scenario]:\n{best_scenario}"
+        try:
+            spec_result = _spec_rag.draft_and_verify(query=prompt, num_drafts=3)
+            best_scenario = spec_result.get("best_draft", "")
+            if best_scenario:
+                prompt += f"\n\n[Speculative RAG Best Draft Scenario]:\n{best_scenario}"
+        except Exception as e:
+            logger.error(f"[Speculative RAG] Draft and verify failed: {e}")
             
         logger.info("[MADAM-RAG] COMPLEX flow: Using FLARE to verify reasoning before final JSON generation.")
-        flare_context = f"Tech: {tech}\nSent: {sent}\nNews: {news}\nBull: {bull}\nBear: {bear}"
-        flare_query = f"Synthesize a trading decision analysis for {pair} considering all evidence."
-        adaptive_router.flare.retriever = retriever
-        flare_res = adaptive_router.flare.generate_with_active_retrieval(query=flare_query, context=flare_context)
-        reasoning_draft = flare_res.get("analysis", "")
-        
-        json_prompt = prompt + f"\n\nUse this verified FLARE reasoning as a base: {reasoning_draft}"
-        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=json_prompt)], temperature=0.7)
-    else:
-        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)], temperature=0.7)
+        try:
+            flare_context = f"Tech: {tech}\nSent: {sent}\nNews: {news}\nBull: {bull}\nBear: {bear}"
+            flare_query = f"Synthesize a trading decision analysis for {pair} considering all evidence."
+            adaptive_router.flare.retriever = retriever
+            flare_res = adaptive_router.flare.generate_with_active_retrieval(query=flare_query, context=flare_context)
+            reasoning_draft = flare_res.get("analysis", "")
+            prompt += f"\n\nUse this verified FLARE reasoning as a base: {reasoning_draft}"
+        except Exception as e:
+            logger.error(f"[FLARE] Active retrieval failed: {e}. Proceeding without FLARE.")
 
-    content_raw = response.content
-    if isinstance(content_raw, list):
-        content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-        
-    raw_content = content_raw.replace("```json", "").replace("```", "").strip()
-    
+    # Final LLM call — the coordinator's own synthesis. Must succeed for a real signal.
     try:
-        data = json.loads(raw_content)
-        signal = data.get("signal", "NEUTRAL")
-        conf = float(data.get("confidence", 0.0))
-        reason = data.get("reasoning", "")
+        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)], temperature=0.7)
+        content_raw = response.content
+        if isinstance(content_raw, list):
+            content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
+
+        raw_content = content_raw.replace("```json", "").replace("```", "").strip()
+
+        try:
+            data = json.loads(raw_content)
+            signal = data.get("signal", "NEUTRAL")
+            conf = float(data.get("confidence", 0.0))
+            reason = data.get("reasoning", "")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Failed to parse Coordinator JSON: {e}. Raw: {raw_content[:200]}")
+            signal, conf, reason = "NEUTRAL", 0.0, f"JSON Parsing Failure: {raw_content[:100]}"
     except Exception as e:
-        logger.error(f"Failed to parse Coordinator JSON: {e}")
-        signal, conf, reason = "NEUTRAL", 0.0, "JSON Parsing Failure."
-        
+        logger.error(f"[NODE] Coordinator LLM invoke FAILED: {type(e).__name__}: {e}")
+        signal, conf, reason = "NEUTRAL", 0.0, f"Coordinator LLM error: {type(e).__name__}: {e}"
+
     return {"signal": signal, "confidence": conf, "reasoning": reason}
 
 
@@ -472,28 +517,35 @@ def get_trading_signal(pair: str) -> dict:
     reasoning = ""
     
     for attempt in range(max_retries + 1):
-        for output in rag_bot.stream(inputs):
-            for key, value in output.items():
-                final_output = value
-                
+        try:
+            for output in rag_bot.stream(inputs):
+                for key, value in output.items():
+                    # Accumulate outputs from all nodes — don't overwrite partial results
+                    # If coordinator crashes, we still have analyst data for diagnostics
+                    final_output.update(value)
+        except Exception as e:
+            logger.error(f"[GRAPH] rag_bot.stream() crashed on attempt {attempt+1}: {type(e).__name__}: {e}")
+            reasoning = f"Graph execution error: {type(e).__name__}: {e}"
+
         signal = final_output.get("signal", "NEUTRAL") if final_output else "NEUTRAL"
         confidence = final_output.get("confidence", 0.0) if final_output else 0.0
-        reasoning = final_output.get("reasoning", "") if final_output else ""
-        
+        if not reasoning:
+            reasoning = final_output.get("reasoning", "") if final_output else ""
+
         # Self-RAG Critique
         critique = _self_rag.self_critique(
             query=query_str,
             response=f"Signal: {signal}. Reasoning: {reasoning}",
             evidence=[final_output.get("technical_analysis", ""), final_output.get("news_analysis", "")]
         )
-        
+
         if critique["passed"] or attempt == max_retries:
             if not critique["passed"]:
                 logger.warning(f"[Self-RAG] Output failed critique, but max retries reached. Proceeding.")
             else:
                 logger.info(f"[Self-RAG] Response critique PASSED. Quality verified.")
             break
-            
+
         logger.warning(f"[Self-RAG] Output failed critique. Retrying pipeline. Attempt {attempt+1}/{max_retries}")
 
     # Log the decision persistently in Phase 3.5.1 Logger
@@ -511,8 +563,10 @@ def get_trading_signal(pair: str) -> dict:
         "reasoning": reasoning
     }
     
-    # e. Put directly to Semantic Cache
+    # e. Put to Semantic Cache (SemanticCache.put already rejects confidence < 0.3)
     _semantic_cache.put(query=query_str, response=json.dumps(result_dict), pair=pair)
+    if confidence < 0.3:
+        logger.warning(f"[Signal] Low confidence result ({confidence:.2f}) for {pair} — NOT cached, will re-analyze next time.")
     
     return result_dict
 
@@ -520,7 +574,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 
 _signal_executor = ThreadPoolExecutor(max_workers=2)
 
-def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 300) -> dict:
+def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 600) -> dict:
     """Wraps get_trading_signal with a thread-based timeout (uvicorn-safe)."""
     try:
         future = _signal_executor.submit(get_trading_signal, pair)
@@ -572,7 +626,7 @@ if __name__ == "__main__":
 
         @serve_app.get("/signal/{pair:path}")
         def signal_endpoint(pair: str):
-            return get_trading_signal_with_timeout(pair, timeout_seconds=300)
+            return get_trading_signal_with_timeout(pair, timeout_seconds=600)
 
         @serve_app.get("/health")
         def health():

@@ -39,7 +39,10 @@ _MODEL_CACHE_TTL = 600.0  # 10 minutes
 MODEL_COOLDOWNS: Dict[str, float] = {}
 
 # Exceptions that CANNOT be recovered by failover — bugs in OUR code
-_HARD_CRASH_EXCEPTIONS = (ValueError, TypeError, KeyError, AttributeError, SyntaxError)
+# NOTE: ValueError/TypeError removed — they can be triggered by legitimate empty/malformed
+# API responses (e.g. json.loads("") → ValueError, float(None) → TypeError).
+# These should failover to next model, not crash the pipeline.
+_HARD_CRASH_EXCEPTIONS = (KeyError, AttributeError, SyntaxError)
 
 # Everything else = failover. This list is for penalty-box logic (rate limit detection).
 FAILOVER_EXCEPTIONS = (
@@ -79,7 +82,7 @@ class LLMRouter:
     then falls back to Groq Llama-3, then OpenRouter models.
     """
     
-    def __init__(self, temperature: float = 0.0, request_timeout: int = 15):
+    def __init__(self, temperature: float = 0.0, request_timeout: int = 30):
         self.temperature = temperature
         self.request_timeout = request_timeout
         self.cost_tracker = LLMCostTracker()
@@ -324,10 +327,26 @@ class LLMRouter:
 
             try:
                 # Per-call temperature override via LangChain bind() — thread-safe, zero allocation
-                target = model.bind(temperature=temperature) if temperature is not None else model
+                # Use generation_config for Gemini models (ChatGoogleGenerativeAI)
+                # Use temperature kwarg for Groq/OpenRouter (ChatGroq/ChatOpenAI)
+                if temperature is not None:
+                    if isinstance(model, ChatGoogleGenerativeAI):
+                        target = model.bind(generation_config={"temperature": temperature})
+                    else:
+                        target = model.bind(temperature=temperature)
+                else:
+                    target = model
                 start_time = time.time()
                 response = target.invoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
+
+                # Validate response has actual content — empty responses should failover
+                content = getattr(response, 'content', None)
+                if content is None or (isinstance(content, str) and not content.strip()):
+                    m_name = getattr(model, "model_name", getattr(model, "model", "?"))
+                    logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
+                    self._penalize_model(model)
+                    continue
 
                 in_tok = 0
                 out_tok = 0
@@ -378,10 +397,24 @@ class LLMRouter:
                 continue
 
             try:
-                target = model.bind(temperature=temperature) if temperature is not None else model
+                if temperature is not None:
+                    if isinstance(model, ChatGoogleGenerativeAI):
+                        target = model.bind(generation_config={"temperature": temperature})
+                    else:
+                        target = model.bind(temperature=temperature)
+                else:
+                    target = model
                 start_time = time.time()
                 response = await target.ainvoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
+
+                # Validate response has actual content — empty responses should failover
+                content = getattr(response, 'content', None)
+                if content is None or (isinstance(content, str) and not content.strip()):
+                    m_name = getattr(model, "model_name", getattr(model, "model", "?"))
+                    logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
+                    self._penalize_model(model)
+                    continue
 
                 in_tok = 0
                 out_tok = 0
