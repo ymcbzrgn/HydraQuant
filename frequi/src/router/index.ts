@@ -81,21 +81,25 @@ const routes: Array<RouteRecordRaw> = [
     path: '/ai',
     name: 'AIDashboard',
     component: () => import('@/components/ai/AIDashboard.vue'),
+    meta: { allowAnonymous: true },
   },
   {
     path: '/ai/settings',
     name: 'AISettings',
     component: () => import('@/views/AISettingsView.vue'),
+    meta: { allowAnonymous: true },
   },
   {
     path: '/ai/analytics',
     name: 'AIAnalytics',
     component: () => import('@/views/AIAnalyticsView.vue'),
+    meta: { allowAnonymous: true },
   },
   {
     path: '/ai/risk',
     name: 'AIRisk',
     component: () => import('@/views/RiskDashboardView.vue'),
+    meta: { allowAnonymous: true },
   },
   {
     path: '/(.*)*',
