@@ -7,12 +7,19 @@ logger = logging.getLogger(__name__)
 
 class ColBERTReranker:
     """ColBERTv2 Late Interaction Reranker. Evaluates fine-grained token-level match scores."""
+    # Class-level singleton: model loaded ONCE, shared across all instances
+    _tokenizer = None
+    _model = None
+
     def __init__(self, model_name="jinaai/jina-colbert-v2"):
-        logger.info(f"Loading ColBERT locally: {model_name} (CPU mode)")
-        # trust_remote_code=True is required for jina-colbert (both tokenizer and model)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-        self.model.eval()
+        if ColBERTReranker._model is None:
+            logger.info(f"Loading ColBERT locally: {model_name} (CPU mode, one-time)")
+            # trust_remote_code=True is required for jina-colbert (both tokenizer and model)
+            ColBERTReranker._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            ColBERTReranker._model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+            ColBERTReranker._model.eval()
+        self.tokenizer = ColBERTReranker._tokenizer
+        self.model = ColBERTReranker._model
 
     def _get_embeddings(self, text: str) -> torch.Tensor:
         inputs = self.tokenizer(text, return_tensors="pt", max_length=512, truncation=True)

@@ -20,6 +20,7 @@ class StreamingRAG:
     def __init__(self):
         """StreamingRAG with Hot Buffer vs. Cold Storage mechanics."""
         self._init_hot_buffer()
+        self._embedder = DualEmbeddingPipeline()  # Reuse single instance
 
     def _init_hot_buffer(self):
         """In-memory or fast SQLite hot buffer for documents < 1 hour old."""
@@ -45,7 +46,7 @@ class StreamingRAG:
         import numpy as np
         
         # Immediate sync embedding
-        pipeline = DualEmbeddingPipeline()
+        pipeline = self._embedder
         embeddings = pipeline.get_embeddings(content)
         if not embeddings or 'gemini' not in embeddings:
             logger.warning(f"Failed to ingest document {doc_id} into hot buffer: Embedding failed.")
@@ -71,7 +72,7 @@ class StreamingRAG:
         """
         import numpy as np
         
-        pipeline = DualEmbeddingPipeline()
+        pipeline = self._embedder
         query_embeddings = pipeline.get_embeddings(query)
         if not query_embeddings or 'gemini' not in query_embeddings:
             return []
