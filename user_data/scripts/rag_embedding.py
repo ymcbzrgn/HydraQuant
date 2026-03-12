@@ -18,14 +18,21 @@ from ai_config import AI_DB_PATH as DB_PATH
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 class DualEmbeddingPipeline:
+    # Failover list: try in order, skip on error
+    # gemini-embedding-001: GA, MTEB #1, 3072 native → Matryoshka to 768 for ChromaDB compat
+    # gemini-embedding-2-preview: Newest multimodal preview
+    GEMINI_EMBEDDING_MODELS = [
+        {"name": "gemini-embedding-001", "dims": 768},
+        {"name": "gemini-embedding-2-preview", "dims": 768},
+    ]
+
     def __init__(self):
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in .env")
-            
+
         # Phase 7: google.genai migration
         self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.gemini_model = "text-embedding-004"
-        
+
         logger.info("Loading local BGE-Financial embedding model...")
         self.local_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
         
@@ -71,20 +78,29 @@ class DualEmbeddingPipeline:
         logger.debug("Cache miss. Generating Dual Embeddings...")
         
         try:
-            # Gemini Embedding (Semantic, General)
-            # Freqtrade uses the newer model text-embedding-004
-            # Phase 7: Using new SDK client.models.embed_content
-            gemini_result = self.client.models.embed_content(
-                model=self.gemini_model,
-                contents=text
-            )
-            # Adapter Pattern for SDK differences
-            if hasattr(gemini_result, 'embeddings') and gemini_result.embeddings:
-                gemini_emb = gemini_result.embeddings[0].values
-            elif isinstance(gemini_result, dict) and 'embedding' in gemini_result:
-                gemini_emb = gemini_result['embedding']
-            else:
-                gemini_emb = gemini_result # Fallback
+            # Gemini Embedding with failover routing across available models
+            gemini_emb = None
+            for model_cfg in self.GEMINI_EMBEDDING_MODELS:
+                try:
+                    kwargs = {"model": model_cfg["name"], "contents": text}
+                    if model_cfg.get("dims"):
+                        kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
+                    gemini_result = self.client.models.embed_content(**kwargs)
+
+                    if hasattr(gemini_result, 'embeddings') and gemini_result.embeddings:
+                        gemini_emb = gemini_result.embeddings[0].values
+                    elif isinstance(gemini_result, dict) and 'embedding' in gemini_result:
+                        gemini_emb = gemini_result['embedding']
+                    else:
+                        gemini_emb = gemini_result
+                    logger.debug(f"Embedding via {model_cfg['name']} OK (dim={len(gemini_emb) if isinstance(gemini_emb, list) else '?'})")
+                    break  # Success — stop trying
+                except Exception as emb_err:
+                    logger.warning(f"Embedding model {model_cfg['name']} failed: {emb_err}")
+                    continue
+
+            if gemini_emb is None:
+                raise ValueError("All Gemini embedding models failed")
             
             # BGE-Financial Embedding (Financial Specific terms)
             bge_emb = self.local_model.encode(text, normalize_embeddings=True).tolist()
