@@ -16,6 +16,7 @@ from google.api_core import exceptions as google_exc
 import openai
 import groq
 import time
+import re
 
 # google.genai SDK (langchain-google-genai v4+) throws its own exceptions
 try:
@@ -32,6 +33,10 @@ _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 # Module-level model discovery cache — shared across ALL LLMRouter instances
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
 _MODEL_CACHE_TTL = 600.0  # 10 minutes
+
+# Per-model penalty box: "api_key:model_name" → unlock_timestamp
+# Gemini quotas are PER-MODEL PER-PROJECT — one model's 429 doesn't affect others on the same key
+MODEL_COOLDOWNS: Dict[str, float] = {}
 
 # Exceptions that CANNOT be recovered by failover — bugs in OUR code
 _HARD_CRASH_EXCEPTIONS = (ValueError, TypeError, KeyError, AttributeError, SyntaxError)
@@ -116,7 +121,7 @@ class LLMRouter:
                         api_key=key,
                         temperature=self.temperature,
                         timeout=self.request_timeout,
-                        max_retries=0
+                        max_retries=1  # MUST be 1 not 0: SDK bug treats 0 as "use default 5 retries"
                     ))
                 self.gemini_models_by_key[key] = models_for_key
 
@@ -195,7 +200,17 @@ class LLMRouter:
                     if "pro" in short:        return (3, short)
                     return (4, short)
                 discovered.sort(key=_model_priority)
-                logger.info(f"Discovered {len(discovered)} Gemini chat models: {discovered}")
+                # Deduplicate: gemini-X-flash and gemini-X-flash-001 share rate limits
+                all_shorts = {n.replace("models/", "") for n in discovered}
+                deduped = []
+                for name in discovered:
+                    short = name.replace("models/", "")
+                    base = re.sub(r'-\d{3}$', '', short)
+                    if base != short and base in all_shorts:
+                        continue  # Versioned variant — base model covers it
+                    deduped.append(name)
+                discovered = deduped
+                logger.info(f"Discovered {len(discovered)} Gemini chat models (deduped): {discovered}")
                 _GEMINI_MODEL_CACHE["models"] = discovered
                 _GEMINI_MODEL_CACHE["timestamp"] = now
                 return discovered
@@ -248,12 +263,52 @@ class LLMRouter:
                     KEY_COOLDOWNS[failed_key] = time.time() + COOLDOWN_DURATION
                     logger.warning(f"Key penalized for {COOLDOWN_DURATION}s.")
 
+    def _is_key_penalized(self, model) -> bool:
+        """Check if this model's API key is in the penalty box (auth/connection errors)."""
+        if hasattr(model, "google_api_key"):
+            key = getattr(model, "google_api_key")
+            if hasattr(key, "get_secret_value"):
+                key = key.get_secret_value()
+            with _COOLDOWN_LOCK:
+                return time.time() < KEY_COOLDOWNS.get(key, 0)
+        return False
+
+    def _penalize_model(self, model):
+        """Put a specific (key, model) combo into penalty box. Other models on same key stay active."""
+        api_key = ""
+        if hasattr(model, "google_api_key"):
+            api_key = getattr(model, "google_api_key")
+            if hasattr(api_key, "get_secret_value"):
+                api_key = api_key.get_secret_value()
+        m_name = getattr(model, "model_name", getattr(model, "model", "unknown"))
+        penalty_key = f"{api_key}:{m_name}"
+        with _COOLDOWN_LOCK:
+            if penalty_key not in MODEL_COOLDOWNS or time.time() > MODEL_COOLDOWNS[penalty_key]:
+                MODEL_COOLDOWNS[penalty_key] = time.time() + COOLDOWN_DURATION
+                logger.warning(f"[Penalize] {m_name} penalized {COOLDOWN_DURATION}s. Other models on this key still active.")
+
+    def _is_model_penalized(self, model) -> bool:
+        """Check if this specific (key, model) combo is rate-limited."""
+        api_key = ""
+        if hasattr(model, "google_api_key"):
+            api_key = getattr(model, "google_api_key")
+            if hasattr(api_key, "get_secret_value"):
+                api_key = api_key.get_secret_value()
+        m_name = getattr(model, "model_name", getattr(model, "model", "unknown"))
+        penalty_key = f"{api_key}:{m_name}"
+        with _COOLDOWN_LOCK:
+            return time.time() < MODEL_COOLDOWNS.get(penalty_key, 0)
+
     def invoke(self, messages: List[Any], **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking."""
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
 
         for model in chain:
+            # Skip if key is dead (auth/conn) or this specific model is rate-limited
+            if self._is_key_penalized(model) or self._is_model_penalized(model):
+                continue
+
             try:
                 start_time = time.time()
                 response = model.invoke(messages, **kwargs)
@@ -272,20 +327,24 @@ class LLMRouter:
 
                 return response
             except _HARD_CRASH_EXCEPTIONS as e:
-                # Our own code bug — crash immediately so we can fix it
                 logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
                 raise
             except Exception as e:
                 last_exception = e
                 m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                if isinstance(e, FAILOVER_EXCEPTIONS):
+                err_upper = str(e).upper()
+                if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
+                    # Rate limit: only THIS model's quota is exhausted, other models on same key have separate quota
+                    self._penalize_model(model)
+                    logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
+                elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
+                    # Auth error: entire key is broken
                     self._penalize_key(model)
-                    logger.info(f"[Failover] {m_name} → {type(e).__name__}. Next model...")
+                    logger.warning(f"[AuthError] {m_name} → {type(e).__name__}. Penalizing entire key.")
                 else:
-                    # Unknown exception (e.g. google.genai.errors.ClientError not in tuple)
-                    # Still failover — don't crash the whole chain
-                    self._penalize_key(model)
-                    logger.warning(f"[Failover] {m_name} → unexpected {type(e).__name__}: {e}. Next model...")
+                    # Unknown/other error: penalize model only (don't kill working models on same key)
+                    self._penalize_model(model)
+                    logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
                 continue
 
         logger.error(f"Complete LLM Failure (All Fallbacks Exhausted)")
@@ -299,6 +358,10 @@ class LLMRouter:
         last_exception: Optional[Exception] = None
 
         for model in chain:
+            # Skip if key is dead (auth/conn) or this specific model is rate-limited
+            if self._is_key_penalized(model) or self._is_model_penalized(model):
+                continue
+
             try:
                 start_time = time.time()
                 response = await model.ainvoke(messages, **kwargs)
@@ -322,12 +385,16 @@ class LLMRouter:
             except Exception as e:
                 last_exception = e
                 m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                if isinstance(e, FAILOVER_EXCEPTIONS):
+                err_upper = str(e).upper()
+                if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
+                    self._penalize_model(model)
+                    logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
+                elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
                     self._penalize_key(model)
-                    logger.info(f"[Failover] {m_name} → {type(e).__name__}. Next model...")
+                    logger.warning(f"[AuthError] {m_name} → {type(e).__name__}. Penalizing entire key.")
                 else:
-                    self._penalize_key(model)
-                    logger.warning(f"[Failover] {m_name} → unexpected {type(e).__name__}: {e}. Next model...")
+                    self._penalize_model(model)
+                    logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
                 continue
 
         logger.error(f"Complete LLM Async Failure (All Fallbacks Exhausted)")
