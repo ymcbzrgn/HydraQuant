@@ -167,14 +167,26 @@ class AutonomyManager:
         return False
 
     def _promote(self):
-        """Promote to next autonomy level."""
+        """Promote to next autonomy level (with DB-level guard against duplicates)."""
+        # Re-read DB level to prevent stale-instance duplicate promotions
+        db_level = self._load_level()
+        if db_level != self.current_level:
+            self.current_level = db_level
+            logger.info(f"[Autonomy] Stale instance detected, synced to DB level L{db_level}")
+            return
+
         new_level = min(5, self.current_level + 1)
         with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE autonomy_state SET level = ?, promoted_at = ?, days_at_level = 0, updated_at = ? WHERE id = 1",
-                (new_level, datetime.now(tz=timezone.utc).isoformat(), datetime.now(tz=timezone.utc).isoformat())
+            # Atomic: only promote if DB still at expected level
+            cursor = conn.execute(
+                "UPDATE autonomy_state SET level = ?, promoted_at = ?, days_at_level = 0, updated_at = ? WHERE id = 1 AND level = ?",
+                (new_level, datetime.now(tz=timezone.utc).isoformat(), datetime.now(tz=timezone.utc).isoformat(), self.current_level)
             )
             conn.commit()
+            if cursor.rowcount == 0:
+                logger.info(f"[Autonomy] Promotion skipped — DB level already changed")
+                self.current_level = self._load_level()
+                return
 
         logger.info(f"[Autonomy] PROMOTED: L{self.current_level} → L{new_level}")
         try:
@@ -182,7 +194,7 @@ class AutonomyManager:
             AITelegramNotifier().send_alert(f"Autonomy PROMOTED L{self.current_level} → L{new_level}. Win rate & Sharpe sustained.", level="INFO")
         except Exception:
             pass
-            
+
         self.current_level = new_level
 
     def check_demotion(self, daily_loss_pct: float, weekly_loss_pct: float) -> bool:
@@ -201,14 +213,24 @@ class AutonomyManager:
         return False
 
     def _demote(self):
-        """Demote one autonomy level."""
+        """Demote one autonomy level (with DB-level guard against duplicates)."""
+        db_level = self._load_level()
+        if db_level != self.current_level:
+            self.current_level = db_level
+            logger.info(f"[Autonomy] Stale instance detected, synced to DB level L{db_level}")
+            return
+
         new_level = max(0, self.current_level - 1)
         with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE autonomy_state SET level = ?, days_at_level = 0, updated_at = ? WHERE id = 1",
-                (new_level, datetime.now(tz=timezone.utc).isoformat())
+            cursor = conn.execute(
+                "UPDATE autonomy_state SET level = ?, days_at_level = 0, updated_at = ? WHERE id = 1 AND level = ?",
+                (new_level, datetime.now(tz=timezone.utc).isoformat(), self.current_level)
             )
             conn.commit()
+            if cursor.rowcount == 0:
+                logger.info(f"[Autonomy] Demotion skipped — DB level already changed")
+                self.current_level = self._load_level()
+                return
 
         logger.warning(f"[Autonomy] DEMOTED: L{self.current_level} → L{new_level}")
         try:
@@ -216,7 +238,7 @@ class AutonomyManager:
             AITelegramNotifier().send_alert(f"Autonomy DEMOTED L{self.current_level} → L{new_level} (Weekly loss > 5%)", level="WARNING")
         except Exception:
             pass
-            
+
         self.current_level = new_level
 
     def should_scale_down(self, daily_loss_pct: float) -> float:

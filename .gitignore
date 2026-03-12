@@ -19,6 +19,11 @@ freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
 build_helpers/ta-lib/*
 
+# Node / FreqUI
+node_modules/
+frequi/dist/
+*.d.ts.map
+
 # Macos related
 .DS_Store
 

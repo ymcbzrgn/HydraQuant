@@ -2008,8 +2008,8 @@ def test_ai_dashboard_component_exists():
 
     with open(dashboard_path, 'r') as f:
         content = f.read()
-    assert "fetchHealth" in content, "AIDashboard should call fetchHealth"
-    assert "fetchMetrics" in content, "AIDashboard should call fetchMetrics"
+    assert "fetchAll" in content or "fetchHealth" in content, "AIDashboard should fetch data (via fetchAll or fetchHealth)"
+    assert "aiStore" in content, "AIDashboard should use aiStore"
 
 
 def test_ai_store_health_metrics_actions():

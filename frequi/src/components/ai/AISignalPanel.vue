@@ -4,7 +4,7 @@
       <h2 class="text-xl font-bold">AI Trade Signals</h2>
       <div class="flex gap-2">
         <InputText v-model="filters.pair" placeholder="Search Pair..." class="p-inputtext-sm" />
-        <Dropdown v-model="filters.direction" :options="['ALL', 'BULL', 'BEAR', 'NEUTRAL']" class="p-dropdown-sm w-32" />
+        <Dropdown v-model="filters.direction" :options="['ALL', 'BULLISH', 'BEARISH', 'NEUTRAL']" class="p-dropdown-sm w-32" />
         <Button icon="pi pi-refresh" @click="refreshData" :loading="aiStore.loading" class="p-button-sm p-button-outlined" />
       </div>
     </div>
@@ -111,8 +111,8 @@ const onRowClick = (event: any) => {
 };
 
 const getDirectionSeverity = (signal: string) => {
-  if (signal === 'BULL') return 'success';
-  if (signal === 'BEAR') return 'danger';
+  if (signal === 'BULLISH') return 'success';
+  if (signal === 'BEARISH') return 'danger';
   return 'warning';
 };
 

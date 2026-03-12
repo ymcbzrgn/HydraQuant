@@ -186,6 +186,7 @@ declare global {
   const unrefElement: typeof import('@vueuse/core').unrefElement
   const until: typeof import('@vueuse/core').until
   const useActiveElement: typeof import('@vueuse/core').useActiveElement
+  const useAiStore: typeof import('./stores/aiStore').useAiStore
   const useAlertForBot: typeof import('./utils/alerts').useAlertForBot
   const useAlertsStore: typeof import('./stores/alertsStore').useAlertsStore
   const useAnimate: typeof import('@vueuse/core').useAnimate
@@ -396,6 +397,9 @@ declare global {
   export type { Component, Slot, Slots, ComponentPublicInstance, ComputedRef, DirectiveBinding, ExtractDefaultPropTypes, ExtractPropTypes, ExtractPublicPropTypes, InjectionKey, PropType, Ref, ShallowRef, MaybeRef, MaybeRefOrGetter, VNode, WritableComputedRef } from 'vue'
   import('vue')
   // @ts-ignore
+  export type { AIStatus, AISentiment, MarketSentiment, AISignal, AICostSummary, AIAutonomy, AIRisk, AIForgonePnl, AIHealth, AIMetrics, AIPortfolio, AISettings, AIDailyStats, AIHypothetical, AIAlert } from './stores/aiStore'
+  import('./stores/aiStore')
+  // @ts-ignore
   export type { ColorPreferences } from './stores/colors'
   import('./stores/colors')
   // @ts-ignore
@@ -594,6 +598,7 @@ declare module 'vue' {
     readonly unrefElement: UnwrapRef<typeof import('@vueuse/core')['unrefElement']>
     readonly until: UnwrapRef<typeof import('@vueuse/core')['until']>
     readonly useActiveElement: UnwrapRef<typeof import('@vueuse/core')['useActiveElement']>
+    readonly useAiStore: UnwrapRef<typeof import('./stores/aiStore')['useAiStore']>
     readonly useAlertForBot: UnwrapRef<typeof import('./utils/alerts')['useAlertForBot']>
     readonly useAlertsStore: UnwrapRef<typeof import('./stores/alertsStore')['useAlertsStore']>
     readonly useAnimate: UnwrapRef<typeof import('@vueuse/core')['useAnimate']>
