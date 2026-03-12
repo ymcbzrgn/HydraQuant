@@ -17,6 +17,13 @@ import openai
 import groq
 import time
 
+# google.genai SDK (langchain-google-genai v4+) throws its own exceptions
+try:
+    from google.genai import errors as genai_errors
+    _GENAI_FAILOVER = (genai_errors.ClientError, genai_errors.ServerError)
+except ImportError:
+    _GENAI_FAILOVER = ()
+
 # Global dictionary to store API Keys currently in Penalty Box: {api_key: unlock_timestamp}
 KEY_COOLDOWNS: Dict[str, float] = {}
 COOLDOWN_DURATION = 60.0  # seconds
@@ -26,9 +33,12 @@ _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
 _MODEL_CACHE_TTL = 600.0  # 10 minutes
 
-# Sadece bu hatalarda (Rate Limit, Server Çokmesi, Timeout, Geçersiz Key) sistem bir sonraki yedek LLM'e atlar.
-# Eğer hata '400 Bad Request' (aşırı uzun prompt, bozuk JSON) ise failover yapılmayıp anında çöker ki hatayı görelim.
+# Exceptions that CANNOT be recovered by failover — bugs in OUR code
+_HARD_CRASH_EXCEPTIONS = (ValueError, TypeError, KeyError, AttributeError, SyntaxError)
+
+# Everything else = failover. This list is for penalty-box logic (rate limit detection).
 FAILOVER_EXCEPTIONS = (
+    *_GENAI_FAILOVER,
     google_exc.NotFound,
     google_exc.TooManyRequests,
     google_exc.ResourceExhausted,
@@ -176,7 +186,15 @@ class LLMRouter:
                 discovered.append(name)
 
             if discovered:
-                discovered.sort(reverse=True)
+                # Sort: flash-lite first (cheapest/fastest), then flash, then pro last
+                def _model_priority(name):
+                    short = name.replace("models/", "")
+                    if "flash-lite" in short: return (0, short)
+                    if "flash" in short:      return (1, short)
+                    if "lite" in short:       return (2, short)
+                    if "pro" in short:        return (3, short)
+                    return (4, short)
+                discovered.sort(key=_model_priority)
                 logger.info(f"Discovered {len(discovered)} Gemini chat models: {discovered}")
                 _GEMINI_MODEL_CACHE["models"] = discovered
                 _GEMINI_MODEL_CACHE["timestamp"] = now
@@ -219,53 +237,57 @@ class LLMRouter:
             
         return chain
             
+    def _penalize_key(self, model):
+        """Put a Gemini API key into the penalty box if the model has one."""
+        if hasattr(model, "google_api_key"):
+            failed_key = getattr(model, "google_api_key")
+            if hasattr(failed_key, "get_secret_value"):
+                failed_key = failed_key.get_secret_value()
+            with _COOLDOWN_LOCK:
+                if failed_key not in KEY_COOLDOWNS or time.time() > KEY_COOLDOWNS[failed_key]:
+                    KEY_COOLDOWNS[failed_key] = time.time() + COOLDOWN_DURATION
+                    logger.warning(f"Key penalized for {COOLDOWN_DURATION}s.")
+
     def invoke(self, messages: List[Any], **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking."""
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
-        
+
         for model in chain:
             try:
                 start_time = time.time()
                 response = model.invoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
-                
-                # Token tracking heuristics based on Langchain structure
+
                 in_tok = 0
                 out_tok = 0
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     in_tok = response.usage_metadata.get('input_tokens', 0)
                     out_tok = response.usage_metadata.get('output_tokens', 0)
-                    
+
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
                 provider = "gemini" if "gemini" in m_name.lower() else ("groq" if "llama" in m_name.lower() else "openrouter")
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
-                
+
                 return response
+            except _HARD_CRASH_EXCEPTIONS as e:
+                # Our own code bug — crash immediately so we can fix it
+                logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
+                raise
             except Exception as e:
                 last_exception = e
-                # Check if this error is meant to be skipped
+                m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                 if isinstance(e, FAILOVER_EXCEPTIONS):
-                    # Identify if it's a Gemini model and extract the precise rate-limited key
-                    if hasattr(model, "google_api_key"):
-                        failed_key = getattr(model, "google_api_key")
-                        if hasattr(failed_key, "get_secret_value"):
-                            failed_key = failed_key.get_secret_value()
-                            
-                        # Put the key in the Penalty Box (thread-safe)
-                        with _COOLDOWN_LOCK:
-                            if failed_key not in KEY_COOLDOWNS or time.time() > KEY_COOLDOWNS[failed_key]:
-                                KEY_COOLDOWNS[failed_key] = time.time() + COOLDOWN_DURATION
-                                logger.warning(f"Key Rate-Limited! Sniping key into Penalty Box for {COOLDOWN_DURATION}s.")
-                            
-                    logger.info(f"LLM Node Failed ({type(e).__name__}). Routing to next available node...")
-                    continue
+                    self._penalize_key(model)
+                    logger.info(f"[Failover] {m_name} → {type(e).__name__}. Next model...")
                 else:
-                    # It's a structural error (e.g. 400 Bad Request, context length, bad JSON). Crash intentionally.
-                    logger.error(f"Unrecoverable LLM Error! Halting failover chain: {e}")
-                    raise e
-                    
+                    # Unknown exception (e.g. google.genai.errors.ClientError not in tuple)
+                    # Still failover — don't crash the whole chain
+                    self._penalize_key(model)
+                    logger.warning(f"[Failover] {m_name} → unexpected {type(e).__name__}: {e}. Next model...")
+                continue
+
         logger.error(f"Complete LLM Failure (All Fallbacks Exhausted)")
         if last_exception:
             raise last_exception
@@ -275,44 +297,39 @@ class LLMRouter:
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
-        
+
         for model in chain:
             try:
                 start_time = time.time()
                 response = await model.ainvoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
-                
+
                 in_tok = 0
                 out_tok = 0
                 if hasattr(response, 'usage_metadata') and response.usage_metadata:
                     in_tok = response.usage_metadata.get('input_tokens', 0)
                     out_tok = response.usage_metadata.get('output_tokens', 0)
-                    
+
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
                 provider = "gemini" if "gemini" in m_name.lower() else ("groq" if "llama" in m_name.lower() else "openrouter")
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
                 return response
+            except _HARD_CRASH_EXCEPTIONS as e:
+                logger.error(f"Code bug in async LLM pipeline: {type(e).__name__}: {e}")
+                raise
             except Exception as e:
                 last_exception = e
+                m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                 if isinstance(e, FAILOVER_EXCEPTIONS):
-                    if hasattr(model, "google_api_key"):
-                        failed_key = getattr(model, "google_api_key")
-                        if hasattr(failed_key, "get_secret_value"):
-                            failed_key = failed_key.get_secret_value()
-                            
-                        with _COOLDOWN_LOCK:
-                            if failed_key not in KEY_COOLDOWNS or time.time() > KEY_COOLDOWNS[failed_key]:
-                                KEY_COOLDOWNS[failed_key] = time.time() + COOLDOWN_DURATION
-                                logger.warning(f"Key Rate-Limited! Sniping key into Penalty Box for {COOLDOWN_DURATION}s.")
-                            
-                    logger.info(f"LLM Node Async Failed ({type(e).__name__}). Routing to next available node...")
-                    continue
+                    self._penalize_key(model)
+                    logger.info(f"[Failover] {m_name} → {type(e).__name__}. Next model...")
                 else:
-                    logger.error(f"Unrecoverable LLM Error! Halting failover chain: {e}")
-                    raise e
-                    
+                    self._penalize_key(model)
+                    logger.warning(f"[Failover] {m_name} → unexpected {type(e).__name__}: {e}. Next model...")
+                continue
+
         logger.error(f"Complete LLM Async Failure (All Fallbacks Exhausted)")
         if last_exception:
             raise last_exception
