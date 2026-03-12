@@ -53,8 +53,8 @@ class HybridRetriever:
         try:
             from colbert_reranker import ColBERTReranker
             self.colbert_reranker = ColBERTReranker()
-        except ImportError:
-            logger.warning("ColBERT not found, disabling ColBERT component. Run pip install transformers torch")
+        except Exception as e:
+            logger.warning(f"ColBERT disabled: {e}")
             self.colbert_reranker = None
 
         try:
