@@ -168,6 +168,7 @@ class LLMRouter:
             logger.info(f"Using cached model list ({len(_GEMINI_MODEL_CACHE['models'])} models)")
             return _GEMINI_MODEL_CACHE["models"]
 
+        client = None
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
@@ -220,6 +221,13 @@ class LLMRouter:
         except Exception as e:
             logger.warning(f"Model discovery failed: {e}. Using fallback list.")
             return FALLBACK_MODELS
+        finally:
+            # Close throwaway client to prevent httpx connection pool leak
+            if client and hasattr(client, '_api_client'):
+                try:
+                    client._api_client.close()
+                except Exception:
+                    pass
 
     def _get_chain(self) -> List[Any]:
         """Constructs and returns the active LangChain fallbacks without rate-limited keys."""
@@ -299,8 +307,13 @@ class LLMRouter:
         with _COOLDOWN_LOCK:
             return time.time() < MODEL_COOLDOWNS.get(penalty_key, 0)
 
-    def invoke(self, messages: List[Any], **kwargs):
-        """Synchronously invokes the custom failover loop with Cooldown tracking."""
+    def invoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
+        """Synchronously invokes the custom failover loop with Cooldown tracking.
+
+        Args:
+            temperature: Optional per-call temperature override. Uses model.bind()
+                         which creates a lightweight wrapper (no new connections).
+        """
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
 
@@ -310,8 +323,10 @@ class LLMRouter:
                 continue
 
             try:
+                # Per-call temperature override via LangChain bind() — thread-safe, zero allocation
+                target = model.bind(temperature=temperature) if temperature is not None else model
                 start_time = time.time()
-                response = model.invoke(messages, **kwargs)
+                response = target.invoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
 
                 in_tok = 0
@@ -352,7 +367,7 @@ class LLMRouter:
             raise last_exception
         raise ValueError("No fallbacks available.")
 
-    async def ainvoke(self, messages: List[Any], **kwargs):
+    async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
@@ -363,8 +378,9 @@ class LLMRouter:
                 continue
 
             try:
+                target = model.bind(temperature=temperature) if temperature is not None else model
                 start_time = time.time()
-                response = await model.ainvoke(messages, **kwargs)
+                response = await target.ainvoke(messages, **kwargs)
                 latency_ms = (time.time() - start_time) * 1000
 
                 in_tok = 0
