@@ -33,9 +33,9 @@ class AIFreqtradeSizer(IStrategy):
 
     # Enable FreqAI
     process_only_new_candles = True
-    use_sell_signal = True
-    sell_profit_only = False
-    ignore_roi_if_buy_signal = False
+    use_exit_signal = True
+    exit_profit_only = False
+    ignore_roi_if_entry_signal = False
     startup_candle_count = 200
 
     # Minimal ROI (handled mostly by AI and custom stoploss)
