@@ -18,8 +18,8 @@
     },
     "exchange": {
         "name": "binance",
-        "key": "env:BINANCE_TESTNET_KEY",
-        "secret": "env:BINANCE_TESTNET_SECRET",
+        "key": "",
+        "secret": "",
         "ccxt_config": {
             "options": {
                 "defaultType": "future"

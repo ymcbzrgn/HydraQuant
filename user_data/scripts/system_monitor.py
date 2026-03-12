@@ -192,7 +192,7 @@ class SystemMonitor:
             five_min_ago = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn = sqlite3.connect(self.db_path, timeout=5)
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM system_metrics WHERE metric_name = 'llm_success' AND timestamp >= ?",
+                "SELECT COUNT(*) as cnt FROM llm_calls WHERE timestamp >= ?",
                 (five_min_ago,)
             ).fetchone()
             checks["llm_router"] = (row[0] > 0) if row else False

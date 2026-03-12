@@ -45,12 +45,22 @@ def ai_status():
     cost_tracker = LLMCostTracker(db_path=AI_DB_PATH)
     daily_cost = cost_tracker.get_daily_summary().get("total_cost", 0.0)
 
+    # Read last used model from llm_calls
+    active_model = "awaiting first call"
+    try:
+        with get_db_conn() as conn:
+            row = conn.execute("SELECT model FROM llm_calls ORDER BY id DESC LIMIT 1").fetchone()
+            if row:
+                active_model = row["model"]
+    except Exception:
+        pass
+
     return {
         "status": "online",
         "autonomy_level": autonomy.current_level,
-        "active_model": "gemini-2.5-flash",
+        "active_model": active_model,
         "daily_cost": daily_cost,
-        "cache_hit_rate": 0.0, # Placeholder until metrics are built out
+        "cache_hit_rate": 0.0,
         "uptime": "100%"
     }
     
