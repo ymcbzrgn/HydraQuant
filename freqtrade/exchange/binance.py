@@ -84,9 +84,16 @@ class Binance(Exchange):
 
     def _init_ccxt(self, exchange_config, sync, ccxt_kwargs):
         api = super()._init_ccxt(exchange_config, sync, ccxt_kwargs)
-        # Binance Demo/Testnet: skip fetch_currencies (hits spot API, rejects futures-only keys)
+        # Binance Demo: switch all URLs to demo equivalents and mark as demo env.
+        # sapi endpoints don't exist on demo (confirmed by ccxt: "demotrading does not
+        # support sapi endpoints"), so enableDemoTrading=True tells ccxt to skip them
+        # (fetch_currencies, margin/allPairs, margin/isolated/allPairs).
         if self._config.get("testnet", False):
-            api.has["fetchCurrencies"] = False
+            api.options["enableDemoTrading"] = True
+            demo_urls = api.urls.get("demo", {})
+            if demo_urls:
+                for key, url in demo_urls.items():
+                    api.urls["api"][key] = url
         return api
 
     def get_proxy_coin(self) -> str:
