@@ -172,6 +172,19 @@ class RiskBudgetManager:
 
         logger.info(f"[RiskBudget] Weekly adjust: PnL={weekly_pnl_pct:.2f}%, new multiplier={self._multiplier:.2f}")
 
+    def update_portfolio_value(self, real_balance: float):
+        """
+        Sync portfolio_value with real exchange balance.
+        Called from AIFreqtradeSizer on every trade to keep budget proportional to actual account.
+        """
+        if real_balance <= 0:
+            return
+        old_value = self.portfolio_value
+        self.portfolio_value = real_balance
+        if abs(old_value - real_balance) > 1.0:
+            logger.info(f"[RiskBudget] Portfolio synced: ${old_value:.2f} → ${real_balance:.2f} "
+                        f"(budget: ${self.daily_budget:.2f})")
+
     def reset_daily(self):
         """Force reset the daily budget (normally auto-resets via _load_state)."""
         self._consumed = 0.0

@@ -137,14 +137,9 @@ class LLMCostTracker:
         return summary
 
     def check_budget(self, daily_limit_usd: float = 5.0) -> bool:
-        """Check if we are under the daily budget."""
+        """Check if we are under the daily budget. Logging only, no enforcement."""
         daily_cost = self.get_daily_cost()
         if daily_cost >= daily_limit_usd:
-            logger.warning(f"LLM DAILY BUDGET EXCEEDED! Current: ${daily_cost:.4f}, Limit: ${daily_limit_usd:.4f}")
-            try:
-                from telegram_notifier import AITelegramNotifier
-                AITelegramNotifier().send_alert(f"Daily API budget exceeded (${daily_cost:.2f} / ${daily_limit_usd:.2f})", level="CRITICAL")
-            except Exception:
-                pass
+            logger.info(f"[LLM Cost] Daily cost: ${daily_cost:.4f} (above ${daily_limit_usd:.4f} threshold)")
             return False
         return True

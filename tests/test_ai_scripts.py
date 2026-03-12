@@ -2129,7 +2129,12 @@ def test_telegram_daily_with_portfolio():
         "daily_pnl_pct": 0.0,
         "api_cost_today": 0.15,
         "autonomy_level": "L1",
+        "portfolio_value": 5000.0,
         "forgone_pnl": 0.0,
+        "assets": {
+            "USDT": {"amount": 3000.0, "usd": 3000.0},
+            "BTC": {"amount": 0.02, "usd": 2000.0},
+        },
         "hypothetical": {
             "start_balance": 100.0,
             "current_balance": 112.50,
@@ -2146,6 +2151,10 @@ def test_telegram_daily_with_portfolio():
     assert "$112.50" in msg
     assert "+12.50%" in msg
     assert "15 trade" in msg
+    # Asset breakdown
+    assert "USDT" in msg
+    assert "BTC" in msg
+    assert "Toplam" in msg
 
 
 def test_forgone_method_name_consistency():
@@ -2192,4 +2201,83 @@ def test_db_hypothetical_portfolio_table():
     assert "balance_before" in columns
     assert "balance_after" in columns
     assert "trade_pnl_pct" in columns
+
+
+# ============================================================
+# Portfolio Awareness Tests
+# ============================================================
+
+def test_risk_budget_update_portfolio_value(tmp_db):
+    """Verify RiskBudget syncs with real exchange balance."""
+    from risk_budget import RiskBudgetManager
+    mgr = RiskBudgetManager(portfolio_value=10000.0, db_path=tmp_db)
+    assert mgr.portfolio_value == 10000.0
+    assert mgr.daily_budget == pytest.approx(100.0, abs=1.0)  # 10k * 1%
+
+    # Simulate account growth to $50k
+    mgr.update_portfolio_value(50000.0)
+    assert mgr.portfolio_value == 50000.0
+    assert mgr.daily_budget == pytest.approx(500.0, abs=1.0)  # 50k * 1%
+
+    # Zero/negative ignored
+    mgr.update_portfolio_value(0.0)
+    assert mgr.portfolio_value == 50000.0  # Unchanged
+    mgr.update_portfolio_value(-100.0)
+    assert mgr.portfolio_value == 50000.0  # Unchanged
+
+
+def test_autonomy_max_stake_scales_with_portfolio(tmp_db):
+    """Verify AutonomyManager max_stake scales with portfolio size."""
+    from autonomy_manager import AutonomyManager
+    mgr = AutonomyManager(db_path=tmp_db)
+    assert mgr.current_level == 0
+
+    # L0 with $10k portfolio: max(10000 * 0.01, 10) = max(100, 10) = $100
+    cap = mgr.get_max_stake(portfolio_value=10000.0)
+    assert cap == pytest.approx(100.0, abs=0.01)
+
+    # L0 with tiny $500 portfolio: max(500 * 0.01, 10) = max(5, 10) = $10 (floor)
+    cap_small = mgr.get_max_stake(portfolio_value=500.0)
+    assert cap_small == pytest.approx(10.0, abs=0.01)
+
+    # L0 with no portfolio (fallback): $10 fixed minimum
+    cap_none = mgr.get_max_stake()
+    assert cap_none == pytest.approx(10.0, abs=0.01)
+
+
+def test_autonomy_max_stake_no_cap_l4_l5(tmp_db):
+    """L4/L5 should have no stake cap."""
+    from autonomy_manager import AutonomyManager
+    mgr = AutonomyManager(db_path=tmp_db)
+    # Force L4
+    with mgr._get_conn() as conn:
+        conn.execute("UPDATE autonomy_state SET level = 4 WHERE id = 1")
+        conn.commit()
+    mgr.current_level = 4
+    assert mgr.get_max_stake(portfolio_value=100000.0) is None
+
+
+def test_api_ai_portfolio_endpoint():
+    """Verify /api/ai/portfolio endpoint exists and doesn't crash."""
+    from api_ai import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    resp = client.get("/api/ai/portfolio")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "total_balance" in data
+
+
+def test_strategy_has_sync_method():
+    """Verify AIFreqtradeSizer has _sync_portfolio_to_ai method."""
+    import os
+    strategy_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "freqtrade-strategies", "user_data", "strategies", "AIFreqtradeSizer.py"
+    )
+    with open(strategy_path, 'r') as f:
+        content = f.read()
+    assert "_sync_portfolio_to_ai" in content, "Strategy must bridge wallet to AI modules"
+    assert "update_portfolio_value" in content, "Strategy must call update_portfolio_value on RiskBudget"
+    assert "portfolio_state" in content, "Strategy must persist balance to SQLite"
 

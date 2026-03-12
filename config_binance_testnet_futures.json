@@ -5,7 +5,7 @@
     "testnet": true,
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
-    "max_open_trades": 5,
+    "max_open_trades": 20,
     "entry_pricing": {
         "price_side": "other",
         "use_order_book": true,
@@ -33,16 +33,28 @@
         },
         "ccxt_sync_config": {},
         "ccxt_async_config": {},
-        "pair_whitelist": [
-            "BTC/USDT:USDT",
-            "ETH/USDT:USDT"
-        ],
+        "pair_whitelist": [],
         "pair_blacklist": [
-            "BNB/.*"
+            "(BULL|BEAR|UP|DOWN|HALF|HEDGE)/.*",
+            ".*(BUSD|TUSD|FDUSD).*"
         ]
     },
     "pairlists": [
-        {"method": "StaticPairList"}
+        {
+            "method": "VolumePairList",
+            "number_assets": 100,
+            "sort_key": "quoteVolume",
+            "min_value": 0,
+            "refresh_period": 1800
+        },
+        {
+            "method": "PriceFilter",
+            "low_price_ratio": 0.001
+        },
+        {
+            "method": "SpreadFilter",
+            "max_spread_ratio": 0.01
+        }
     ],
     "api_server": {
         "enabled": true,

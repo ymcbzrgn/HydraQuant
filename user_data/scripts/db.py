@@ -104,6 +104,19 @@ def init_db():
         )
     ''')
 
+    # Portfolio State: Gerçek bakiyeyi SQLite'a persist et (scheduler/API okusun)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            stake_currency TEXT DEFAULT 'USDT',
+            total_balance REAL DEFAULT 0.0,
+            free_balance REAL DEFAULT 0.0,
+            in_trades REAL DEFAULT 0.0,
+            assets_json TEXT DEFAULT '{}',
+            updated_at TEXT
+        )
+    ''')
+
     # Hypothetical Portfolio: "$100 ile başlasaydın şuan ne olurdu?" tracking
     c.execute('''
         CREATE TABLE IF NOT EXISTS hypothetical_portfolio (

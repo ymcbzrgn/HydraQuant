@@ -182,13 +182,28 @@ class PipelineScheduler:
         except Exception as e:
             logger.error(f"[Scheduler:Job] Embedding failed: {e}")
 
+    def _read_portfolio_value(self) -> float:
+        """Read last known portfolio balance from SQLite (written by strategy)."""
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            row = conn.execute("SELECT total_balance FROM portfolio_state WHERE id = 1").fetchone()
+            conn.close()
+            if row and float(row['total_balance']) > 0:
+                return float(row['total_balance'])
+        except Exception:
+            pass
+        return 10000.0  # Fallback if no sync yet
+
     def _daily_reset(self):
         """Job: Reset daily risk budget at 00:00 UTC."""
         logger.info("[Scheduler:Job] Daily risk budget reset...")
         try:
             from risk_budget import RiskBudgetManager
-            mgr = RiskBudgetManager()
+            portfolio_value = self._read_portfolio_value()
+            mgr = RiskBudgetManager(portfolio_value=portfolio_value)
             mgr.reset_daily()
+            logger.info(f"[Scheduler:Job] Budget reset with portfolio=${portfolio_value:.2f}")
         except Exception as e:
             logger.error(f"[Scheduler:Job] Daily reset failed: {e}")
 
@@ -257,14 +272,6 @@ class PipelineScheduler:
 
             if health["status"] == "critical":
                 logger.error(f"[Scheduler:Job] CRITICAL health: {health['alerts']}")
-                # Attempt Telegram alert
-                try:
-                    from telegram_notifier import AITelegramNotifier
-                    notifier = AITelegramNotifier()
-                    alert_msg = f"CRITICAL SYSTEM ALERT:\n" + "\n".join(health["alerts"])
-                    notifier.send_alert(alert_msg)
-                except Exception:
-                    pass
         except Exception as e:
             logger.error(f"[Scheduler:Job] Health check failed: {e}")
 
@@ -338,9 +345,22 @@ class PipelineScheduler:
             cost_tracker = LLMCostTracker()
             cost_summary = cost_tracker.get_daily_summary()
             stats["api_cost_today"] = sum(m.get("cost_usd", 0) for m in cost_summary.get("models", {}).values())
-            
+
             autonomy = AutonomyManager()
             stats["autonomy_level"] = f"L{autonomy.current_level}"
+
+            # Real portfolio balance + asset breakdown
+            stats["portfolio_value"] = self._read_portfolio_value()
+            try:
+                from db import get_db_connection
+                import json
+                conn = get_db_connection()
+                row = conn.execute("SELECT assets_json FROM portfolio_state WHERE id = 1").fetchone()
+                conn.close()
+                if row and row['assets_json']:
+                    stats["assets"] = json.loads(row['assets_json'])
+            except Exception:
+                pass
             
             forgone_engine = ForgonePnLEngine()
             f_summary = forgone_engine.weekly_summary()
