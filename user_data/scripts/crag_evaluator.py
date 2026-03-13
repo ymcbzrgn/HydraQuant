@@ -13,6 +13,7 @@ import os
 import sys
 import logging
 import json
+import re
 from typing import List, Dict, Any, Optional, Tuple
 
 sys.path.append(os.path.dirname(__file__))
@@ -98,6 +99,7 @@ Score the relevance of these documents to the query."""
         try:
             response = self.router.invoke(messages)
             content = str(response.content).strip()
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
             content = content.replace("```json", "").replace("```", "").strip()
             if not content:
                 logger.warning("[CRAG] Empty LLM response. Failing open as CORRECT.")

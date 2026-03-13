@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Any, List
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_router import LLMRouter
@@ -71,7 +72,8 @@ class SelfRAG:
                 HumanMessage(content=prompt)
             ])
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)
-            critique_str = str(critique_str).replace("```json", "").replace("```", "").strip()
+            critique_str = re.sub(r'<think>.*?</think>', '', str(critique_str), flags=re.DOTALL)
+            critique_str = critique_str.replace("```json", "").replace("```", "").strip()
 
             if not critique_str:
                 logger.warning("[Self-RAG] Empty response from LLM. Failing open.")
