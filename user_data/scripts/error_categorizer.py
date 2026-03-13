@@ -109,10 +109,14 @@ class ErrorCategorizer:
                 content = " ".join([str(c) for c in content])
             
             content_str = str(content).strip()
-            
+
             # Clean possible markdown JSON wrappers gracefully
             content_str = content_str.replace("```json", "").replace("```", "").strip()
-                
+
+            if not content_str:
+                logger.warning(f"[ErrorCategorizer] Empty LLM response for trade {trade['id']}. Skipping.")
+                return False
+
             result = json.loads(content_str)
             category = result.get("error_category", "UNKNOWN")
             explanation = result.get("explanation", "Failed to parse explanation.")

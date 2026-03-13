@@ -163,10 +163,10 @@ def analyze_sentiment(state: GraphState):
         c = conn.cursor()
         
         # Fear & Greed Index (live from fng_fetcher.py)
-        c.execute("SELECT value, value_classification FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1")
+        c.execute("SELECT value, classification FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1")
         fng_row = c.fetchone()
         if fng_row:
-            db_context_parts.append(f"Fear & Greed Index: {fng_row['value']} ({fng_row['value_classification']}).")
+            db_context_parts.append(f"Fear & Greed Index: {fng_row['value']} ({fng_row['classification']}).")
         else:
             db_context_parts.append("Fear & Greed Index: Data unavailable.")
             
@@ -426,6 +426,11 @@ Respond in valid JSON ONLY, no markdown:
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
 
         raw_content = content_raw.replace("```json", "").replace("```", "").strip()
+
+        if not raw_content:
+            logger.warning("[NODE] Coordinator received empty LLM response. Defaulting to NEUTRAL.")
+            signal, conf, reason = "NEUTRAL", 0.0, "Empty LLM response from coordinator"
+            return {"signal": signal, "confidence": conf, "reasoning": reason}
 
         try:
             data = json.loads(raw_content)
