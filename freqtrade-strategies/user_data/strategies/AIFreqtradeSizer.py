@@ -60,32 +60,137 @@ class AIFreqtradeSizer(IStrategy):
         self.db_path = os.path.join(self.config['user_data_dir'], "db", "ai_data.sqlite")
         self.rag_script_path = os.path.join(self.config['user_data_dir'], "scripts", "rag_graph.py")
         self.ai_signal_cache = {} # Memory cache: { "BTC/USDT": {"signal": "BULLISH", "confidence": 0.8, "timestamp": datetime} }
-        self.cache_ttl_hours = 4 # The LLM decision is valid for 4 hours unless trend sharply breaks
-        
+        self.cache_ttl_hours = 4 # Non-NEUTRAL signals valid for 4 hours
+        self._neutral_ttl_hours = 0.9  # NEUTRAL signals expire before next 1h candle
+
         # Phase 3.5: Forgone P&L Engine — tracks every missed signal
         self.forgone_engine = ForgonePnLEngine(db_path=self.db_path)
         # Map pair -> forgone_id for resolving on trade exit
         self._forgone_ids: dict = {}
-        
+
         # Risk/Position Management Modules
         from risk_budget import RiskBudgetManager
         from position_sizer import BayesianKelly, PositionSizer
         from telegram_notifier import AITelegramNotifier
         from autonomy_manager import AutonomyManager
-        
+
         self.risk_budget = RiskBudgetManager(db_path=self.db_path)
         self._bayesian_kelly = BayesianKelly(db_path=self.db_path)
         self.autonomy_manager = AutonomyManager(db_path=self.db_path)
-        
+
         self._position_sizer = PositionSizer()
         # Share instances with the PositionSizer to ensure state synchronization
         self._position_sizer.bayesian_kelly = self._bayesian_kelly
         self._position_sizer.autonomy = self.autonomy_manager
-        
+
         self._telegram = AITelegramNotifier()
         self._last_portfolio_sync = None  # Track last sync time
 
         logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget & Telegram.")
+
+    def bot_loop_start(self, current_time, **kwargs):
+        """
+        Pre-fetch AI signals for ALL pairs in parallel (5 workers).
+        Runs BEFORE analyze() → populate_entry_trend reads from cache (instant).
+        Total analysis drops from ~38min (sequential) to ~2-4min (parallel).
+        """
+        if self.dp.runmode.value not in ('dry_run', 'live'):
+            return
+
+        try:
+            pairs = self.dp.current_whitelist()
+        except Exception:
+            return
+        if not pairs:
+            return
+
+        # Find pairs that need fresh signals
+        pairs_to_fetch = []
+        for pair in pairs:
+            cached = self.ai_signal_cache.get(pair)
+            if cached:
+                time_diff = (current_time - cached['timestamp']).total_seconds() / 3600
+                ttl = self._neutral_ttl_hours if cached.get('signal') == 'NEUTRAL' else self.cache_ttl_hours
+                if time_diff < ttl:
+                    continue
+            pairs_to_fetch.append(pair)
+
+        if not pairs_to_fetch:
+            logger.info(f"[bot_loop_start] All {len(pairs)} pairs cached. Skipping pre-fetch.")
+            return
+
+        logger.warning(f"[bot_loop_start] Pre-fetching {len(pairs_to_fetch)}/{len(pairs)} signals in parallel...")
+
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        t0 = _time.time()
+
+        def fetch_one(p):
+            """Fetch signal for one pair via RAG service."""
+            sig = {"signal": "NEUTRAL", "confidence": 0.0, "timestamp": current_time}
+            try:
+                import requests
+                url = self.config.get('ai_config', {}).get(
+                    'rag_service_url', 'http://127.0.0.1:8891')
+                _t = _time.time()
+                resp = requests.get(f"{url}/signal/{p}", timeout=30)
+                lat = (_time.time() - _t) * 1000
+                logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code})")
+                if resp.status_code == 200:
+                    parsed = resp.json()
+                    sig["signal"] = parsed.get("signal", "NEUTRAL")
+                    sig["confidence"] = parsed.get("confidence", 0.0)
+                    sig["reasoning"] = parsed.get("reasoning", "")
+            except Exception as e:
+                logger.warning(f"[bot_loop_start] Fetch failed for {p}: {e}")
+            # Cache ALL results (including NEUTRAL) — populate_entry_trend reads from here
+            self.ai_signal_cache[p] = sig
+            return p, sig
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fetch_one, p): p for p in pairs_to_fetch}
+            for future in as_completed(futures):
+                try:
+                    pair, signal = future.result(timeout=45)
+                    results[pair] = signal
+                except Exception as e:
+                    pair = futures[future]
+                    logger.warning(f"[bot_loop_start] Timeout for {pair}: {e}")
+
+        elapsed = _time.time() - t0
+        dist = {}
+        for sig in results.values():
+            s = sig.get('signal', 'UNKNOWN')
+            dist[s] = dist.get(s, 0) + 1
+        logger.warning(
+            f"[bot_loop_start] Pre-fetched {len(results)}/{len(pairs_to_fetch)} in {elapsed:.1f}s | {dist}"
+        )
+
+    def get_entry_signal(self, pair, timeframe, dataframe):
+        """
+        DIAGNOSTIC OVERRIDE: Wraps parent's get_entry_signal to log exactly
+        what Freqtrade sees when checking for entry signals.
+        This tells us precisely WHY signals are accepted or rejected.
+        """
+        signal, tag = super().get_entry_signal(pair, timeframe, dataframe)
+        if signal:
+            logger.warning(f"[ENTRY-SIGNAL] {pair}: DETECTED {signal} tag={tag}")
+        else:
+            if len(dataframe) > 0:
+                latest = dataframe.iloc[-1]
+                el = latest.get('enter_long', 'N/A')
+                xl = latest.get('exit_long', 'N/A')
+                es = latest.get('enter_short', 'N/A')
+                xs = latest.get('exit_short', 'N/A')
+                logger.warning(
+                    f"[ENTRY-SIGNAL] {pair}: NO SIGNAL! "
+                    f"enter_long={el} exit_long={xl} enter_short={es} exit_short={xs}"
+                )
+            else:
+                logger.warning(f"[ENTRY-SIGNAL] {pair}: EMPTY DATAFRAME!")
+        return signal, tag
 
     def _get_sqlite_connection(self):
         try:
@@ -100,11 +205,12 @@ class AIFreqtradeSizer(IStrategy):
         The Bridge (Phase 5.1): Asks the RAG Signal Service for a decision.
         HTTP-first with subprocess fallback. Models stay loaded in the service.
         """
-        # 1. Check Memory Cache
+        # 1. Check Memory Cache (NEUTRAL uses shorter TTL)
         cached = self.ai_signal_cache.get(pair)
         if cached:
             time_diff = (current_time - cached['timestamp']).total_seconds() / 3600
-            if time_diff < self.cache_ttl_hours:
+            ttl = self._neutral_ttl_hours if cached.get('signal') == 'NEUTRAL' else self.cache_ttl_hours
+            if time_diff < ttl:
                 return cached
 
         # 2. Cache Miss → HTTP call to RAG Signal Service
@@ -146,9 +252,9 @@ class AIFreqtradeSizer(IStrategy):
             else:
                 logger.error(f"Error calling RAG Signal Service for {pair}: {e}")
 
-        # 3. Save to Cache (but NEVER cache NEUTRAL — retry next candle)
-        if signal_data.get("signal") != "NEUTRAL":
-            self.ai_signal_cache[pair] = signal_data
+        # 3. Save to Cache (ALL signals including NEUTRAL — TTL handles expiry)
+        # NEUTRAL uses shorter TTL (0.9h) so it's retried on next candle
+        self.ai_signal_cache[pair] = signal_data
         return signal_data
 
     def _get_ai_signal_subprocess(self, pair: str, signal_data: dict):
@@ -289,14 +395,22 @@ class AIFreqtradeSizer(IStrategy):
         df['exit_short'] = 0
 
         if self.dp.runmode.value in ('dry_run', 'live'):
-            # In live mode, exits are handled by custom_stoploss + ROI + AI reversal signals
+            # Exit signals for OPEN POSITIONS only — never conflict with same-candle entry signals.
+            # Freqtrade rejects entries when exit_long/exit_short is set on the same candle:
+            #   get_entry_signal: enter_long == 1 and not any([exit_long, enter_short])
+            # So we MUST NOT set exit signals that conflict with current entry signals.
             pair = metadata['pair']
             cached = self.ai_signal_cache.get(pair)
             if cached:
-                if cached['signal'] == 'BEARISH':
+                last_enter_long = df.iloc[-1].get('enter_long', 0)
+                last_enter_short = df.iloc[-1].get('enter_short', 0)
+
+                if cached['signal'] == 'BEARISH' and not last_enter_long:
                     df.iloc[-1, df.columns.get_loc('exit_long')] = 1
-                elif cached['signal'] == 'BULLISH':
+                    logger.debug(f"[Exit] {pair}: exit_long=1 (BEARISH, no entry conflict)")
+                elif cached['signal'] == 'BULLISH' and not last_enter_short:
                     df.iloc[-1, df.columns.get_loc('exit_short')] = 1
+                    logger.debug(f"[Exit] {pair}: exit_short=1 (BULLISH, no entry conflict)")
         else:
             # Backtesting: Technical exit signals
             if 'rsi' in df.columns and 'macd' in df.columns:
@@ -394,6 +508,10 @@ class AIFreqtradeSizer(IStrategy):
         CORE PRINCIPLE: TRADE-FIRST AUTONOMY (Sizing not blocking).
         Instead of blocking a trade, we scale the size based on FreqAI confidence/market regime.
         """
+        logger.warning(
+            f"[TRADE-ATTEMPT] custom_stake_amount CALLED: {pair} side={side} "
+            f"proposed={proposed_stake:.4f} min={min_stake:.4f} max={max_stake:.4f}"
+        )
         # Sync real exchange balance to AI modules (every trade entry)
         self._sync_portfolio_to_ai()
 
@@ -465,6 +583,10 @@ class AIFreqtradeSizer(IStrategy):
                             time_in_force: str, current_time: datetime, entry_tag: str,
                             side: str, **kwargs) -> bool:
         """Mark the forgone P&L entry as ACTUALLY executed (trade opened)."""
+        logger.warning(
+            f"[TRADE-ATTEMPT] confirm_trade_entry CALLED: {pair} side={side} "
+            f"rate={rate:.6f} stake=${amount*rate:.2f}"
+        )
         ai_decision = self.ai_signal_cache.get(pair, {})
         confidence = ai_decision.get('confidence', 0.5)
         signal_type = "BULL" if side == "long" else "BEAR"
