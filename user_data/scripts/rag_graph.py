@@ -580,9 +580,9 @@ def get_trading_signal(pair: str) -> dict:
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-_signal_executor = ThreadPoolExecutor(max_workers=2)
+_signal_executor = ThreadPoolExecutor(max_workers=4)
 
-def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 600) -> dict:
+def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45) -> dict:
     """Wraps get_trading_signal with a thread-based timeout (uvicorn-safe)."""
     try:
         future = _signal_executor.submit(get_trading_signal, pair)
@@ -634,7 +634,7 @@ if __name__ == "__main__":
 
         @serve_app.get("/signal/{pair:path}")
         def signal_endpoint(pair: str):
-            return get_trading_signal_with_timeout(pair, timeout_seconds=600)
+            return get_trading_signal_with_timeout(pair, timeout_seconds=45)
 
         @serve_app.get("/health")
         def health():

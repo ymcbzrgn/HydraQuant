@@ -113,13 +113,17 @@ class AIFreqtradeSizer(IStrategy):
 
         try:
             import requests
+            import time as _time
             rag_service_url = self.config.get('ai_config', {}).get(
                 'rag_service_url', 'http://127.0.0.1:8891')
 
+            _t0 = _time.time()
             response = requests.get(
                 f"{rag_service_url}/signal/{pair}",
-                timeout=330  # slightly more than the 300s internal pipeline timeout
+                timeout=30  # Fast-fail: 20 pairs × 30s = 10min << 60min candle
             )
+            _latency = (_time.time() - _t0) * 1000
+            logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code})")
             if response.status_code == 200:
                 parsed = response.json()
                 signal_data["signal"] = parsed.get("signal", "NEUTRAL")
@@ -154,7 +158,7 @@ class AIFreqtradeSizer(IStrategy):
             import json
             result = subprocess.run(
                 [sys.executable, self.rag_script_path, f"--pair={pair}"],
-                capture_output=True, text=True, check=True, timeout=120
+                capture_output=True, text=True, check=True, timeout=35
             )
             output = result.stdout
             if "--- JSON OUTPUT ---" in output:
@@ -261,10 +265,17 @@ class AIFreqtradeSizer(IStrategy):
                     self._forgone_ids[pair] = fid
 
             # Set entry signals based on AI decision (only last candle)
+            # Trade-First: NEUTRAL defaults to enter_long=1 (min_stake sizing handles risk)
             if is_bullish:
                 df.iloc[-1, df.columns.get_loc('enter_long')] = 1
+                logger.info(f"[Signal] {pair} → enter_long=1 (BULLISH conf={confidence:.2f})")
             elif is_bearish:
                 df.iloc[-1, df.columns.get_loc('enter_short')] = 1
+                logger.info(f"[Signal] {pair} → enter_short=1 (BEARISH conf={confidence:.2f})")
+            else:
+                # NEUTRAL: Trade-First philosophy — confidence modulates SIZE not PERMISSION
+                df.iloc[-1, df.columns.get_loc('enter_long')] = 1
+                logger.info(f"[Signal] {pair} → enter_long=1 (NEUTRAL default, min_stake sizing)")
         else:
             # Backtesting: Simple technical signals
             if 'rsi' in df.columns and 'macd' in df.columns:
