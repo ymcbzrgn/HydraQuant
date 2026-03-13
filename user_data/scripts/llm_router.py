@@ -38,6 +38,12 @@ _MODEL_CACHE_TTL = 600.0  # 10 minutes
 # Gemini quotas are PER-MODEL PER-PROJECT — one model's 429 doesn't affect others on the same key
 MODEL_COOLDOWNS: Dict[str, float] = {}
 
+# Gemini-wide circuit breaker: after N consecutive Gemini failures, skip ALL Gemini for a cooldown.
+# This prevents wasting 140 API calls (10 keys × 14 models) when Gemini is globally rate-limited.
+_GEMINI_CIRCUIT_OPEN_UNTIL: float = 0.0
+_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive Gemini 429s to trip the breaker
+_CIRCUIT_BREAKER_DURATION = 120.0  # 2 minutes — give Gemini quotas time to recover
+
 # Exceptions that CANNOT be recovered by failover — bugs in OUR code
 # NOTE: ValueError/TypeError removed — they can be triggered by legitimate empty/malformed
 # API responses (e.g. json.loads("") → ValueError, float(None) → TypeError).
@@ -233,34 +239,45 @@ class LLMRouter:
                     pass
 
     def _get_chain(self) -> List[Any]:
-        """Constructs and returns the active LangChain fallbacks without rate-limited keys."""
+        """Constructs and returns the active LangChain fallbacks without rate-limited keys/models."""
         chain = []
         current_time = time.time()
-        
-        if self.gemini_keys:
+
+        # Circuit breaker: if Gemini is globally down, skip ALL Gemini models entirely
+        gemini_circuit_open = current_time < _GEMINI_CIRCUIT_OPEN_UNTIL
+
+        if self.gemini_keys and not gemini_circuit_open:
             # Thread-safe rotation: Move first key to the back for Round-Robin
             with self._key_lock:
                 first_key = self.gemini_keys.pop(0)
                 self.gemini_keys.append(first_key)
                 keys_snapshot = list(self.gemini_keys)  # Work on a snapshot
-            
+
             for key in keys_snapshot:
                 # Check if this Gemini key is currently in the Penalty Box
                 with _COOLDOWN_LOCK:
                     unlock_time = KEY_COOLDOWNS.get(key, 0)
                 if current_time < unlock_time:
                     continue # Skip this key, it's exhausted!
-                    
-                chain.extend(self.gemini_models_by_key[key])
-                
+
+                # Filter out individually penalized models — don't add dead weight to chain
+                active_models = [m for m in self.gemini_models_by_key[key]
+                                 if not self._is_model_penalized(m)]
+                chain.extend(active_models)
+
+        elif gemini_circuit_open:
+            remaining = _GEMINI_CIRCUIT_OPEN_UNTIL - current_time
+            logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
+                        f"Closes in {remaining:.0f}s.")
+
         if self.fallback_1:
             chain.append(self.fallback_1)
         if self.fallback_2:
             chain.append(self.fallback_2)
-            
+
         if not chain:
             raise ValueError("All API keys are exhausted or unavailable.")
-            
+
         return chain
             
     def _penalize_key(self, model):
@@ -310,6 +327,29 @@ class LLMRouter:
         with _COOLDOWN_LOCK:
             return time.time() < MODEL_COOLDOWNS.get(penalty_key, 0)
 
+    def _check_key_cascade(self, model):
+        """If ALL models on a key are penalized, penalize the KEY too.
+        This lets _get_chain() skip the entire key instead of iterating through dead models."""
+        if not hasattr(model, "google_api_key") or model.google_api_key is None:
+            return
+        key_val = model.google_api_key
+        if hasattr(key_val, "get_secret_value"):
+            key_val = key_val.get_secret_value()
+        if key_val not in self.gemini_models_by_key:
+            return
+        now = time.time()
+        with _COOLDOWN_LOCK:
+            all_penalized = all(
+                now < MODEL_COOLDOWNS.get(
+                    f"{key_val}:{getattr(m, 'model_name', getattr(m, 'model', 'unknown'))}", 0
+                )
+                for m in self.gemini_models_by_key[key_val]
+            )
+            if all_penalized and (key_val not in KEY_COOLDOWNS or now > KEY_COOLDOWNS[key_val]):
+                KEY_COOLDOWNS[key_val] = now + COOLDOWN_DURATION
+                logger.warning(f"[KeyCascade] All models on key ...{key_val[-4:]} exhausted. "
+                               f"Key penalized for {COOLDOWN_DURATION}s.")
+
     def invoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking.
 
@@ -317,12 +357,20 @@ class LLMRouter:
             temperature: Optional per-call temperature override. Uses model.bind()
                          which creates a lightweight wrapper (no new connections).
         """
+        global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
+        gemini_consecutive_fails = 0
 
         for model in chain:
             # Skip if key is dead (auth/conn) or this specific model is rate-limited
             if self._is_key_penalized(model) or self._is_model_penalized(model):
+                continue
+
+            is_gemini = isinstance(model, ChatGoogleGenerativeAI)
+
+            # Circuit breaker: too many consecutive Gemini failures in THIS call → skip remaining
+            if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
                 continue
 
             try:
@@ -346,6 +394,8 @@ class LLMRouter:
                     m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                     logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
                     self._penalize_model(model)
+                    if is_gemini:
+                        gemini_consecutive_fails += 1
                     continue
 
                 in_tok = 0
@@ -359,6 +409,11 @@ class LLMRouter:
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
+                # Success — reset circuit breaker if Gemini recovered
+                if is_gemini and _GEMINI_CIRCUIT_OPEN_UNTIL > 0:
+                    _GEMINI_CIRCUIT_OPEN_UNTIL = 0.0
+                    logger.info("[CircuitBreaker] Gemini success — circuit CLOSED.")
+
                 return response
             except _HARD_CRASH_EXCEPTIONS as e:
                 logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
@@ -368,8 +423,9 @@ class LLMRouter:
                 m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                 err_upper = str(e).upper()
                 if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
-                    # Rate limit: only THIS model's quota is exhausted, other models on same key have separate quota
+                    # Rate limit: only THIS model's quota is exhausted
                     self._penalize_model(model)
+                    self._check_key_cascade(model)
                     logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
                 elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
                     # Auth error: entire key is broken
@@ -379,6 +435,14 @@ class LLMRouter:
                     # Unknown/other error: penalize model only (don't kill working models on same key)
                     self._penalize_model(model)
                     logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
+
+                if is_gemini:
+                    gemini_consecutive_fails += 1
+                    # Trip circuit breaker for ALL subsequent invoke() calls too
+                    if gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD and _GEMINI_CIRCUIT_OPEN_UNTIL < time.time():
+                        _GEMINI_CIRCUIT_OPEN_UNTIL = time.time() + _CIRCUIT_BREAKER_DURATION
+                        logger.warning(f"[CircuitBreaker] {gemini_consecutive_fails} consecutive Gemini failures — "
+                                       f"circuit OPEN for {_CIRCUIT_BREAKER_DURATION}s. Skipping to fallbacks.")
                 continue
 
         logger.error(f"Complete LLM Failure (All Fallbacks Exhausted)")
@@ -388,12 +452,20 @@ class LLMRouter:
 
     async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
+        global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
+        gemini_consecutive_fails = 0
 
         for model in chain:
             # Skip if key is dead (auth/conn) or this specific model is rate-limited
             if self._is_key_penalized(model) or self._is_model_penalized(model):
+                continue
+
+            is_gemini = isinstance(model, ChatGoogleGenerativeAI)
+
+            # Circuit breaker: too many consecutive Gemini failures in THIS call → skip remaining
+            if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
                 continue
 
             try:
@@ -414,6 +486,8 @@ class LLMRouter:
                     m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                     logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
                     self._penalize_model(model)
+                    if is_gemini:
+                        gemini_consecutive_fails += 1
                     continue
 
                 in_tok = 0
@@ -427,6 +501,11 @@ class LLMRouter:
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
+                # Success — reset circuit breaker if Gemini recovered
+                if is_gemini and _GEMINI_CIRCUIT_OPEN_UNTIL > 0:
+                    _GEMINI_CIRCUIT_OPEN_UNTIL = 0.0
+                    logger.info("[CircuitBreaker] Gemini success — circuit CLOSED.")
+
                 return response
             except _HARD_CRASH_EXCEPTIONS as e:
                 logger.error(f"Code bug in async LLM pipeline: {type(e).__name__}: {e}")
@@ -437,6 +516,7 @@ class LLMRouter:
                 err_upper = str(e).upper()
                 if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
                     self._penalize_model(model)
+                    self._check_key_cascade(model)
                     logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
                 elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
                     self._penalize_key(model)
@@ -444,6 +524,13 @@ class LLMRouter:
                 else:
                     self._penalize_model(model)
                     logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
+
+                if is_gemini:
+                    gemini_consecutive_fails += 1
+                    if gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD and _GEMINI_CIRCUIT_OPEN_UNTIL < time.time():
+                        _GEMINI_CIRCUIT_OPEN_UNTIL = time.time() + _CIRCUIT_BREAKER_DURATION
+                        logger.warning(f"[CircuitBreaker] {gemini_consecutive_fails} consecutive Gemini failures — "
+                                       f"circuit OPEN for {_CIRCUIT_BREAKER_DURATION}s. Skipping to fallbacks.")
                 continue
 
         logger.error(f"Complete LLM Async Failure (All Fallbacks Exhausted)")
