@@ -12,6 +12,23 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
+
+def _load_gemini_keys() -> list:
+    """Load all Gemini API keys from env."""
+    keys = []
+    keys_str = os.environ.get("GEMINI_API_KEYS", "")
+    if keys_str:
+        keys.extend([k.strip() for k in keys_str.split(",") if k.strip()])
+    single = os.environ.get("GEMINI_API_KEY")
+    if single and single not in keys:
+        keys.append(single)
+    for i in range(1, 11):
+        k = os.environ.get(f"GEMINI_API_KEY_{i}")
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
 class SemanticCache:
     """
     Caches LLM responses using semantic similarity of the query.
@@ -21,8 +38,17 @@ class SemanticCache:
         import ai_config
         self.db_path = db_path if db_path is not None else ai_config.AI_DB_PATH
         self.similarity_threshold = similarity_threshold
-        # Cache genai client — was creating new httpx client per _get_embedding() call
-        self._genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        # Create genai clients for all available keys
+        all_keys = _load_gemini_keys()
+        self._genai_clients = []
+        for key in all_keys:
+            try:
+                self._genai_clients.append(genai.Client(api_key=key))
+            except Exception:
+                pass
+        if not self._genai_clients:
+            logger.warning("[SemanticCache] No Gemini API keys available. Cache embedding disabled.")
+        self._client_idx = 0
         self._init_db()
 
     def _init_db(self):
@@ -60,18 +86,27 @@ class SemanticCache:
     ]
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        for model_cfg in self._EMBEDDING_MODELS:
-            try:
-                kwargs = {"model": model_cfg["name"], "contents": text}
-                if model_cfg.get("dims"):
-                    kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
-                result = self._genai_client.models.embed_content(**kwargs)
-                emb = np.array(result.embeddings[0].values, dtype=np.float32)
-                return emb
-            except Exception as e:
-                logger.warning(f"Embedding {model_cfg['name']} failed for cache: {e}")
-                continue
-        logger.error("All embedding models failed for semantic cache")
+        if not self._genai_clients:
+            return None
+        # Try each client (key) with each model
+        for _ in range(len(self._genai_clients)):
+            client = self._genai_clients[self._client_idx % len(self._genai_clients)]
+            self._client_idx = (self._client_idx + 1) % len(self._genai_clients)
+            for model_cfg in self._EMBEDDING_MODELS:
+                try:
+                    kwargs = {"model": model_cfg["name"], "contents": text}
+                    if model_cfg.get("dims"):
+                        kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
+                    result = client.models.embed_content(**kwargs)
+                    emb = np.array(result.embeddings[0].values, dtype=np.float32)
+                    return emb
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if '429' in err_str or 'quota' in err_str:
+                        break  # Try next key
+                    logger.debug(f"Embedding {model_cfg['name']} failed for cache: {e}")
+                    continue
+        logger.warning("All embedding keys/models failed for semantic cache")
         return None
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:

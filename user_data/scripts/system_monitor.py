@@ -202,9 +202,8 @@ class SystemMonitor:
 
         # 3. ChromaDB — can we import and connect?
         try:
-            import chromadb
-            from ai_config import CHROMA_PERSIST_DIR
-            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+            from ai_config import get_chroma_client
+            client = get_chroma_client()
             client.heartbeat()
             checks["chromadb"] = True
         except Exception:

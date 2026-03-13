@@ -142,8 +142,9 @@ class AIFreqtradeSizer(IStrategy):
             else:
                 logger.error(f"Error calling RAG Signal Service for {pair}: {e}")
 
-        # 3. Save to Cache
-        self.ai_signal_cache[pair] = signal_data
+        # 3. Save to Cache (but NEVER cache NEUTRAL — retry next candle)
+        if signal_data.get("signal") != "NEUTRAL":
+            self.ai_signal_cache[pair] = signal_data
         return signal_data
 
     def _get_ai_signal_subprocess(self, pair: str, signal_data: dict):
@@ -246,17 +247,17 @@ class AIFreqtradeSizer(IStrategy):
             is_bullish = signal_type == 'BULLISH'
             is_bearish = signal_type == 'BEARISH'
 
-            # Forgone P&L: Log EVERY AI signal — executed or not
+            # Forgone P&L: Log signal as NOT executed here.
+            # Actual execution is confirmed in confirm_trade_entry().
             if signal_type != 'NEUTRAL':
-                was_executed = is_bullish or is_bearish
                 fid = self.forgone_engine.log_forgone_signal(
                     pair=pair,
                     signal_type="BULL" if is_bullish else "BEAR",
                     confidence=confidence,
                     entry_price=float(current_rate),
-                    was_executed=was_executed
+                    was_executed=False  # Will be updated in confirm_trade_entry
                 )
-                if fid and not was_executed:
+                if fid:
                     self._forgone_ids[pair] = fid
 
             # Set entry signals based on AI decision (only last candle)
@@ -443,29 +444,27 @@ class AIFreqtradeSizer(IStrategy):
             atr_volatility = last_candle.get('atr', 0.02) / current_rate if current_rate > 0 else 0.02
             self.risk_budget.consume_budget(final_stake, atr_volatility, confidence)
 
+        # Trade-First: ALWAYS trade at least min_stake. Confidence modulates SIZE, never PERMISSION.
         if final_stake < min_stake:
-            # To honor exchange API limits, if dust is too small, Freqtrade rejects it internally.
-            pass
+            final_stake = min_stake
 
         return min(final_stake, max_stake)
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime, entry_tag: str,
                             side: str, **kwargs) -> bool:
-        """Log executed trade to Forgone P&L for comparison tracking."""
+        """Mark the forgone P&L entry as ACTUALLY executed (trade opened)."""
         ai_decision = self.ai_signal_cache.get(pair, {})
         confidence = ai_decision.get('confidence', 0.5)
         signal_type = "BULL" if side == "long" else "BEAR"
         reasoning = ai_decision.get('reasoning', "Technical entry with AI confirmation")
-        
-        self.forgone_engine.log_forgone_signal(
-            pair=pair,
-            signal_type=signal_type,
-            confidence=confidence,
-            entry_price=rate,
-            was_executed=True
-        )
-        logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} — {reasoning}")
+
+        # Update the existing forgone entry (logged in populate_entry_trend) to was_executed=True
+        fid = self._forgone_ids.pop(pair, None)
+        if fid:
+            self.forgone_engine.mark_executed(fid)
+
+        logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} stake=${amount*rate:.2f} — {reasoning}")
         return True
 
     def confirm_trade_exit(self, pair: str, trade: 'Trade', order_type: str, amount: float,

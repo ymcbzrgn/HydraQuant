@@ -3,8 +3,6 @@ import math
 import sqlite3
 import logging
 from datetime import datetime, timezone
-import chromadb
-from flashrank import Ranker, RerankRequest
 from typing import List, Dict, Any
 
 from db import get_db_connection
@@ -16,7 +14,7 @@ from streaming_rag import StreamingRAG
 from raptor_tree import RAPTORTree
 from magma_memory import MAGMAMemory
 from memo_rag import MemoRAG
-from ai_config import AI_DB_PATH
+from ai_config import AI_DB_PATH, get_chroma_client
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +29,7 @@ class HybridRetriever:
     """
     
     def __init__(self, collection_name: str = "crypto_news"):
-        self.chroma_client = chromadb.PersistentClient(path=VECTOR_DB_DIR)
+        self.chroma_client = get_chroma_client()
         # Primary: Gemini embeddings (general semantic)
         self.collection = self.chroma_client.get_or_create_collection(
             name=collection_name, 

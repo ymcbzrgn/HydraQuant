@@ -1,5 +1,3 @@
-import chromadb
-from chromadb.config import Settings
 import logging
 import os
 import sys
@@ -8,14 +6,14 @@ logger = logging.getLogger(__name__)
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-from ai_config import CHROMA_PERSIST_DIR as VECTOR_DB_DIR
+from ai_config import CHROMA_PERSIST_DIR as VECTOR_DB_DIR, get_chroma_client
 
 def init_chromadb():
     """Initializes the persistent ChromaDB collections for Hybrid RAG."""
     os.makedirs(VECTOR_DB_DIR, exist_ok=True)
-    
-    # Initialize Persistent ChromaDB Client
-    client = chromadb.PersistentClient(path=VECTOR_DB_DIR)
+
+    # Use singleton ChromaDB client
+    client = get_chroma_client()
     
     collections = [
         "crypto_news",        # 180-day rolling window of news
