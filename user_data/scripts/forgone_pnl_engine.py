@@ -101,6 +101,20 @@ class ForgonePnLEngine:
             logger.error(f"[Forgone P&L] Failed to log signal for {pair}: {e}")
             return None
 
+    def mark_executed(self, forgone_id: int) -> bool:
+        """Mark a previously-logged signal as actually executed (trade opened)."""
+        try:
+            with self._get_db_connection() as conn:
+                conn.execute(
+                    "UPDATE forgone_profit SET was_executed = 1 WHERE id = ?",
+                    (forgone_id,)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"[Forgone P&L] Failed to mark ID {forgone_id} as executed: {e}")
+            return False
+
     def resolve_forgone_trade(self, forgone_id: int, exit_price: float) -> bool:
         """
         Called after the paper-trade window expires (e.g. 4 hours later).

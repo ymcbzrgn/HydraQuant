@@ -109,10 +109,8 @@ class DeploymentChecker:
         return True, f"SQLite writable at {AI_DB_PATH}"
 
     def _check_chromadb(self):
-        import chromadb
-        from ai_config import CHROMA_PERSIST_DIR
-        os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
-        client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        from ai_config import get_chroma_client, CHROMA_PERSIST_DIR
+        client = get_chroma_client()
         client.heartbeat()
         return True, f"ChromaDB OK at {CHROMA_PERSIST_DIR}"
 

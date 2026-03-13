@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 
 sys.path.append(os.path.dirname(__file__))
 
+# Load .env BEFORE any module that needs API keys
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+
 logger = logging.getLogger(__name__)
 
 

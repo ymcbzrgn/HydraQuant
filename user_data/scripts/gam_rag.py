@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import chromadb
 import uuid
 import logging
 from typing import Dict, Any, List
@@ -9,22 +8,22 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as CHROMA_PATH
+from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as CHROMA_PATH, get_chroma_client
 
 class GamRAG:
     """
     Phase 6.1: Gain-Adaptive Memory RAG (GAM-RAG)
-    A persistent memory store that explicitly indexes AI reasoning 
+    A persistent memory store that explicitly indexes AI reasoning
     from structurally highly-successful past trades.
     When future similar regimes arise, the Agent uses this memory.
     """
-    
+
     def __init__(self, db_path: str = DB_PATH, chroma_path: str = CHROMA_PATH):
         self.db_path = db_path
         self._ensure_paths(chroma_path)
-        
-        # Initialize Persistent ChromaDB Client
-        self.chroma_client = chromadb.PersistentClient(path=chroma_path)
+
+        # Use singleton ChromaDB client
+        self.chroma_client = get_chroma_client()
         self.gam_collection = self.chroma_client.get_or_create_collection(
             name="successful_trade_patterns",
             metadata={"description": "Bidirectional memory of high-EV AI trade reasoning"}
