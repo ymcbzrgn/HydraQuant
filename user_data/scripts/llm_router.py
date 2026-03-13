@@ -33,6 +33,7 @@ _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 
 # Module-level model discovery cache — shared across ALL LLMRouter instances
 _GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
+_OPENROUTER_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
 _MODEL_CACHE_TTL = 600.0  # 10 minutes
 
 # Per-model penalty box: "api_key:model_name" → unlock_timestamp
@@ -89,12 +90,15 @@ class LLMRouter:
     then falls back to Groq Llama-3, then OpenRouter models.
     """
     
-    def __init__(self, temperature: float = 0.0, request_timeout: int = 30):
+    def __init__(self, temperature: float = 0.0, request_timeout: int = 30,
+                 fallback_timeout: int = 15):
         self.temperature = temperature
         self.request_timeout = request_timeout
+        self.fallback_timeout = fallback_timeout  # Shorter timeout for non-Gemini providers
         self.cost_tracker = LLMCostTracker()
         self._key_lock = threading.Lock()  # Thread-safe key rotation
-        
+        self._provider_map = {}  # id(model) → provider name for cost tracking
+
         # 1. Primary Models (Provider-Internal Failover): Gemini
         # We handle multiple API keys dynamically.
         self.gemini_keys = []
@@ -126,13 +130,15 @@ class LLMRouter:
             for key in self.gemini_keys:
                 models_for_key = []
                 for m_name in gemini_model_names:
-                    models_for_key.append(ChatGoogleGenerativeAI(
+                    m = ChatGoogleGenerativeAI(
                         model=m_name,
                         api_key=key,
                         temperature=self.temperature,
                         timeout=self.request_timeout,
                         max_retries=1  # MUST be 1 not 0: SDK bug treats 0 as "use default 5 retries"
-                    ))
+                    )
+                    models_for_key.append(m)
+                    self._provider_map[id(m)] = "gemini"
                 self.gemini_models_by_key[key] = models_for_key
 
             logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys × {len(gemini_model_names)} models. "
@@ -155,31 +161,115 @@ class LLMRouter:
                     model=m_name,
                     api_key=self.groq_key,
                     temperature=self.temperature,
-                    timeout=self.request_timeout,
+                    timeout=self.fallback_timeout,
                     max_retries=0
                 ))
             self.fallback_1 = self.groq_models[0]  # backward compat
             logger.info(f"Loaded {len(self.groq_models)} Groq models: {groq_model_names}")
+            for m in self.groq_models:
+                self._provider_map[id(m)] = "groq"
 
-        # 3. Second Fallback: OpenRouter (free models)
+        # 3. Cerebras (OpenAI-compatible, 30 RPM, 1M tokens/day, ultra-fast inference)
+        self.cerebras_key = os.environ.get("CEREBRAS_API_KEY")
+        self.cerebras_models = []
+        if self.cerebras_key:
+            cerebras_model_names = [
+                "llama3.1-8b",     # 30 RPM, 14.4K RPD, 8K context, fastest
+                "gpt-oss-120b",    # 30 RPM, 14.4K RPD, 65K context, smartest
+            ]
+            for m_name in cerebras_model_names:
+                m = ChatOpenAI(
+                    base_url="https://api.cerebras.ai/v1",
+                    api_key=self.cerebras_key,
+                    model=m_name,
+                    temperature=self.temperature,
+                    timeout=self.fallback_timeout,
+                    max_retries=0
+                )
+                self.cerebras_models.append(m)
+                self._provider_map[id(m)] = "cerebras"
+            logger.info(f"Loaded {len(self.cerebras_models)} Cerebras models: {cerebras_model_names}")
+
+        # 4. DeepSeek (OpenAI-compatible, 5M free tokens on signup)
+        self.deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        self.deepseek_models = []
+        if self.deepseek_key:
+            deepseek_model_names = ["deepseek-chat"]  # DeepSeek V3.2
+            for m_name in deepseek_model_names:
+                m = ChatOpenAI(
+                    base_url="https://api.deepseek.com/v1",
+                    api_key=self.deepseek_key,
+                    model=m_name,
+                    temperature=self.temperature,
+                    timeout=self.fallback_timeout,
+                    max_retries=0
+                )
+                self.deepseek_models.append(m)
+                self._provider_map[id(m)] = "deepseek"
+            logger.info(f"Loaded {len(self.deepseek_models)} DeepSeek models: {deepseek_model_names}")
+
+        # 5. SambaNova (OpenAI-compatible, 200K tokens/day free, Llama 405B access)
+        self.sambanova_key = os.environ.get("SAMBANOVA_API_KEY")
+        self.sambanova_models = []
+        if self.sambanova_key:
+            sambanova_model_names = [
+                "Meta-Llama-3.3-70B-Instruct",   # 20 RPM
+                "Meta-Llama-3.1-8B-Instruct",     # 30 RPM
+            ]
+            for m_name in sambanova_model_names:
+                m = ChatOpenAI(
+                    base_url="https://api.sambanova.ai/v1",
+                    api_key=self.sambanova_key,
+                    model=m_name,
+                    temperature=self.temperature,
+                    timeout=self.fallback_timeout,
+                    max_retries=0
+                )
+                self.sambanova_models.append(m)
+                self._provider_map[id(m)] = "sambanova"
+            logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models: {sambanova_model_names}")
+
+        # 6. Mistral (OpenAI-compatible, 2 RPM experiment plan, 1B tokens/month)
+        self.mistral_key = os.environ.get("MISTRAL_API_KEY")
+        self.mistral_models = []
+        if self.mistral_key:
+            mistral_model_names = [
+                "mistral-small-latest",    # Fast, good quality
+                "mistral-large-latest",    # Best quality
+            ]
+            for m_name in mistral_model_names:
+                m = ChatOpenAI(
+                    base_url="https://api.mistral.ai/v1",
+                    api_key=self.mistral_key,
+                    model=m_name,
+                    temperature=self.temperature,
+                    timeout=self.fallback_timeout,
+                    max_retries=0
+                )
+                self.mistral_models.append(m)
+                self._provider_map[id(m)] = "mistral"
+            logger.info(f"Loaded {len(self.mistral_models)} Mistral models: {mistral_model_names}")
+
+        # 7. OpenRouter (dynamic free models — ultimate fallback)
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         self.openrouter_models = []
         self.fallback_2 = None  # Keep for backward compat checks
         if self.openrouter_key:
-            openrouter_model_names = [
-                "meta-llama/llama-3.3-70b-instruct:free",
-            ]
+            openrouter_model_names = self._discover_openrouter_free_models(self.openrouter_key)
             for m_name in openrouter_model_names:
-                self.openrouter_models.append(ChatOpenAI(
+                m = ChatOpenAI(
                     base_url="https://openrouter.ai/api/v1",
                     api_key=self.openrouter_key,
                     model=m_name,
                     temperature=self.temperature,
-                    timeout=self.request_timeout,
+                    timeout=self.fallback_timeout,
                     max_retries=0
-                ))
-            self.fallback_2 = self.openrouter_models[0]  # backward compat
-            logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter models: {openrouter_model_names}")
+                )
+                self.openrouter_models.append(m)
+                self._provider_map[id(m)] = "openrouter"
+            if self.openrouter_models:
+                self.fallback_2 = self.openrouter_models[0]  # backward compat
+            logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter free models: {openrouter_model_names}")
         
     @staticmethod
     def _discover_gemini_models(api_key: str) -> list:
@@ -266,6 +356,64 @@ class LLMRouter:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _discover_openrouter_free_models(api_key: str) -> list:
+        """Discover currently free models from OpenRouter API. Cached for 10 minutes."""
+        FALLBACK_MODELS = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-chat-v3-0324:free",
+            "qwen/qwen3-32b:free",
+        ]
+
+        now = time.time()
+        if _OPENROUTER_MODEL_CACHE["models"] and (now - _OPENROUTER_MODEL_CACHE["timestamp"]) < _MODEL_CACHE_TTL:
+            logger.info(f"Using cached OpenRouter free model list ({len(_OPENROUTER_MODEL_CACHE['models'])} models)")
+            return _OPENROUTER_MODEL_CACHE["models"]
+
+        try:
+            resp = httpx.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+
+            free_models = []
+            for m in data:
+                pricing = m.get("pricing", {})
+                try:
+                    prompt_free = float(pricing.get("prompt", "1")) == 0
+                    completion_free = float(pricing.get("completion", "1")) == 0
+                except (ValueError, TypeError):
+                    continue
+                if prompt_free and completion_free:
+                    model_id = m.get("id", "")
+                    if model_id:
+                        free_models.append(model_id)
+
+            if free_models:
+                # Prioritize well-known, high-quality model families
+                priority_keywords = ["deepseek", "llama", "qwen", "nvidia", "gemini", "mistral", "step"]
+                def _sort_key(mid):
+                    for i, kw in enumerate(priority_keywords):
+                        if kw in mid.lower():
+                            return (i, mid)
+                    return (len(priority_keywords), mid)
+                free_models.sort(key=_sort_key)
+                free_models = free_models[:12]  # Cap at 12 to avoid excessive retries
+
+                logger.info(f"Discovered {len(free_models)} free OpenRouter models: {free_models}")
+                _OPENROUTER_MODEL_CACHE["models"] = free_models
+                _OPENROUTER_MODEL_CACHE["timestamp"] = now
+                return free_models
+
+            logger.warning("No free models found on OpenRouter. Using fallback list.")
+            return FALLBACK_MODELS
+        except Exception as e:
+            logger.warning(f"OpenRouter model discovery failed: {e}. Using fallback list.")
+            return FALLBACK_MODELS
+
     def _get_chain(self) -> List[Any]:
         """Constructs and returns the active LangChain fallbacks without rate-limited keys/models."""
         chain = []
@@ -298,9 +446,12 @@ class LLMRouter:
             logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
                         f"Closes in {remaining:.0f}s.")
 
-        # Add Groq models (each has independent rate limits → round-robin multiplies throughput)
+        # Fallback chain: Groq → Cerebras → DeepSeek → SambaNova → Mistral → OpenRouter
         chain.extend(self.groq_models)
-        # Add OpenRouter models as last resort
+        chain.extend(self.cerebras_models)
+        chain.extend(self.deepseek_models)
+        chain.extend(self.sambanova_models)
+        chain.extend(self.mistral_models)
         chain.extend(self.openrouter_models)
 
         if not chain:
@@ -387,19 +538,27 @@ class LLMRouter:
                 logger.warning(f"[KeyCascade] All models on key ...{key_val[-4:]} exhausted. "
                                f"Key penalized for {duration}s.")
 
-    def invoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
+    def invoke(self, messages: List[Any], temperature: Optional[float] = None,
+              max_wall_time: float = 90.0, **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking.
 
         Args:
             temperature: Optional per-call temperature override. Uses model.bind()
                          which creates a lightweight wrapper (no new connections).
+            max_wall_time: Maximum total seconds for the entire failover chain (default 90s).
         """
         global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
+        wall_start = time.time()
 
         for model in chain:
+            # Wall-time budget: abort failover if total time exceeds limit
+            if time.time() - wall_start > max_wall_time:
+                logger.warning(f"[WallTime] Exceeded {max_wall_time}s total across failover chain. Aborting.")
+                break
+
             # Skip if key is dead (auth/conn) or this specific model is rate-limited
             if self._is_key_penalized(model) or self._is_model_penalized(model):
                 continue
@@ -442,7 +601,7 @@ class LLMRouter:
                     out_tok = response.usage_metadata.get('output_tokens', 0)
 
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
-                provider = "gemini" if "gemini" in m_name.lower() else ("groq" if "llama" in m_name.lower() else "openrouter")
+                provider = self._provider_map.get(id(model), "unknown")
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
@@ -487,14 +646,21 @@ class LLMRouter:
             raise last_exception
         raise ValueError("No fallbacks available.")
 
-    async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
+    async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None,
+                      max_wall_time: float = 90.0, **kwargs):
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
         global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain()
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
+        wall_start = time.time()
 
         for model in chain:
+            # Wall-time budget: abort failover if total time exceeds limit
+            if time.time() - wall_start > max_wall_time:
+                logger.warning(f"[WallTime] Exceeded {max_wall_time}s total across failover chain. Aborting.")
+                break
+
             # Skip if key is dead (auth/conn) or this specific model is rate-limited
             if self._is_key_penalized(model) or self._is_model_penalized(model):
                 continue
@@ -534,7 +700,7 @@ class LLMRouter:
                     out_tok = response.usage_metadata.get('output_tokens', 0)
 
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
-                provider = "gemini" if "gemini" in m_name.lower() else ("groq" if "llama" in m_name.lower() else "openrouter")
+                provider = self._provider_map.get(id(model), "unknown")
                 cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
