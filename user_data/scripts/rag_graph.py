@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import re
 import sys
 
 from typing import List, Dict, Any, Literal
@@ -425,7 +426,9 @@ Respond in valid JSON ONLY, no markdown:
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
 
-        raw_content = content_raw.replace("```json", "").replace("```", "").strip()
+        # Strip thinking model tags (DeepSeek R1, Qwen reasoning, etc.)
+        raw_content = re.sub(r'<think>.*?</think>', '', content_raw, flags=re.DOTALL)
+        raw_content = raw_content.replace("```json", "").replace("```", "").strip()
 
         if not raw_content:
             logger.warning("[NODE] Coordinator received empty LLM response. Defaulting to NEUTRAL.")

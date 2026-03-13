@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import json
 import logging
@@ -111,6 +112,7 @@ class ErrorCategorizer:
             content_str = str(content).strip()
 
             # Clean possible markdown JSON wrappers gracefully
+            content_str = re.sub(r'<think>.*?</think>', '', content_str, flags=re.DOTALL)
             content_str = content_str.replace("```json", "").replace("```", "").strip()
 
             if not content_str:

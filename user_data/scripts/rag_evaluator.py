@@ -9,6 +9,7 @@ Targets: Faithfulness > 0.90, Context Precision > 0.85, Answer Relevancy > 0.90
 """
 
 import os
+import re
 import sys
 import sqlite3
 import logging
@@ -127,6 +128,7 @@ class RAGQualityEvaluator:
         try:
             response = self.router.invoke(messages)
             text = str(response.content).strip()
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
             # Extract JSON from potential markdown code blocks
             if "```" in text:
                 text = text.split("```")[1].replace("json", "").strip()

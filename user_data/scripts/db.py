@@ -129,10 +129,34 @@ def init_db():
         )
     ''')
 
+    # Coin-level rolling sentiment (from coin_sentiment_aggregator.py)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS coin_sentiment_rolling (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            coin TEXT NOT NULL,
+            sentiment_1h REAL DEFAULT 0,
+            sentiment_4h REAL DEFAULT 0,
+            sentiment_24h REAL DEFAULT 0,
+            news_count_24h INTEGER DEFAULT 0
+        )
+    ''')
+
+    # Ensure market_news has columns added after initial schema
+    for col, typedef in [
+        ("title_hash", "TEXT"),
+        ("is_embedded", "BOOLEAN DEFAULT 0"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE market_news ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # Create indices
     c.execute('CREATE INDEX IF NOT EXISTS idx_market_news_published ON market_news(published_at)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_ai_decisions_pair ON ai_decisions(pair)')
-    
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sentiment_rolling_coin ON coin_sentiment_rolling(coin, timestamp)')
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
