@@ -130,6 +130,9 @@ class RAGQualityEvaluator:
             # Extract JSON from potential markdown code blocks
             if "```" in text:
                 text = text.split("```")[1].replace("json", "").strip()
+            if not text:
+                logger.warning("[RAGAS] Empty LLM response. Returning default score.")
+                return {"score": 0.5, "reason": "Empty LLM response"}
             return json.loads(text)
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"[RAGAS] LLM judge parse error: {e}")
