@@ -27,7 +27,8 @@ except ImportError:
 
 # Global dictionary to store API Keys currently in Penalty Box: {api_key: unlock_timestamp}
 KEY_COOLDOWNS: Dict[str, float] = {}
-COOLDOWN_DURATION = 60.0  # seconds
+GEMINI_COOLDOWN_DURATION = 60.0  # Gemini: daily quota can take minutes to reset
+FALLBACK_COOLDOWN_DURATION = 5.0  # Groq/OpenRouter: per-minute rate limits, recover fast
 _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 
 # Module-level model discovery cache — shared across ALL LLMRouter instances
@@ -137,31 +138,48 @@ class LLMRouter:
             logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys × {len(gemini_model_names)} models. "
                          f"Models: {gemini_model_names}")
             
-        # 2. First Fallback: Groq (Llama-3.1 8B Instant)
+        # 2. First Fallback: Groq (multiple models — each has INDEPENDENT rate limits)
+        # Round-robin across 4 models = 4× throughput on free tier (~120 RPM total)
         self.groq_key = os.environ.get("GROQ_API_KEY")
-        self.fallback_1 = None
+        self.groq_models = []
+        self.fallback_1 = None  # Keep for backward compat checks
         if self.groq_key:
-            self.fallback_1 = ChatGroq(
-                model="llama-3.1-8b-instant",
-                api_key=self.groq_key,
-                temperature=self.temperature,
-                timeout=self.request_timeout,
-                max_retries=0
-            )
-            
-        # 3. Second Fallback: OpenRouter (DeepSeek R1 / any available)
+            groq_model_names = [
+                "llama-3.1-8b-instant",         # 30 RPM, 14.4K RPD, fastest
+                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, 1K RPD
+                "qwen/qwen3-32b",                # 60 RPM, 1K RPD
+                "llama-3.3-70b-versatile",       # 30 RPM, 1K RPD, smartest
+            ]
+            for m_name in groq_model_names:
+                self.groq_models.append(ChatGroq(
+                    model=m_name,
+                    api_key=self.groq_key,
+                    temperature=self.temperature,
+                    timeout=self.request_timeout,
+                    max_retries=0
+                ))
+            self.fallback_1 = self.groq_models[0]  # backward compat
+            logger.info(f"Loaded {len(self.groq_models)} Groq models: {groq_model_names}")
+
+        # 3. Second Fallback: OpenRouter (free models)
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        self.fallback_2 = None
+        self.openrouter_models = []
+        self.fallback_2 = None  # Keep for backward compat checks
         if self.openrouter_key:
-            # Using ChatOpenAI as OpenAI-Compatible wrapper for OpenRouter
-            self.fallback_2 = ChatOpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self.openrouter_key,
-                model="meta-llama/llama-3.3-70b-instruct:free",
-                temperature=self.temperature,
-                timeout=self.request_timeout,
-                max_retries=0
-            )
+            openrouter_model_names = [
+                "meta-llama/llama-3.3-70b-instruct:free",
+            ]
+            for m_name in openrouter_model_names:
+                self.openrouter_models.append(ChatOpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=self.openrouter_key,
+                    model=m_name,
+                    temperature=self.temperature,
+                    timeout=self.request_timeout,
+                    max_retries=0
+                ))
+            self.fallback_2 = self.openrouter_models[0]  # backward compat
+            logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter models: {openrouter_model_names}")
         
     @staticmethod
     def _discover_gemini_models(api_key: str) -> list:
@@ -210,14 +228,24 @@ class LLMRouter:
                     if "pro" in short:        return (3, short)
                     return (4, short)
                 discovered.sort(key=_model_priority)
-                # Deduplicate: gemini-X-flash and gemini-X-flash-001 share rate limits
+                # Deduplicate: remove aliases and variants that share rate limits
                 all_shorts = {n.replace("models/", "") for n in discovered}
                 deduped = []
                 for name in discovered:
                     short = name.replace("models/", "")
+                    # Skip versioned variants (gemini-2.5-flash-001 shares quota with gemini-2.5-flash)
                     base = re.sub(r'-\d{3}$', '', short)
                     if base != short and base in all_shorts:
-                        continue  # Versioned variant — base model covers it
+                        continue
+                    # Skip -latest aliases (share rate limits with the model they point to)
+                    if short.endswith("-latest"):
+                        continue
+                    # Skip -customtools variants (same model, same rate limit bucket)
+                    if "-customtools" in short:
+                        continue
+                    # Skip dead/shutdown models
+                    if short == "gemini-3-pro-preview":  # Shut down March 9, 2026
+                        continue
                     deduped.append(name)
                 discovered = deduped
                 logger.info(f"Discovered {len(discovered)} Gemini chat models (deduped): {discovered}")
@@ -270,26 +298,33 @@ class LLMRouter:
             logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
                         f"Closes in {remaining:.0f}s.")
 
-        if self.fallback_1:
-            chain.append(self.fallback_1)
-        if self.fallback_2:
-            chain.append(self.fallback_2)
+        # Add Groq models (each has independent rate limits → round-robin multiplies throughput)
+        chain.extend(self.groq_models)
+        # Add OpenRouter models as last resort
+        chain.extend(self.openrouter_models)
 
         if not chain:
             raise ValueError("All API keys are exhausted or unavailable.")
 
         return chain
             
+    def _cooldown_for(self, model) -> float:
+        """Return the appropriate cooldown duration based on provider type."""
+        if isinstance(model, ChatGoogleGenerativeAI):
+            return GEMINI_COOLDOWN_DURATION
+        return FALLBACK_COOLDOWN_DURATION
+
     def _penalize_key(self, model):
         """Put a Gemini API key into the penalty box if the model has one."""
-        if hasattr(model, "google_api_key"):
+        if hasattr(model, "google_api_key") and model.google_api_key is not None:
             failed_key = getattr(model, "google_api_key")
             if hasattr(failed_key, "get_secret_value"):
                 failed_key = failed_key.get_secret_value()
+            duration = self._cooldown_for(model)
             with _COOLDOWN_LOCK:
                 if failed_key not in KEY_COOLDOWNS or time.time() > KEY_COOLDOWNS[failed_key]:
-                    KEY_COOLDOWNS[failed_key] = time.time() + COOLDOWN_DURATION
-                    logger.warning(f"Key penalized for {COOLDOWN_DURATION}s.")
+                    KEY_COOLDOWNS[failed_key] = time.time() + duration
+                    logger.warning(f"Key penalized for {duration}s.")
 
     def _is_key_penalized(self, model) -> bool:
         """Check if this model's API key is in the penalty box (auth/connection errors)."""
@@ -304,16 +339,17 @@ class LLMRouter:
     def _penalize_model(self, model):
         """Put a specific (key, model) combo into penalty box. Other models on same key stay active."""
         api_key = ""
-        if hasattr(model, "google_api_key"):
+        if hasattr(model, "google_api_key") and model.google_api_key is not None:
             api_key = getattr(model, "google_api_key")
             if hasattr(api_key, "get_secret_value"):
                 api_key = api_key.get_secret_value()
         m_name = getattr(model, "model_name", getattr(model, "model", "unknown"))
         penalty_key = f"{api_key}:{m_name}"
+        duration = self._cooldown_for(model)
         with _COOLDOWN_LOCK:
             if penalty_key not in MODEL_COOLDOWNS or time.time() > MODEL_COOLDOWNS[penalty_key]:
-                MODEL_COOLDOWNS[penalty_key] = time.time() + COOLDOWN_DURATION
-                logger.warning(f"[Penalize] {m_name} penalized {COOLDOWN_DURATION}s. Other models on this key still active.")
+                MODEL_COOLDOWNS[penalty_key] = time.time() + duration
+                logger.warning(f"[Penalize] {m_name} penalized {duration}s. Other models on this key still active.")
 
     def _is_model_penalized(self, model) -> bool:
         """Check if this specific (key, model) combo is rate-limited."""
@@ -346,9 +382,10 @@ class LLMRouter:
                 for m in self.gemini_models_by_key[key_val]
             )
             if all_penalized and (key_val not in KEY_COOLDOWNS or now > KEY_COOLDOWNS[key_val]):
-                KEY_COOLDOWNS[key_val] = now + COOLDOWN_DURATION
+                duration = self._cooldown_for(model)
+                KEY_COOLDOWNS[key_val] = now + duration
                 logger.warning(f"[KeyCascade] All models on key ...{key_val[-4:]} exhausted. "
-                               f"Key penalized for {COOLDOWN_DURATION}s.")
+                               f"Key penalized for {duration}s.")
 
     def invoke(self, messages: List[Any], temperature: Optional[float] = None, **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking.
