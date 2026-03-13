@@ -137,16 +137,18 @@ class DualEmbeddingPipeline:
                     else:
                         emb = result
 
-                    logger.debug(f"[Embedding] Gemini OK via key ...{key[-6:]} model={model_cfg['name']}")
+                    logger.info(f"[Embedding] Gemini OK via key ...{key[-6:]} model={model_cfg['name']}")
                     return emb
                 except Exception as e:
                     err_str = str(e).lower()
                     if '429' in err_str or 'resource_exhausted' in err_str or 'quota' in err_str:
                         self._penalize_key(key)
+                        logger.warning(f"[Embedding] 429 on key ...{key[-6:]} model={model_cfg['name']} — rotating to next key")
                         break  # Try next key
-                    logger.debug(f"[Embedding] {model_cfg['name']} with key ...{key[-6:]} failed: {e}")
+                    logger.warning(f"[Embedding] {model_cfg['name']} with key ...{key[-6:]} failed: {e}")
                     continue  # Try next model on same key
 
+        logger.warning(f"[Embedding] All {len(clients)} Gemini keys exhausted or in cooldown. Falling back to BGE.")
         return None
 
     def get_embeddings(self, text: str) -> dict:

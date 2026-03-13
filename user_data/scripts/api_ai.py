@@ -287,7 +287,7 @@ def get_signal_for_pair(pair: str):
     """Proxy to RAG Signal Service — for dashboard display."""
     try:
         import requests
-        resp = requests.get(f"http://127.0.0.1:8891/signal/{pair}", timeout=620)
+        resp = requests.get(f"http://127.0.0.1:8891/signal/{pair}", timeout=60)
         if resp.status_code == 200:
             return resp.json()
         return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"RAG service returned {resp.status_code}"}

@@ -38,16 +38,18 @@ class SemanticCache:
         import ai_config
         self.db_path = db_path if db_path is not None else ai_config.AI_DB_PATH
         self.similarity_threshold = similarity_threshold
-        # Create genai clients for all available keys
+        # Create genai clients for all available keys (store key suffix for logging)
         all_keys = _load_gemini_keys()
-        self._genai_clients = []
+        self._genai_clients = []  # list of (key_suffix, client) tuples
         for key in all_keys:
             try:
-                self._genai_clients.append(genai.Client(api_key=key))
+                self._genai_clients.append((key[-6:], genai.Client(api_key=key)))
             except Exception:
                 pass
         if not self._genai_clients:
             logger.warning("[SemanticCache] No Gemini API keys available. Cache embedding disabled.")
+        else:
+            logger.info(f"[SemanticCache] Initialized {len(self._genai_clients)} Gemini clients for embedding")
         self._client_idx = 0
         self._init_db()
 
@@ -88,9 +90,9 @@ class SemanticCache:
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         if not self._genai_clients:
             return None
-        # Try each client (key) with each model
+        # Try each client (key) with each model — round-robin rotation
         for _ in range(len(self._genai_clients)):
-            client = self._genai_clients[self._client_idx % len(self._genai_clients)]
+            key_suffix, client = self._genai_clients[self._client_idx % len(self._genai_clients)]
             self._client_idx = (self._client_idx + 1) % len(self._genai_clients)
             for model_cfg in self._EMBEDDING_MODELS:
                 try:
@@ -103,10 +105,11 @@ class SemanticCache:
                 except Exception as e:
                     err_str = str(e).lower()
                     if '429' in err_str or 'quota' in err_str:
+                        logger.warning(f"[SemanticCache] 429 on key ...{key_suffix} — rotating")
                         break  # Try next key
-                    logger.debug(f"Embedding {model_cfg['name']} failed for cache: {e}")
+                    logger.debug(f"[SemanticCache] {model_cfg['name']} key ...{key_suffix} failed: {e}")
                     continue
-        logger.warning("All embedding keys/models failed for semantic cache")
+        logger.warning("[SemanticCache] All embedding keys exhausted")
         return None
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
