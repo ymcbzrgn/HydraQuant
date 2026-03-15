@@ -154,10 +154,11 @@ class AIFreqtradeSizer(IStrategy):
         t0 = _time.time()
 
         def fetch_one(p):
-            """Fetch signal for one pair via RAG service (Phase 17: POST with technical data)."""
+            """Fetch signal for one pair via RAG service (Phase 17: POST with technical data).
+            Uses class-level HTTP session to prevent fd leak (Errno 24: Too many open files)."""
             sig = {"signal": "NEUTRAL", "confidence": 0.0, "timestamp": current_time}
             try:
-                import requests
+                session = AIFreqtradeSizer._get_http_session()
                 url = self.config.get('ai_config', {}).get(
                     'rag_service_url', 'http://127.0.0.1:8891')
 
@@ -172,9 +173,9 @@ class AIFreqtradeSizer(IStrategy):
 
                 _t = _time.time()
                 if technical_data:
-                    resp = requests.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=30)
+                    resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=30)
                 else:
-                    resp = requests.get(f"{url}/signal/{p}", timeout=30)
+                    resp = session.get(f"{url}/signal/{p}", timeout=30)
                 lat = (_time.time() - _t) * 1000
                 logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code}, POST={'Y' if technical_data else 'N'})")
                 if resp.status_code == 200:
@@ -241,6 +242,21 @@ class AIFreqtradeSizer(IStrategy):
             else:
                 logger.warning(f"[ENTRY-SIGNAL] {pair}: EMPTY DATAFRAME!")
         return signal, tag
+
+    # Class-level HTTP session — connection pooling prevents Errno 24 (Too many open files)
+    _http_session = None
+
+    @classmethod
+    def _get_http_session(cls):
+        if cls._http_session is None:
+            import requests
+            cls._http_session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10, pool_maxsize=10, max_retries=1
+            )
+            cls._http_session.mount('http://', adapter)
+            cls._http_session.mount('https://', adapter)
+        return cls._http_session
 
     def _get_sqlite_connection(self):
         try:

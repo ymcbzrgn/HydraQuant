@@ -28,7 +28,7 @@ except ImportError:
 # Global dictionary to store API Keys currently in Penalty Box: {api_key: unlock_timestamp}
 KEY_COOLDOWNS: Dict[str, float] = {}
 GEMINI_COOLDOWN_DURATION = 60.0  # Gemini: daily quota can take minutes to reset
-FALLBACK_COOLDOWN_DURATION = 5.0  # Groq/OpenRouter: per-minute rate limits, recover fast
+FALLBACK_COOLDOWN_DURATION = 15.0  # Non-Gemini providers: 15s cooldown (was 5s, caused 1221x 429 on OpenRouter)
 _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 
 # Module-level model discovery cache — shared across ALL LLMRouter instances
@@ -146,15 +146,16 @@ class LLMRouter:
             
         # 2. First Fallback: Groq (multiple models — each has INDEPENDENT rate limits)
         # Round-robin across 4 models = 4× throughput on free tier (~120 RPM total)
+        # Ordered: smartest → dumbest for best trade signal quality
         self.groq_key = os.environ.get("GROQ_API_KEY")
         self.groq_models = []
         self.fallback_1 = None  # Keep for backward compat checks
         if self.groq_key:
             groq_model_names = [
-                "llama-3.1-8b-instant",         # 30 RPM, 14.4K RPD, fastest
-                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, 1K RPD
-                "qwen/qwen3-32b",                # 60 RPM, 1K RPD
-                "llama-3.3-70b-versatile",       # 30 RPM, 1K RPD, smartest
+                "llama-3.3-70b-versatile",       # 30 RPM, 1K RPD, smartest (70B)
+                "qwen/qwen3-32b",                # 60 RPM, 1K RPD (32B, strong reasoning)
+                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, 1K RPD (17B MoE)
+                "llama-3.1-8b-instant",         # 30 RPM, 14.4K RPD, fastest but smallest (8B)
             ]
             for m_name in groq_model_names:
                 self.groq_models.append(ChatGroq(
@@ -170,12 +171,15 @@ class LLMRouter:
                 self._provider_map[id(m)] = "groq"
 
         # 3. Cerebras (OpenAI-compatible, 30 RPM, 1M tokens/day, ultra-fast inference)
+        # Ordered: smartest → dumbest. Cerebras free tier includes Qwen3-235B, GPT-OSS-120B, Llama 3.3-70B
         self.cerebras_key = os.environ.get("CEREBRAS_API_KEY")
         self.cerebras_models = []
         if self.cerebras_key:
             cerebras_model_names = [
-                "llama3.1-8b",     # 30 RPM, 14.4K RPD, 8K context, fastest
-                "gpt-oss-120b",    # 30 RPM, 14.4K RPD, 65K context, smartest
+                "qwen3-235b-a22b",  # 235B params, strongest reasoning on Cerebras free tier
+                "gpt-oss-120b",     # 120B params, OpenAI open-weight (Apache 2)
+                "llama3.3-70b",     # 70B params, good general purpose
+                "llama3.1-8b",      # 8B params, fastest but smallest
             ]
             for m_name in cerebras_model_names:
                 m = ChatOpenAI(
@@ -230,12 +234,13 @@ class LLMRouter:
             logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models: {sambanova_model_names}")
 
         # 6. Mistral (OpenAI-compatible, 2 RPM experiment plan, 1B tokens/month)
+        # Ordered: smartest → dumbest (large = 90% frontier perf at 8x less cost)
         self.mistral_key = os.environ.get("MISTRAL_API_KEY")
         self.mistral_models = []
         if self.mistral_key:
             mistral_model_names = [
+                "mistral-large-latest",    # Best quality, frontier-class
                 "mistral-small-latest",    # Fast, good quality
-                "mistral-large-latest",    # Best quality
             ]
             for m_name in mistral_model_names:
                 m = ChatOpenAI(
@@ -401,7 +406,7 @@ class LLMRouter:
                             return (i, mid)
                     return (len(priority_keywords), mid)
                 free_models.sort(key=_sort_key)
-                free_models = free_models[:12]  # Cap at 12 to avoid excessive retries
+                free_models = free_models[:6]  # Cap at 6 to avoid excessive retries (was 12, caused 1221x 429)
 
                 logger.info(f"Discovered {len(free_models)} free OpenRouter models: {free_models}")
                 _OPENROUTER_MODEL_CACHE["models"] = free_models
@@ -446,12 +451,13 @@ class LLMRouter:
             logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
                         f"Closes in {remaining:.0f}s.")
 
-        # Fallback chain: Groq → Cerebras → DeepSeek → SambaNova → Mistral → OpenRouter
-        chain.extend(self.groq_models)
-        chain.extend(self.cerebras_models)
+        # Fallback chain: ordered by model intelligence for best trade signal quality
+        # DeepSeek V3.2 (685B MoE) → Mistral Large → Cerebras (Qwen3-235B+) → Groq (70B+) → SambaNova → OpenRouter
         chain.extend(self.deepseek_models)
-        chain.extend(self.sambanova_models)
         chain.extend(self.mistral_models)
+        chain.extend(self.cerebras_models)
+        chain.extend(self.groq_models)
+        chain.extend(self.sambanova_models)
         chain.extend(self.openrouter_models)
 
         if not chain:

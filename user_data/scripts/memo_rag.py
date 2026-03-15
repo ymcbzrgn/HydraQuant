@@ -70,22 +70,27 @@ class MemoRAG:
         # Combine texts (keep it relatively small to avoid token limits, limit to top 5)
         new_batch = "\\n\\n---\\n\\n".join(new_texts[:5])
         
-        prompt = f"""You are maintaining a highly compressed GLOBAL MEMORY of a cryptocurrency market database.
-Current Global Memory:
+        prompt = f"""Update the Global Memory by integrating new information.
+
+CURRENT GLOBAL MEMORY:
 {current_memory}
 
-New Information to Integrate:
+NEW INFORMATION:
 {new_batch}
 
-Task: Update the Global Memory to include the new information. 
-Keep it under 500 words. Focus on macroeconomic shifts, major technical levels, dominant narratives, and structural changes.
-Discard noise, duplicate information, or highly localized ephemeral price actions.
-Return ONLY the updated compressed memory."""
+COMPRESSION RULES:
+1. Keep under 500 words. Every word must earn its place.
+2. PRIORITIZE (in order): macroeconomic regime changes > major technical level breaks > dominant narratives > institutional flows > regulatory developments
+3. DISCARD: duplicate info already in memory, ephemeral intraday noise, vague/unattributed claims
+4. PRESERVE: specific numbers (prices, indicator values, dates), causal relationships, regime classifications
+5. UPDATE: if new info contradicts existing memory, update to reflect the LATEST state
+6. TIMESTAMP: include approximate dates for major events (e.g., "As of March 2026, BTC...")
+7. Return ONLY the updated compressed memory — no preamble, no explanation, no markdown."""
 
         try:
             from langchain_core.messages import SystemMessage, HumanMessage
             response = self.router.invoke([
-                SystemMessage(content="You are a Global Memory Compressor."),
+                SystemMessage(content="You are a Global Memory Compressor for a crypto trading system. Maintain a concise, accurate, timestamped summary of market state. Prioritize actionable information over narrative. NEVER fabricate data — only compress what's provided."),
                 HumanMessage(content=prompt)
             ])
             
@@ -117,21 +122,25 @@ Return ONLY the updated compressed memory."""
             # Not enough memory built up yet to provide a useful draft
             return query
             
-        prompt = f"""You have access to a compressed global memory of the entire cryptocurrency market database.
-Global Memory:
+        prompt = f"""Generate a keyword-dense draft answer using ONLY the global memory below.
+
+GLOBAL MEMORY:
 {global_memory}
 
-User Query: "{query}"
+QUERY: "{query}"
 
-Task: Using ONLY your global memory, generate a preliminary "draft" answer to the query. 
-This draft will be used by a search engine to find the actual detailed documents.
-Keep the draft concise, factual, and dense with keywords that should appear in the real answer.
-If the global memory doesn't contain the answer, output the query itself."""
+RULES:
+1. Use ONLY information from the global memory above. Do NOT add external knowledge.
+2. Be SPECIFIC: include price levels, indicator values, dates, and entity names from the memory.
+3. Include KEYWORD-DENSE phrases that would appear in real market analysis documents (to improve retrieval).
+4. If the memory doesn't contain relevant information, output the original query unchanged.
+5. Keep it concise: 2-3 sentences maximum.
+6. This draft will be used as a search query — optimize for retrieval relevance, not human readability."""
 
         try:
             from langchain_core.messages import SystemMessage, HumanMessage
             response = self.router.invoke([
-                SystemMessage(content="You are a Draft Generator."),
+                SystemMessage(content="You generate keyword-dense draft answers for retrieval augmentation. Use ONLY the provided global memory — NEVER fabricate data. If memory lacks relevant info, return the original query."),
                 HumanMessage(content=prompt)
             ])
             

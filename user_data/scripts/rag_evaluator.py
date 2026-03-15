@@ -28,7 +28,7 @@ from ai_config import AI_DB_PATH as DB_PATH
 
 # ── Evaluation Prompts ──────────────────────────────────────────────
 
-FAITHFULNESS_PROMPT = """You are evaluating whether an AI-generated answer is FAITHFULLY supported by the retrieved context documents.
+FAITHFULNESS_PROMPT = """Evaluate whether this AI answer is FAITHFULLY supported by the retrieved context.
 
 Context Documents:
 {context}
@@ -36,40 +36,58 @@ Context Documents:
 AI Answer:
 {answer}
 
-Score the faithfulness from 0.0 to 1.0:
-- 1.0: Every claim in the answer is directly supported by the context
-- 0.5: Some claims are supported, others are hallucinated
-- 0.0: The answer contradicts or ignores the context
+SCORING (be STRICT — hallucinated claims must be penalized heavily):
+- 1.0: Every factual claim in the answer traces to a specific context passage
+- 0.8: Almost all claims supported, 1 minor unsourced but plausible claim
+- 0.5: Mixed — some claims supported, others clearly hallucinated or fabricated
+- 0.3: Mostly hallucinated — answer invents facts not in context
+- 0.0: Answer contradicts or completely ignores context
 
-Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation"}}"""
+RED FLAGS (auto-reduce score below 0.4):
+- Fabricated numbers (indicator values, prices, percentages not in context)
+- Invented news events not mentioned in any document
+- Claims that directly CONTRADICT the context documents
 
-CONTEXT_PRECISION_PROMPT = """You are evaluating whether the retrieved documents are relevant to the query.
+Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation citing specific supported/unsupported claims"}}"""
+
+CONTEXT_PRECISION_PROMPT = """Evaluate whether the retrieved documents are relevant to the query.
 
 Query: {query}
 
 Retrieved Documents:
 {context}
 
-Score the context precision from 0.0 to 1.0:
-- 1.0: All documents are highly relevant to the query
-- 0.5: About half the documents are relevant
-- 0.0: None of the documents relate to the query
+SCORING:
+- 1.0: ALL documents directly address the query with specific, actionable information
+- 0.8: Most documents relevant, 1-2 tangential
+- 0.5: About half relevant, half off-topic or outdated
+- 0.3: Mostly irrelevant, only vague topical connection
+- 0.0: None relate to the query
 
-Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation"}}"""
+CONSIDERATIONS:
+- Freshness matters: old documents for "current" queries reduce score
+- Specificity matters: generic crypto articles for a specific pair query reduce score
+- Redundancy: 5 documents saying the same thing = low precision (1 useful, 4 redundant)
 
-ANSWER_RELEVANCY_PROMPT = """You are evaluating whether an AI answer addresses the original query.
+Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation noting relevant vs irrelevant doc count"}}"""
+
+ANSWER_RELEVANCY_PROMPT = """Evaluate whether this AI answer addresses the original query.
 
 Query: {query}
 
 AI Answer:
 {answer}
 
-Score the answer relevancy from 0.0 to 1.0:
-- 1.0: The answer directly and completely addresses the query
-- 0.5: The answer partially addresses the query
-- 0.0: The answer is irrelevant to the query
+SCORING:
+- 1.0: Directly and completely answers what was asked, with actionable detail
+- 0.8: Answers the query well but misses one minor aspect
+- 0.5: Partially addresses the query but includes significant tangents or misses key aspects
+- 0.3: Vaguely related to the topic but doesn't answer the specific question
+- 0.0: Completely irrelevant, generic, or a non-answer ("I cannot determine...")
 
-Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation"}}"""
+PENALTY: Generic hedging ("it depends on many factors") without specific analysis → cap at 0.4
+
+Output ONLY a JSON: {{"score": 0.XX, "reason": "brief explanation of what was addressed vs missed"}}"""
 
 
 # ── Test Queries ────────────────────────────────────────────────────

@@ -18,12 +18,23 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
-HYDE_SYSTEM_PROMPT = """You are a crypto market analyst writing a brief factual document.
+HYDE_SYSTEM_PROMPT = """You are a senior crypto market analyst writing a brief factual research note.
 Given a question about crypto markets, write a SHORT (2-3 sentence) hypothetical answer
-as if you were a real analyst with perfect information.
+as if you had access to all current market data and perfect information.
 
-Write ONLY the answer. No disclaimers, no "I think", no hedging.
-Be specific with numbers, dates, and facts (even if hypothetical)."""
+RULES:
+1. Write ONLY the answer — no disclaimers, no "I think", no hedging, no preamble.
+2. Be SPECIFIC with numbers, price levels, indicator values, and dates (even if hypothetical).
+3. Use DOMAIN-SPECIFIC terminology: "RSI oversold at 28", "testing the 200-day EMA at $62K", "Fear & Greed at 25".
+4. Include KEYWORD-DENSE phrases that would appear in real market analysis documents (these improve retrieval).
+5. NEVER say "I don't know" — always generate a plausible hypothetical document.
+
+GOOD EXAMPLE:
+Question: "What is the current BTC outlook?"
+Answer: "Bitcoin is trading at $67,500 after bouncing from the 200-day EMA support at $62,000. RSI at 58 is neutral with bullish MACD crossover on the daily. Next resistance at $72,000 (previous local high), with Fear & Greed at 55 (Neutral)."
+
+BAD EXAMPLE:
+"I think Bitcoin might go up or down depending on market conditions." (Vague, no data, useless for retrieval)"""
 
 
 class HyDEGenerator:

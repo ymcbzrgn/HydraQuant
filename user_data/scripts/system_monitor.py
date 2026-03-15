@@ -30,6 +30,7 @@ class SystemMonitor:
         self._init_table()
 
     def _init_table(self):
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=10)
             conn.execute("""
@@ -46,12 +47,15 @@ class SystemMonitor:
                 ON system_metrics(metric_name, timestamp)
             """)
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"[SystemMonitor] Table init failed: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def record_metric(self, name: str, value: float, metadata: dict = None):
         """Record a single metric data point."""
+        conn = None
         try:
             meta_json = json.dumps(metadata) if metadata else None
             conn = sqlite3.connect(self.db_path, timeout=10)
@@ -60,14 +64,16 @@ class SystemMonitor:
                 (name, value, meta_json)
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"[SystemMonitor] Failed to record metric '{name}': {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def get_dashboard_data(self, hours: int = 24) -> dict:
         """Summarize metrics from the last N hours for dashboard display."""
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=10)
             conn.row_factory = sqlite3.Row
@@ -148,8 +154,6 @@ class SystemMonitor:
                 except (ValueError, TypeError):
                     pass
 
-            conn.close()
-
             return {
                 "rag_latency_avg_ms": round(rag_latency_avg, 2),
                 "llm_cost_today": round(llm_cost_today, 4),
@@ -171,6 +175,9 @@ class SystemMonitor:
                 "active_pairs": [], "uptime_hours": 0.0,
                 "last_updated": datetime.now(tz=timezone.utc).isoformat()
             }
+        finally:
+            if conn:
+                conn.close()
 
     def check_health(self) -> dict:
         """System health check with component status."""
@@ -178,16 +185,20 @@ class SystemMonitor:
         alerts = []
 
         # 1. Database connectivity
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=5)
             conn.execute("SELECT 1")
-            conn.close()
             checks["database"] = True
         except Exception:
             checks["database"] = False
             alerts.append("Database connection failed")
+        finally:
+            if conn:
+                conn.close()
 
         # 2. LLM Router — any successful call in last 5 minutes?
+        conn = None
         try:
             five_min_ago = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn = sqlite3.connect(self.db_path, timeout=5)
@@ -196,9 +207,11 @@ class SystemMonitor:
                 (five_min_ago,)
             ).fetchone()
             checks["llm_router"] = (row[0] > 0) if row else False
-            conn.close()
         except Exception:
             checks["llm_router"] = False
+        finally:
+            if conn:
+                conn.close()
 
         # 3. ChromaDB — can we import and connect?
         try:
@@ -211,6 +224,7 @@ class SystemMonitor:
             alerts.append("ChromaDB unavailable")
 
         # 4. Scheduler — last job run within 15 minutes?
+        conn = None
         try:
             fifteen_min_ago = (datetime.now(tz=timezone.utc) - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn = sqlite3.connect(self.db_path, timeout=5)
@@ -219,9 +233,11 @@ class SystemMonitor:
                 (fifteen_min_ago,)
             ).fetchone()
             checks["scheduler"] = (row[0] > 0) if row else False
-            conn.close()
         except Exception:
             checks["scheduler"] = False
+        finally:
+            if conn:
+                conn.close()
 
         # 5. Disk usage
         try:
@@ -262,6 +278,7 @@ class SystemMonitor:
 
     def get_hourly_summary(self, hours: int = 24) -> List[dict]:
         """Hourly metric summaries for chart data."""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=10)
             conn.row_factory = sqlite3.Row
@@ -279,8 +296,6 @@ class SystemMonitor:
                 ORDER BY hour ASC
             """, (cutoff,)).fetchall()
 
-            conn.close()
-
             # Group by hour
             hourly = {}
             for r in rows:
@@ -297,9 +312,13 @@ class SystemMonitor:
         except Exception as e:
             logger.error(f"[SystemMonitor] Hourly summary failed: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     def cleanup_old_metrics(self, max_age_days: int = 30):
         """Remove metrics older than max_age_days."""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=10)
             conn.execute(
@@ -307,6 +326,8 @@ class SystemMonitor:
                 (f"-{max_age_days} days",)
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"[SystemMonitor] Cleanup failed: {e}")
+        finally:
+            if conn:
+                conn.close()

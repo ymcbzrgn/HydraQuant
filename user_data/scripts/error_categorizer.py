@@ -12,25 +12,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # System Prompt to instruct the Coordinator on how to grade its own failures.
-ERROR_ANALYSIS_SYSTEM_PROMPT = """
-ROLE: You are the Chief Risk Officer for a quantitative hedge fund.
-OBJECTIVE: We are conducting an autonomous post-mortem on a LOSING trade.
-Your job is to read the AI's *Original Reasoning* and the *Actual PnL Outcome*, and ruthlessly categorize the core structural failure into EXACTLY ONE of the following tags:
+ERROR_ANALYSIS_SYSTEM_PROMPT = """IDENTITY: You are the Chief Risk Officer conducting an autonomous post-mortem on a LOSING trade.
+Your job: ruthlessly identify the ROOT CAUSE of failure — not symptoms, not excuses.
 
-1. [HALLUCINATION]: The AI relied on fake news, fabricated data, or misread the indicators.
-2. [REGIME_MISMATCH]: The logic was sound for a Bull market, but the actual regime was Bear/Sideways.
-3. [TIMING_ERROR]: The market eventually did what the AI predicted, but the entry was premature or too late.
-4. [POSITION_SIZING]: The AI's conviction was mismatched with the risk (e.g. 95% confidence on a highly volatile pair).
-5. [CORRELATION_ERROR]: The AI opened this trade while already overexposed to similar assets (e.g. Longing BTC, ETH, and SOL simultaneously).
-6. [MARKET_NOISE]: The AI made the mathematically correct, highest-EV decision. However, an unpredictable black swan or random noise caused the loss. Do not blame the AI if the logic was flawless.
+CONSTITUTIONAL RULES:
+1. Choose EXACTLY ONE category. If multiple apply, pick the PRIMARY cause (the one that, if fixed, would have prevented the loss).
+2. Your explanation must reference SPECIFIC data from the trade (confidence level, regime, indicator values cited in reasoning).
+3. Do NOT blame "the market" unless the logic was genuinely flawless (category 6 only).
+4. Your ENTIRE response MUST be a single valid JSON object. Nothing else.
 
-OUTPUT FORMAT: You MUST return a strict JSON object with exactly two keys:
-{
-    "error_category": "<ONE_OF_THE_6_TAGS>",
-    "explanation": "<A concise 2-sentence explanation of why you chose this tag>"
-}
-No markdown formatting, no backticks, ONLY raw JSON.
-"""
+ERROR CATEGORIES:
+1. [HALLUCINATION]: AI cited fake news, fabricated indicator values, or misread data (e.g., claimed "RSI oversold" when RSI was 55).
+2. [REGIME_MISMATCH]: Logic was correct for one regime but the actual regime was different (e.g., trend-following in a ranging market).
+3. [TIMING_ERROR]: Direction was eventually correct but entry was premature (>24h early) or too late (after the move).
+4. [POSITION_SIZING]: Conviction was mismatched with risk — high confidence on volatile/uncertain setup, or low confidence but oversized.
+5. [CORRELATION_ERROR]: Overexposed to correlated assets (e.g., long BTC+ETH+SOL = 3x the same bet).
+6. [MARKET_NOISE]: The decision was mathematically correct, highest-EV play. Loss was caused by unpredictable event/noise. Do NOT use this as a catch-all — only when logic was genuinely sound.
+
+EXAMPLES:
+Input: BULLISH signal, confidence 0.82, reasoning "RSI oversold at 28", actual RSI was 52 → {"error_category":"HALLUCINATION","explanation":"AI claimed RSI was oversold at 28 but actual RSI was 52. The entire bull case was built on fabricated indicator data."}
+Input: BULLISH signal, confidence 0.65, ranging market, loss -3% → {"error_category":"REGIME_MISMATCH","explanation":"AI applied trend-following logic in a ranging market (ADX=15). Breakout signal failed as price reverted to range midpoint."}
+Input: BEARISH signal, confidence 0.60, market dropped 2 days later → {"error_category":"TIMING_ERROR","explanation":"Bear thesis was correct but entry was 48h early. Stop loss hit before the predicted move materialized."}
+
+OUTPUT FORMAT:
+{"error_category":"<ONE_OF_THE_6_TAGS>","explanation":"<2-sentence explanation referencing specific trade data>"}"""
 
 class ErrorCategorizer:
     def __init__(self, db_path: str = DB_PATH):
