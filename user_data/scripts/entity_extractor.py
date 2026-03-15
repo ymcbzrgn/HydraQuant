@@ -85,11 +85,32 @@ class KnowledgeGraphManager:
 
     def extract_from_text(self, text: str, source_reference: str = "unknown"):
         """Extracts and persists knowledge graph components."""
-        prompt = f"""You are an expert financial Knowledge Graph extractor.
-Given the following text, extract the key entities (coins, people, institutions, events) 
-and the relationships between them.
+        prompt = f"""You are an expert financial Knowledge Graph extractor specializing in crypto markets.
 
-Format your output strictly according to the following JSON schema:
+TASK: Extract entities and relationships from the text below.
+
+ENTITY TYPES (extract these):
+- COIN/TOKEN: Bitcoin, Ethereum, SOL, etc. (use standard tickers: BTC, ETH, SOL)
+- PERSON: CEO names, founders, analysts, politicians
+- INSTITUTION: SEC, Federal Reserve, Binance, BlackRock, etc.
+- EVENT: ETF approval, halving, rate decision, hack, partnership announcement
+
+RELATIONSHIP TYPES (use standardized verbs):
+- regulates, is_regulated_by
+- impacts, is_impacted_by
+- partners_with
+- invests_in, is_invested_by
+- competes_with
+- correlates_with
+- causes, is_caused_by
+
+RULES:
+1. Only extract entities EXPLICITLY mentioned in the text. Do NOT infer or hallucinate.
+2. Normalize entity names: "Bitcoin" → "BTC", "Ethereum" → "ETH"
+3. Keep relationships directional and specific: "SEC regulates Coinbase" not "SEC and Coinbase are related"
+4. If no clear entities/relationships exist, return {{"entities": [], "relationships": []}}
+
+Format output according to this schema:
 {self.parser.get_format_instructions()}
 
 Text:

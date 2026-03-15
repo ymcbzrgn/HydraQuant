@@ -46,29 +46,39 @@ class SelfRAG:
         """
         evidence_text = "\n".join(evidence) if evidence else "No evidence provided."
         
-        prompt = f"""
-        You are a strict evaluator. Assess the following response based on the query and evidence.
-        
-        Query: {query}
-        Response: {response}
-        Evidence:
-        {evidence_text}
-        
-        Score the following metrics from 0.0 to 1.0 (strict float values):
-        1. faithfulness: Is the response fully supported by the provided evidence? (If it hallucinates or says things not in evidence, give a low score. If no evidence was provided, assess if it accurately reflects general knowledge without hallucinating facts).
-        2. relevance: Does the response directly answer the query?
-        3. confidence: Overall confidence in this assessment.
-        
-        Output EXACTLY a valid JSON object in this format:
-        {{
-            "faithfulness": 0.9,
-            "relevance": 0.95,
-            "confidence": 0.9
-        }}
-        """
+        prompt = f"""Evaluate this response against the provided evidence.
+
+Query: {query}
+Response: {response}
+Evidence:
+{evidence_text}
+
+SCORING CRITERIA (0.0 to 1.0):
+
+1. faithfulness: Is the response FULLY supported by evidence?
+   - 1.0: Every claim traces back to a specific evidence passage
+   - 0.7: Most claims supported, 1-2 minor unsupported statements
+   - 0.5: Mixed — some supported, some clearly hallucinated
+   - 0.3: Mostly unsupported or contradicts evidence
+   - 0.0: Completely fabricated, ignores evidence entirely
+   RED FLAGS (auto-reduce to <0.4): Fabricated numbers, phantom events, claims contradicting evidence
+
+2. relevance: Does the response DIRECTLY answer the query?
+   - 1.0: Directly and completely answers what was asked
+   - 0.7: Answers the query but includes unnecessary tangents
+   - 0.5: Partially answers — addresses the topic but misses the specific question
+   - 0.0: Completely off-topic
+
+3. confidence: YOUR confidence in this evaluation (meta-score)
+   - High (0.8-1.0): Evidence is clear, easy to verify claims
+   - Medium (0.5-0.7): Some ambiguity in evidence, harder to verify
+   - Low (0.0-0.4): Evidence is sparse, evaluation is uncertain
+
+Output EXACTLY a valid JSON object:
+{{"faithfulness": 0.XX, "relevance": 0.XX, "confidence": 0.XX}}"""
         try:
             critique_response = self.router.invoke([
-                SystemMessage(content="You are a strict JSON evaluator. Output ONLY valid JSON."),
+                SystemMessage(content="You are a strict RAG quality evaluator. Your ENTIRE response must be a single valid JSON object. No text before or after."),
                 HumanMessage(content=prompt)
             ])
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)

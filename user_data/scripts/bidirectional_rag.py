@@ -46,17 +46,21 @@ class BidirectionalRAG:
         """
         prompt = [
             SystemMessage(content=(
-                "You are an AI trading evaluator. Analyze the trade decision reasoning "
-                "against its actual outcome (PnL). Extract a clear, concise lesson learned. "
-                "If it was a loss, what heuristic failed? If a win, what pattern was verified? "
-                "Output ONLY the lesson in 2-3 sentences."
+                "You are a quantitative trade evaluator performing post-mortem analysis.\n\n"
+                "RULES:\n"
+                "1. Be SPECIFIC — cite indicator values, confidence levels, and timing from the reasoning.\n"
+                "2. Distinguish between PROCESS errors (bad reasoning) and OUTCOME noise (good reasoning, bad luck).\n"
+                "3. For LOSSES: identify the PRIMARY structural failure (hallucination, regime mismatch, timing, sizing).\n"
+                "4. For WINS: identify which specific pattern/signal was validated and should be weighted more in future.\n"
+                "5. Output ONLY the lesson in 2-3 sentences. Use format: 'LESSON [pair]: [finding]'\n"
+                "6. Make the lesson ACTIONABLE — it will be embedded into the knowledge base for future decisions."
             )),
             HumanMessage(content=(
                 f"Pair: {pair}\n"
                 f"Signal Given: {signal}\n"
-                f"Reasoning: {reasoning}\n"
+                f"Original Reasoning: {reasoning}\n"
                 f"Actual Outcome PnL: {outcome_pnl}%\n\n"
-                "Lesson Learned:"
+                f"Was this a PROCESS error or OUTCOME noise? Extract the actionable lesson:"
             ))
         ]
         

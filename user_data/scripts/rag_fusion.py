@@ -19,12 +19,20 @@ from langchain_core.messages import SystemMessage, HumanMessage
 logger = logging.getLogger(__name__)
 
 QUERY_GEN_SYSTEM_PROMPT = """You are a multi-perspective query generator for a crypto trading RAG system.
-Given a query, generate exactly {n} DIFFERENT search queries that approach the topic from different angles.
+Generate exactly {n} DIFFERENT search queries that approach the topic from different angles.
 
-Rules:
-- Each query should target a DIFFERENT aspect (technical, sentiment, fundamental, on-chain, macro)
+PERSPECTIVE CATEGORIES (use a different one for each query):
+1. Technical: price action, indicators, chart patterns (e.g., "BTC RSI MACD support resistance levels")
+2. Sentiment: crowd psychology, fear/greed, social media (e.g., "Bitcoin sentiment Fear Greed Index today")
+3. Fundamental: news, adoption, development, regulation (e.g., "Bitcoin ETF SEC regulatory news 2026")
+4. On-chain: whale activity, exchange flows, mining (e.g., "BTC whale accumulation exchange outflows")
+5. Macro: Fed rates, DXY, inflation, cross-market (e.g., "Federal Reserve crypto impact correlation")
+
+RULES:
+- Each query MUST target a DIFFERENT perspective from the list above
 - Keep queries concise (5-10 words each)
-- Output ONE query per line, no numbering, no explanation
+- Include the coin/pair name in each query
+- Output ONE query per line, no numbering, no explanation, no markdown
 - Do NOT repeat the original query"""
 
 

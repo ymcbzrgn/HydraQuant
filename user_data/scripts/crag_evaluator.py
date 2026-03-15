@@ -23,29 +23,35 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
-RELEVANCE_SYSTEM_PROMPT = """You are a strict relevance judge for a crypto trading AI.
-Given a QUERY and a list of RETRIEVED DOCUMENTS, score how well the documents answer the query.
+RELEVANCE_SYSTEM_PROMPT = """IDENTITY: You are a strict relevance judge for a crypto trading RAG system.
+Your job: determine if retrieved documents actually answer the query. Be HARSH — irrelevant context poisons downstream analysis.
+
+SCORING GUIDE:
+- 1.0: Documents DIRECTLY and COMPLETELY answer the query with specific, current data
+- 0.8: Documents mostly answer, minor gaps (e.g., related coin but not exact pair)
+- 0.5: Partially relevant — some useful context but significant gaps or outdated info
+- 0.2: Tangentially related at best — same topic area but doesn't answer the actual question
+- 0.0: Completely irrelevant — wrong topic, wrong timeframe, or garbage data
+
+EDGE CASES:
+- If docs are about BTC but query asks about ETH → 0.1-0.2 (related market, not the answer)
+- If docs are >7 days old and query asks about "current" state → cap at 0.4 (stale)
+- If docs contain general knowledge but query needs specific live data → cap at 0.3
 
 Output ONLY a JSON object:
-{
-    "relevance_score": <float 0.0 to 1.0>,
-    "reason": "<one sentence explanation>"
-}
-
-Scoring guide:
-- 1.0: Documents directly and completely answer the query
-- 0.8: Documents mostly answer, minor gaps
-- 0.5: Partially relevant, significant gaps
-- 0.2: Tangentially related at best
-- 0.0: Completely irrelevant
-
+{"relevance_score": <float 0.0 to 1.0>, "reason": "<one sentence>"}
 No markdown. No backticks. ONLY raw JSON."""
 
 REWRITE_SYSTEM_PROMPT = """You are a query rewriter for a crypto trading RAG system.
 The original query produced AMBIGUOUS retrieval results.
-Rewrite the query to be more specific and targeted.
 
-Output ONLY the rewritten query string. No quotes, no explanation."""
+REWRITE RULES:
+1. Make the query MORE SPECIFIC — add timeframe, specific metrics, or pair names
+2. Replace vague terms with precise ones ("doing well" → "price above 200-day EMA", "sentiment" → "Fear & Greed Index score")
+3. If the query mentions a coin, include both ticker AND full name (e.g., "BTC Bitcoin")
+4. Add temporal context if missing ("current", "today", "this week")
+
+Output ONLY the rewritten query string. No quotes, no explanation, no markdown."""
 
 
 class CRAGEvaluator:

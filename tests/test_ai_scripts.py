@@ -1757,18 +1757,13 @@ def test_flare_active_retrieval(mock_flare):
             
             if "Generate an analytical response" in prompt:
                 return MockResponse("First uncertain sentence. Second certain sentence.")
-            elif "evaluating the confidence" in prompt:
+            elif "factual confidence" in prompt or "evaluating the confidence" in prompt:
                 if "First uncertain" in prompt:
                     return MockResponse("0.3")
                 else:
                     return MockResponse("0.9")
             elif "rewrite and improve" in prompt:
                 return MockResponse("First corrected sentence.")
-            elif "You are evaluating the confidence" in prompt:
-                 # The exact prompt used by _assess_confidence
-                 if "First uncertain" in prompt:
-                     return MockResponse("0.3")
-                 return MockResponse("0.9")
                 
             return MockResponse("Fallback mock.")
             
@@ -1886,9 +1881,9 @@ def test_speculative_3_drafts(mock_spec_rag):
                     self.content = text
             
             prompt = str(messages[1].content) if len(messages) > 1 and hasattr(messages[1], 'content') else str(messages)
-            if "scenario analyst drafting" in prompt:
+            if "scenario" in prompt and "drafting" in prompt:
                 return MockResponse(f"Draft {self.call_count}")
-            elif "Verification Overlord" in prompt:
+            elif "Verification" in prompt and ("Overlord" in prompt or "Judge" in prompt):
                 return MockResponse("BEST_DRAFT_INDEX: 1\nReason: It is clearly the best.")
             return MockResponse("Fallback")
             
@@ -1907,7 +1902,7 @@ def test_speculative_verify_picks_best(mock_spec_rag):
                     self.content = text
                     
             prompt = str(messages[1].content) if len(messages) > 1 and hasattr(messages[1], 'content') else str(messages)
-            if "Verification Overlord" in prompt:
+            if "Verification" in prompt and ("Overlord" in prompt or "Judge" in prompt):
                 return MockResponse("BEST_DRAFT_INDEX: 2\nReason: Draft 2 aligns perfectly.")
             return MockResponse("Draft")
             

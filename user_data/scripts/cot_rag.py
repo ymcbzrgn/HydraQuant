@@ -15,11 +15,11 @@ class CoTRAG:
     """
     
     REASONING_STEPS = [
-        {"step": "market_state", "label": "Piyasa Durumu", "search_query_hint": "current market trend"},
-        {"step": "technical", "label": "Teknik Analiz", "search_query_hint": "{pair} technical indicators RSI MACD support resistance"},
-        {"step": "sentiment", "label": "Sentiment", "search_query_hint": "{pair} news sentiment fear and greed"},
-        {"step": "risk", "label": "Risk Değerlendirme", "search_query_hint": "{pair} risk volatility downside"},
-        {"step": "decision", "label": "Final Karar", "search_query_hint": None}  # Synthesis, no new retrieval
+        {"step": "market_state", "label": "Market Regime", "search_query_hint": "crypto market trend regime volatility ADX"},
+        {"step": "technical", "label": "Technical Analysis", "search_query_hint": "{pair} technical indicators RSI MACD EMA support resistance volume"},
+        {"step": "sentiment", "label": "Sentiment & News", "search_query_hint": "{pair} sentiment Fear Greed CryptoBERT news catalyst"},
+        {"step": "risk", "label": "Risk Assessment", "search_query_hint": "{pair} risk volatility downside tail risk correlation"},
+        {"step": "decision", "label": "Final Synthesis", "search_query_hint": None}  # Synthesis, no new retrieval
     ]
 
     def __init__(self, llm_router: Optional[LLMRouter] = None, retriever=None):
@@ -49,16 +49,30 @@ class CoTRAG:
         # We parse the decision step for signal and confidence
         # Since it's free-text, we rely on basic heuristic parsing if not strictly JSON formatted
         signal = "NEUTRAL"
-        if "BULLISH" in decision_step["analysis"].upper():
+        analysis_upper = decision_step["analysis"].upper()
+        if "BULLISH" in analysis_upper:
             signal = "BULLISH"
-        elif "BEARISH" in decision_step["analysis"].upper():
+        elif "BEARISH" in analysis_upper:
             signal = "BEARISH"
-            
+
+        # Dynamic confidence from step agreement instead of hardcoded 0.85
+        agreement_count = 0
+        for step in executed_steps[:-1]:  # Exclude decision step
+            step_text = step["analysis"].upper()
+            if signal == "BULLISH" and "BULLISH" in step_text:
+                agreement_count += 1
+            elif signal == "BEARISH" and "BEARISH" in step_text:
+                agreement_count += 1
+            elif signal == "NEUTRAL" and "NEUTRAL" in step_text:
+                agreement_count += 1
+        # 4 analysis steps: 0 agree=0.45, 1=0.52, 2=0.58, 3=0.65, 4=0.72
+        confidence = 0.45 + (agreement_count * 0.07)
+
         return {
             "pair": pair,
             "steps": executed_steps,
             "final_decision": signal,
-            "confidence": 0.85, # In a full prompt we'd extract this dynamically
+            "confidence": round(confidence, 2),
             "reasoning_chain": cumulative_context.strip()
         }
 
@@ -87,23 +101,38 @@ class CoTRAG:
         # 2. Formulate specific prompt
         if step_id == "decision":
             prompt = (
-                f"You are the Final Synthesis AI. Based on the previous reasoning steps:\\n{previous_context}\\n\\n"
-                f"Provide a definitive trading decision for {pair}. "
-                f"State clearly if it is BULLISH, BEARISH, or NEUTRAL, and summarize your reasoning in 2 sentences."
+                f"You are the Final Synthesis AI. Based on the 4 previous reasoning steps:\\n{previous_context}\\n\\n"
+                f"TASK: Provide a definitive trading decision for {pair}.\\n"
+                f"1. Weigh the evidence from each step. Which steps AGREE and which CONTRADICT?\\n"
+                f"2. If 3+ steps agree on direction, follow the majority.\\n"
+                f"3. If steps are split or contradictory, lean NEUTRAL.\\n"
+                f"4. State clearly: BULLISH, BEARISH, or NEUTRAL.\\n"
+                f"5. Summarize in exactly 2 sentences, citing which steps supported the decision."
             )
         else:
+            step_instructions = {
+                "market_state": "Classify the market REGIME: TRENDING (ADX>25), RANGING (ADX<20), or HIGH_VOLATILITY (ATR>2x avg). Cite specific data.",
+                "technical": "Analyze key indicators (RSI, MACD, EMAs, BBands) with EXACT values from evidence. State TECHNICAL LEAN: BULLISH/BEARISH/NEUTRAL.",
+                "sentiment": "Assess crowd sentiment (Fear & Greed, CryptoBERT, news tone). Include contrarian analysis. State SENTIMENT LEAN.",
+                "risk": "Identify the TOP 2 risks to a directional trade. What could go wrong? What's the invalidation level? Rate RISK LEVEL: LOW/MEDIUM/HIGH."
+            }
+            instruction = step_instructions.get(step_id, f"Analyze {label} for {pair}.")
+
             prompt = (
-                f"You are an AI analyst focusing on {label} for {pair}.\\n"
-                f"Base user query: {base_query}\\n\\n"
-                f"Previous Step Context:\\n{previous_context if previous_context else 'None'}\\n\\n"
-                f"Fresh Evidence Retrieved:\\n{evidence_text if evidence_text else 'None'}\\n\\n"
-                f"Provide a focused 1-2 sentence analysis specifically for {label}. Do not give a final trading signal here."
+                f"You are analyzing {label} for {pair}.\\n"
+                f"SPECIFIC TASK: {instruction}\\n\\n"
+                f"Previous Steps:\\n{previous_context if previous_context else 'None'}\\n\\n"
+                f"Fresh Evidence:\\n{evidence_text if evidence_text else 'None'}\\n\\n"
+                f"RULES:\\n"
+                f"- Cite SPECIFIC data points from the evidence [SOURCE: value]\\n"
+                f"- If evidence is insufficient, say 'DATA UNAVAILABLE' — do NOT guess\\n"
+                f"- Keep to 2-3 sentences. Do NOT give a final trading signal."
             )
 
         # 3. Request generation
         try:
             response = self.router.invoke([
-                SystemMessage(content=f"You are executing step: {label}."),
+                SystemMessage(content=f"You are a specialized crypto analyst executing the '{label}' step of a structured reasoning chain. Be precise, cite data, and never hallucinate."),
                 HumanMessage(content=prompt)
             ])
             analysis = str(response.content).strip()

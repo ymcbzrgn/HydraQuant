@@ -26,7 +26,7 @@ class FLARERetriever:
         # 1. Initial generation
         prompt = f"Context: {context}\n\nQuery: {query}\n\nGenerate an analytical response:"
         messages = [
-            SystemMessage(content="You are a financial analyst. Generate a detailed response."),
+            SystemMessage(content="You are a crypto financial analyst. Generate a detailed, data-grounded response. Cite specific numbers and data points from the context. If the context lacks information on a topic, explicitly state 'DATA UNAVAILABLE' rather than guessing."),
             HumanMessage(content=prompt)
         ]
         
@@ -94,11 +94,15 @@ class FLARERetriever:
     def _assess_confidence(self, sentence: str) -> float:
         """Bir cümlenin güven skorunu LLM ile değerlendir (0-1)."""
         prompt = (
-            "You are evaluating the confidence of a financial claim. "
-            "Rate how confident/factual the following sentence is from 0.0 to 1.0. "
-            "0.0 means highly uncertain or speculative, 1.0 means highly confident or factual. "
-            "Return ONLY a float score.\n\n"
-            f"Sentence: {sentence}"
+            "Rate the factual confidence of this financial claim from 0.0 to 1.0. Return ONLY a single float.\n\n"
+            "SCORING:\n"
+            "1.0 = Verifiable fact with specific data (e.g., 'RSI is at 45.2', 'BTC price is $67,450')\n"
+            "0.7 = Reasonable claim with some data backing (e.g., 'Trend is bullish based on EMA alignment')\n"
+            "0.5 = Interpretive claim, debatable (e.g., 'Market sentiment is shifting positively')\n"
+            "0.3 = Speculative, no data cited (e.g., 'Bitcoin could reach $100K soon')\n"
+            "0.0 = Pure speculation or likely hallucinated (e.g., 'SEC will approve the ETF tomorrow')\n\n"
+            f"Sentence: {sentence}\n\n"
+            "Score:"
         )
         
         try:

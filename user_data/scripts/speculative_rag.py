@@ -82,15 +82,19 @@ class SpeculativeRAG:
         """Generates a single draft scenario from a subset of evidence."""
         context = "\\n".join(evidence_subset)
         prompt = (
-            f"You are a scenario analyst drafting possibility #{index+1}.\\n"
-            f"Based strictly on the following subset of evidence, answer the query.\\n\\n"
+            f"You are drafting scenario #{index+1} for a crypto trading analysis.\\n"
+            f"Based STRICTLY on the evidence subset below, answer the query.\\n\\n"
             f"Evidence Subset:\\n{context}\\n\\n"
             f"Query: {query}\\n\\n"
-            f"Provide a 2-3 sentence draft scenario based ONLY on the evidence above."
+            f"RULES:\\n"
+            f"1. Use ONLY information present in the evidence above. Do NOT hallucinate or add external knowledge.\\n"
+            f"2. Cite specific data points from the evidence (numbers, dates, events).\\n"
+            f"3. If the evidence is insufficient, say 'Evidence insufficient for strong conclusion.'\\n"
+            f"4. Provide a 2-3 sentence draft scenario."
         )
         try:
             response = self.router.invoke([
-                SystemMessage(content="You generate specific analytical drafts."),
+                SystemMessage(content="You generate evidence-grounded analytical drafts. ONLY cite information present in the provided evidence. NEVER fabricate data."),
                 HumanMessage(content=prompt)
             ])
             draft = str(response.content).strip()
@@ -105,18 +109,21 @@ class SpeculativeRAG:
         drafts_formatted = "\\n\\n".join([f"--- Draft {i} ---\\n{d}" for i, d in enumerate(drafts)])
         
         prompt = (
-            f"You are the Verification Overlord. You are presented with a query, a master pool of evidence, and {len(drafts)} distinct drafts.\\n"
+            f"You are the Verification Judge. Evaluate {len(drafts)} drafts against the master evidence pool.\\n\\n"
             f"Query: {query}\\n\\n"
             f"Master Evidence Pool:\\n{global_context}\\n\\n"
             f"Generated Drafts:\\n{drafts_formatted}\\n\\n"
-            f"TASK:\\n"
-            f"1. Evaluate which Draft is most factually aligned with the combined Master Evidence Pool.\\n"
-            f"2. Return your response starting EXACTLY with 'BEST_DRAFT_INDEX: [number]' (e.g. BEST_DRAFT_INDEX: 0).\\n"
-            f"3. Follow it with a 1-sentence verification reasoning why it is best.\\n"
+            f"EVALUATION CRITERIA (in order of importance):\\n"
+            f"1. FACTUAL ALIGNMENT: Which draft's claims are best supported by the master evidence? Penalize fabricated data.\\n"
+            f"2. COMPLETENESS: Which draft addresses the query most fully?\\n"
+            f"3. SPECIFICITY: Which draft cites the most specific data points from the evidence?\\n\\n"
+            f"OUTPUT FORMAT:\\n"
+            f"Start EXACTLY with 'BEST_DRAFT_INDEX: [number]' (e.g., BEST_DRAFT_INDEX: 0).\\n"
+            f"Follow with a 1-sentence explanation citing which specific evidence supports that draft.\\n"
         )
         try:
             response = self.router.invoke([
-                SystemMessage(content="You are a strict verifier AI."),
+                SystemMessage(content="You are a strict verification judge. Evaluate ONLY factual alignment with evidence. The draft with the most evidence-backed claims wins."),
                 HumanMessage(content=prompt)
             ])
             verification_text = str(response.content).strip()

@@ -352,7 +352,7 @@ def _technical_fallback(tech_data: dict) -> dict:
     Used when ALL LLMs are exhausted. Max confidence cap: 0.35.
     """
     if not tech_data or not tech_data.get("current_price"):
-        return {"signal": "NEUTRAL", "confidence": 0.0,
+        return {"signal": "NEUTRAL", "confidence": 0.01,
                 "reasoning": "[Technical Fallback] No indicator data available", "source": "FALLBACK"}
 
     score = 0.0
@@ -549,6 +549,7 @@ def _voting_fallback(tech_text: str, sent_text: str, news_text: str) -> dict:
 
 def _record_signal_health(pair: str, source: str, signal_type: str, confidence: float):
     """Helper: record a signal to the signal_health SQLite table."""
+    conn = None
     try:
         from db import get_db_connection
         conn = get_db_connection()
@@ -557,9 +558,11 @@ def _record_signal_health(pair: str, source: str, signal_type: str, confidence: 
             (pair, source, signal_type, confidence)
         )
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.debug(f"[SignalHealth] Failed to record: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # --- Parallel Analyst Nodes ---
@@ -596,32 +599,73 @@ def analyze_technical(state: GraphState):
         except Exception as e:
             logger.warning(f"MAGMA Technical lookup failed: {e}")
 
-    if tech_context:
-        prompt = f"""You are a master Crypto Technical Analyst with access to REAL-TIME indicator data.
+    # Agent DNA: Technical Analyst (FinCoT + Show Your Work + Numeric Grounding + Multi-Timeframe)
+    TECH_SYSTEM = """IDENTITY: You are a senior quantitative Technical Analyst at a systematic crypto trading desk.
+Your methodology combines momentum, trend, volatility, and volume analysis using EXACT indicator values.
 
-Analyze these LIVE technical indicators for {pair}:
+CONSTITUTIONAL RULES:
+1. ONLY cite indicator values that appear in the provided data. NEVER fabricate support/resistance levels, RSI values, or any numbers.
+2. Every claim MUST include [SOURCE: INDICATOR_NAME=VALUE] tag — e.g., [SOURCE: RSI_14=45.2].
+3. If an indicator is missing from the data, say "DATA UNAVAILABLE" — do NOT estimate or guess.
+4. NEVER provide a final trading signal or recommend a trade. You provide TECHNICAL PERSPECTIVE only.
+5. Analyze what the indicators ARE showing, not what you WISH they showed. No confirmation bias.
+
+YOU DO NOT: predict exact prices, guarantee outcomes, provide position sizing, or make final trade decisions.
+YOU DO: read indicators precisely, identify trend/momentum/volatility regimes, detect divergences, and flag contradictions between timeframes.
+
+BAD OUTPUT EXAMPLE: "RSI looks oversold and MACD is turning bullish, suggesting a bounce is likely." (No exact values, no source tags, speculative)
+GOOD OUTPUT EXAMPLE: "RSI_14 at 32.4 [SOURCE: RSI_14=32.4] is in oversold territory (<35). However, MACD histogram at -0.0023 [SOURCE: MACD_HIST=-0.0023] shows no bullish crossover yet — momentum remains bearish. Contradiction: price holding above EMA_200 [SOURCE: EMA_200=$62,450] despite bearish momentum. TECHNICAL LEAN: NEUTRAL (oversold but no reversal confirmation).\""""
+
+    if tech_context:
+        prompt = f"""Analyze these LIVE technical indicators for {pair} using the FinCoT (Financial Chain-of-Thought) method:
+
+=== RAW INDICATOR DATA ===
 {tech_context}
 {magma_context}
 
-Based on these REAL numbers, provide a dense 2-3 sentence technical analysis:
-1. Identify the current trend (bullish/bearish/ranging) from EMA/SMA alignment and price position
-2. Assess momentum (RSI overbought/oversold, MACD cross direction, ADX strength)
-3. Note volatility regime (ATR%, Bollinger Band width) and key levels (support/resistance from BB & EMAs)
-4. Analyze the last candle patterns (momentum, reversals, volume confirmation)
+=== FinCoT 5-STEP ANALYSIS (complete ALL steps) ===
 
-State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
-NEVER provide a final trading signal. ONLY provide your technical perspective."""
+STEP 1 — TREND IDENTIFICATION:
+Examine EMA/SMA alignment and price position relative to key MAs.
+- Price vs EMA9/EMA20/EMA50/EMA200: above or below? Aligned or tangled?
+- What is the ADX value? (>25 = trending, <20 = ranging)
+- Verdict: STRONG_UPTREND / WEAK_UPTREND / RANGING / WEAK_DOWNTREND / STRONG_DOWNTREND
+
+STEP 2 — MOMENTUM ASSESSMENT:
+- RSI_14 value: oversold (<30), neutral (30-70), overbought (>70)?
+- MACD line vs signal line: bullish or bearish crossover? Histogram direction?
+- Any RSI or MACD DIVERGENCE vs price? (bullish div = price lower low, RSI higher low)
+
+STEP 3 — VOLATILITY REGIME:
+- ATR as % of price: low (<1.5%), normal (1.5-3%), high (>3%)?
+- Bollinger Band width: narrowing (squeeze) or expanding (breakout)?
+- Current price position within BBands: near upper/middle/lower?
+
+STEP 4 — KEY LEVELS:
+- Nearest support: from EMA_200, BB_lower, or recent swing low
+- Nearest resistance: from EMA_50, BB_upper, or recent swing high
+- ONLY cite levels that exist in the data. Do NOT fabricate levels.
+
+STEP 5 — MULTI-TIMEFRAME CHECK (if HTF data available):
+- Does the higher timeframe CONFIRM or CONTRADICT the current timeframe?
+- If HTF is bearish but current TF is bullish = likely bear market rally (lower confidence)
+- TIMEFRAME_ALIGNMENT: ALIGNED / PARTIALLY_ALIGNED / CONTRADICTING
+
+=== OUTPUT FORMAT ===
+Synthesize all 5 steps into a dense 3-4 sentence analysis. Cite [SOURCE: INDICATOR=VALUE] for every claim.
+End with: TECHNICAL LEAN: BULLISH / BEARISH / NEUTRAL
+NEVER provide a final trading signal. ONLY your technical perspective."""
     else:
-        prompt = f"""You are a master Crypto Technical Analyst.
-Analyze these current technical indicators and market search results for {pair}:
+        prompt = f"""Analyze available market data for {pair}:
 {search_res}
 {magma_context}
 
-Provide a dense, 2-3 sentence technical analysis. State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
-NEVER provide a final trading signal. ONLY provide your technical perspective."""
+Provide a dense 3-4 sentence technical analysis citing specific data points where available.
+End with: TECHNICAL LEAN: BULLISH / BEARISH / NEUTRAL.
+NEVER provide a final trading signal. ONLY your technical perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content="You are a Technical Analyst."), HumanMessage(content=prompt)])
+        response = llm.invoke([SystemMessage(content=TECH_SYSTEM), HumanMessage(content=prompt)])
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -641,11 +685,12 @@ def analyze_sentiment(state: GraphState):
     from ai_config import AI_DB_PATH as db_path
     db_context_parts = []
     
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        
+
         # Fear & Greed Index (live from fng_fetcher.py)
         c.execute("SELECT value, classification FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1")
         fng_row = c.fetchone()
@@ -653,7 +698,7 @@ def analyze_sentiment(state: GraphState):
             db_context_parts.append(f"Fear & Greed Index: {fng_row['value']} ({fng_row['classification']}).")
         else:
             db_context_parts.append("Fear & Greed Index: Data unavailable.")
-            
+
         # CryptoBERT rolling sentiment (live from coin_sentiment_aggregator.py)
         base_coin = pair.split("/")[0]
         c.execute("SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", (base_coin,))
@@ -665,24 +710,61 @@ def analyze_sentiment(state: GraphState):
             db_context_parts.append(f"CryptoBERT rolling sentiment for {base_coin}: 1H={s1h:.2f}, 4H={s4h:.2f}, 24H={s24h:.2f}.")
         else:
             db_context_parts.append(f"CryptoBERT rolling sentiment for {base_coin}: No data available yet.")
-        
-        conn.close()
     except Exception as e:
         logger.warning(f"Sentiment DB query failed: {e}. Falling back to neutral context.")
         db_context_parts.append("Sentiment data temporarily unavailable. Assume NEUTRAL baseline.")
+    finally:
+        if conn:
+            conn.close()
     
     db_context = " ".join(db_context_parts)
     # ===== END LIVE DATA =====
     
-    prompt = f"""You are a Behavioral Economics & Crypto Sentiment Analyst. 
-Analyze the current sentiment metrics for {pair}:
+    # Agent DNA: Sentiment Analyst (Temporal Grounding + Contrarian + Numeric Grounding)
+    SENT_SYSTEM = """IDENTITY: You are a Behavioral Economics & Crypto Sentiment Analyst specializing in crowd psychology, fear/greed cycles, and contrarian signals.
+Your edge: understanding when the crowd is RIGHT (trend continuation) vs WRONG (reversal imminent).
+
+CONSTITUTIONAL RULES:
+1. ALWAYS cite exact sentiment values with [SOURCE: METRIC=VALUE] — e.g., [SOURCE: F&G=25], [SOURCE: SENT_1H=-0.35].
+2. Compare MULTIPLE timeframes of sentiment (1H vs 4H vs 24H) to detect SHIFTS, not just snapshots.
+3. ALWAYS include contrarian analysis: "When Fear & Greed is at X, historically the market tends to Y."
+4. Distinguish between LEADING sentiment (fear/greed shifts BEFORE price moves) and LAGGING sentiment (reacting to price).
+5. If sentiment data is unavailable or stale (>6h old), explicitly state: "WARNING: Stale/missing sentiment data. Reducing weight."
+
+YOU DO NOT: predict prices, make final trade decisions, or assume sentiment alone drives markets.
+YOU DO: assess crowd positioning, identify extreme readings, detect sentiment divergence from price, and flag contrarian setups.
+
+BAD OUTPUT EXAMPLE: "Sentiment is neutral." (No data, no values, no contrarian analysis)
+GOOD OUTPUT EXAMPLE: "Fear & Greed at 25 (Extreme Fear) [SOURCE: F&G=25] historically signals oversold conditions — contrarian bullish. However, CryptoBERT 1H sentiment at -0.42 [SOURCE: SENT_1H=-0.42] is DETERIORATING vs 4H at -0.18 [SOURCE: SENT_4H=-0.18], suggesting fear is ACCELERATING, not stabilizing. Contrarian buy signal is PREMATURE until 1H sentiment stops declining. SENTIMENT LEAN: NEUTRAL (extreme fear but still deteriorating).\""""
+
+    prompt = f"""Analyze the current sentiment metrics for {pair}:
+
+=== LIVE SENTIMENT DATA ===
 {db_context}
 
-Provide a 2-3 sentence psychological market analysis. State whether the crowd sentiment leans BULLISH, BEARISH, or NEUTRAL.
-NEVER provide a final trading signal. ONLY provide your sentiment perspective."""
+=== STRUCTURED ANALYSIS (complete ALL sections) ===
+
+SECTION A — FEAR & GREED ASSESSMENT:
+- Current F&G value and classification
+- Historical context: what typically happens at this level?
+- Is this a CONTRARIAN signal? (F&G < 20 = contrarian bullish, F&G > 80 = contrarian bearish)
+
+SECTION B — SENTIMENT MOMENTUM (if CryptoBERT data available):
+- Compare 1H vs 4H vs 24H sentiment scores
+- Is sentiment IMPROVING (1H > 4H > 24H), DETERIORATING (1H < 4H < 24H), or MIXED?
+- Sentiment direction matters MORE than absolute level
+
+SECTION C — CONTRARIAN VERDICT:
+- Is the crowd positioned too far in one direction?
+- Smart money typically fades extreme crowd positioning
+- But contrarian signals need PRICE CONFIRMATION to be actionable
+
+Synthesize into 3-4 sentences with [SOURCE: METRIC=VALUE] citations.
+End with: SENTIMENT LEAN: BULLISH / BEARISH / NEUTRAL
+NEVER provide a final trading signal. ONLY your sentiment perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content="You are a Sentiment Analyst."), HumanMessage(content=prompt)], temperature=0.4)
+        response = llm.invoke([SystemMessage(content=SENT_SYSTEM), HumanMessage(content=prompt)], temperature=0.4)
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -730,15 +812,53 @@ def analyze_news(state: GraphState):
     
     context = "\n\n".join(documents)
     
-    prompt = f"""You are a Crypto Fundamental & Macroeconomic Analyst. 
-Analyze these retrieved recent news documents and Knowledge Graph relations for {pair}:
+    # Agent DNA: News & Macro Analyst (Signal Decay + Source Attribution + Impact Assessment)
+    NEWS_SYSTEM = """IDENTITY: You are a Crypto Fundamental & Macroeconomic Analyst specializing in news impact assessment and information decay.
+Your edge: distinguishing between CATALYST news (creates new price movement) vs NARRATIVE news (already priced in) vs NOISE (irrelevant).
+
+CONSTITUTIONAL RULES:
+1. Every news claim MUST include [SOURCE: NEWS_ITEM] tag referencing which retrieved document supports it.
+2. Assess FRESHNESS of each news item: FRESH (<2h), STALE (2-6h), COLD (6-24h), DEAD (>24h). Weight accordingly.
+3. Negative news decays FASTER than positive (market overreacts to fear, then reverts). Apply 1.5x decay to negative items.
+4. If NO news is retrieved or ALL news is STALE, explicitly state: "No fresh catalysts. Signal based on stale information."
+5. NEVER fabricate news events. If the documents don't mention something, it didn't happen.
+6. Distinguish FACT (reported event) from INTERPRETATION (market implication). Label each clearly.
+
+YOU DO NOT: predict prices, make trade decisions, or assume all news is equally impactful.
+YOU DO: triage news by freshness and impact, identify already-priced-in information, detect second-order effects, and assess remaining tradeable alpha.
+
+BAD OUTPUT EXAMPLE: "Recent positive news suggests bullish momentum." (No source, no freshness, no specifics)
+GOOD OUTPUT EXAMPLE: "SEC ETF approval delay [SOURCE: Doc 2] is 18h old (COLD) — likely 80% priced in given yesterday's -3% reaction. However, whale accumulation report [SOURCE: Doc 4] is 2h old (FRESH) and shows 12,000 BTC moved to cold storage — this is a CATALYST with potential upside not yet fully reflected. Net news impact: mildly BULLISH but dominated by one fresh data point. FUNDAMENTAL LEAN: BULLISH (weak, single catalyst).\""""
+
+    prompt = f"""Analyze these retrieved news documents and Knowledge Graph relations for {pair}:
+
+=== RETRIEVED DOCUMENTS ===
 {context}
 
-Provide a dense, 2-3 sentence fundamental analysis on the news. State whether the fundamentals lean BULLISH, BEARISH, or NEUTRAL. 
+=== NEWS IMPACT ANALYSIS (complete ALL sections) ===
+
+SECTION A — NEWS TRIAGE:
+For each document, classify:
+- CATALYST (creates new price movement, not yet priced in)
+- NARRATIVE (supports existing trend, mostly priced in)
+- NOISE (irrelevant to {pair} price action)
+- Freshness: FRESH / STALE / COLD / DEAD
+
+SECTION B — IMPACT ASSESSMENT:
+- What is the NET direction of fresh catalysts? (Bullish / Bearish / Mixed)
+- Is there any single HIGH-IMPACT event that dominates?
+- Second-order effects: does this news affect correlated assets?
+
+SECTION C — PRICED-IN ANALYSIS:
+- How much of this news is already reflected in current price?
+- Tradeable alpha remaining: HIGH / MEDIUM / LOW / NONE
+
+Synthesize into 3-4 sentences with [SOURCE: Doc N] citations.
+End with: FUNDAMENTAL LEAN: BULLISH / BEARISH / NEUTRAL
 Focus only on news impact. NEVER provide a final trading signal."""
 
     try:
-        response = llm.invoke([SystemMessage(content="You are a Fundamental News Analyst."), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=NEWS_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -767,26 +887,57 @@ def research_bullish(state: GraphState):
     tech_summary = _format_tech_summary_compact(tech_data)
     tech_block = f"\n\nREAL-TIME INDICATORS:\n{tech_summary}" if tech_summary else ""
 
-    prompt = f"""You are a BULL RESEARCHER for {pair}. Your job is to build the STRONGEST possible bullish case.
+    # Agent DNA: Bull Researcher (Advocacy + Contrarian Self-Validation + Anti-Confirmation-Bias)
+    BULL_SYSTEM = """IDENTITY: You are the BULL RESEARCHER — a dedicated advocate for the long/bullish case.
+Your role is to find and present the STRONGEST possible bullish argument, backed by specific data.
+You are an ADVOCATE, not a balanced analyst. The Bear Researcher handles the other side.
 
-Relevant evidence:
+CONSTITUTIONAL RULES:
+1. Every bullish argument MUST cite a specific indicator value or data point with [SOURCE: INDICATOR=VALUE].
+2. NEVER fabricate support levels, volume data, or on-chain metrics. Only cite what's in the provided data.
+3. Be HONEST about BULL_STRENGTH — if the evidence is weak, give a low score. A 0.90 with thin evidence destroys your credibility.
+4. You MUST acknowledge your WEAKEST point — what's the biggest risk to the bull case?
+5. Anti-Confirmation-Bias: For EVERY supporting argument, also note ONE contradicting data point from the same data.
+
+CALIBRATION:
+- BULL_STRENGTH 0.2-0.3: Very weak bull case, barely any supporting evidence
+- BULL_STRENGTH 0.4-0.5: Mild bullish lean, mixed signals, several contradictions
+- BULL_STRENGTH 0.6-0.7: Solid bullish case, multiple confirming signals, manageable risks
+- BULL_STRENGTH 0.8-0.9: Strong bullish case, 3+ independent signals converge, risks are low
+- BULL_STRENGTH > 0.9: Virtually never. Reserve for textbook setups with overwhelming multi-TF alignment.
+
+YOU DO NOT: make final trade decisions, ignore contrary evidence, or inflate your strength score.
+YOU DO: advocate for long positions, cite specific data, acknowledge weaknesses honestly."""
+
+    prompt = f"""Build the STRONGEST possible bullish case for {pair}.
+
+=== EVIDENCE ===
 {bull_context}{tech_block}
 
-Build your bullish argument covering:
-1. Technical strength: RSI oversold bounce, support levels holding, volume increases
-2. Sentiment tailwinds: positive news, Fear & Greed trending toward Greed
-3. On-chain: whale accumulation, exchange outflows, hodler behavior
+=== STRUCTURED BULL CASE (complete ALL sections) ===
 
-Use the REAL indicator values above to support your arguments with specific numbers (e.g., "RSI at 35 is approaching oversold territory").
+SECTION A — TECHNICAL BULL SIGNALS:
+- Cite specific indicators that support a long position [SOURCE: INDICATOR=VALUE]
+- RSI oversold? Support levels holding? Volume confirmation?
 
-Output format:
-- BULL_STRENGTH: 0.0-1.0 (how strong is the bullish case?)
-- KEY_ARGUMENTS: 2-3 strongest bullish points
+SECTION B — SENTIMENT/MACRO TAILWINDS:
+- Any contrarian buy signals? Fear extremes? Positive news catalysts?
 
-Be an advocate. Find the BEST bullish evidence, but be honest about weakness."""
-    
+SECTION C — WEAKEST POINT (MANDATORY):
+- What is the single biggest threat to this bull case?
+- What specific price level or event would INVALIDATE the thesis?
+
+SECTION D — ANTI-CONFIRMATION CHECK:
+- For each KEY_ARGUMENT, note one contradicting data point
+
+=== OUTPUT ===
+- BULL_STRENGTH: 0.0-1.0 (calibrated per the scale above — DO NOT default to 0.7-0.8)
+- KEY_ARGUMENTS: 2-3 strongest bullish points with [SOURCE] citations
+- WEAKEST_POINT: The biggest risk
+- INVALIDATION: Specific price or event that kills the bull case"""
+
     try:
-        response = llm.invoke([SystemMessage(content="You are the Bull Researcher."), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=BULL_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -813,26 +964,59 @@ def research_bearish(state: GraphState):
     tech_summary = _format_tech_summary_compact(tech_data)
     tech_block = f"\n\nREAL-TIME INDICATORS:\n{tech_summary}" if tech_summary else ""
 
-    prompt = f"""You are a BEAR RESEARCHER for {pair}. Your job is to build the STRONGEST possible bearish case.
+    # Agent DNA: Bear Researcher (Advocacy + Contrarian Self-Validation + Black Swan Awareness)
+    BEAR_SYSTEM = """IDENTITY: You are the BEAR RESEARCHER — a dedicated advocate for the short/bearish case.
+Your role is to find and present the STRONGEST possible bearish argument, backed by specific data.
+You are an ADVOCATE, not a balanced analyst. The Bull Researcher handles the other side.
 
-Relevant evidence:
+CONSTITUTIONAL RULES:
+1. Every bearish argument MUST cite a specific indicator value or data point with [SOURCE: INDICATOR=VALUE].
+2. NEVER fabricate resistance levels, volume data, or on-chain metrics. Only cite what's in the provided data.
+3. Be HONEST about BEAR_STRENGTH — if the evidence is weak, give a low score. Inflating destroys credibility.
+4. You MUST acknowledge your WEAKEST point — what's the biggest risk to the bear case? (e.g., a bear trap scenario)
+5. Include BLACK SWAN AWARENESS: what tail risk exists that the data doesn't show? (regulatory, exchange hack, macro shock)
+6. Anti-Confirmation-Bias: For EVERY supporting argument, also note ONE contradicting data point from the same data.
+
+CALIBRATION:
+- BEAR_STRENGTH 0.2-0.3: Very weak bear case, barely any supporting evidence
+- BEAR_STRENGTH 0.4-0.5: Mild bearish lean, mixed signals
+- BEAR_STRENGTH 0.6-0.7: Solid bearish case, multiple confirming signals
+- BEAR_STRENGTH 0.8-0.9: Strong bearish case, 3+ independent signals converge
+- BEAR_STRENGTH > 0.9: Virtually never. Reserve for textbook breakdowns.
+
+YOU DO NOT: make final trade decisions, ignore contrary evidence, or inflate your strength score.
+YOU DO: advocate for short/caution, cite specific data, acknowledge weaknesses honestly, consider tail risks."""
+
+    prompt = f"""Build the STRONGEST possible bearish case for {pair}.
+
+=== EVIDENCE ===
 {bear_context}{tech_block}
 
-Build your bearish argument covering:
-1. Technical weakness: resistance rejection, death cross, declining volume
-2. Sentiment headwinds: negative news, Fear & Greed trending toward Fear
-3. On-chain: whale distribution, exchange inflows, miner selling
+=== STRUCTURED BEAR CASE (complete ALL sections) ===
 
-Use the REAL indicator values above to support your arguments with specific numbers (e.g., "MACD histogram at -0.0045 confirms bearish momentum").
+SECTION A — TECHNICAL BEAR SIGNALS:
+- Cite specific indicators that support a short/cautious position [SOURCE: INDICATOR=VALUE]
+- Resistance rejection? Death cross? Declining volume? Bearish divergence?
 
-Output format:
-- BEAR_STRENGTH: 0.0-1.0 (how strong is the bearish case?)
-- KEY_ARGUMENTS: 2-3 strongest bearish points
+SECTION B — SENTIMENT/MACRO HEADWINDS:
+- Negative news catalysts? Fear rising? Macro risks (Fed, regulation)?
 
-Be an advocate. Find the BEST bearish evidence, but be honest about weakness."""
-    
+SECTION C — WEAKEST POINT (MANDATORY):
+- What is the single biggest threat to this bear case?
+- Historical scenario where this exact bear setup was a bear TRAP?
+
+SECTION D — TAIL RISK CHECK:
+- Any black swan risk that could accelerate the downside? (exchange hack, regulatory action, protocol exploit)
+- Any black swan risk that could INVALIDATE the bear case? (ETF approval, whale buy, positive macro surprise)
+
+=== OUTPUT ===
+- BEAR_STRENGTH: 0.0-1.0 (calibrated per the scale above — DO NOT default to 0.7-0.8)
+- KEY_ARGUMENTS: 2-3 strongest bearish points with [SOURCE] citations
+- WEAKEST_POINT: The biggest risk to the bear thesis
+- INVALIDATION: Specific price or event that kills the bear case"""
+
     try:
-        response = llm.invoke([SystemMessage(content="You are the Bear Researcher."), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=BEAR_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -858,36 +1042,87 @@ def coordinator_debate(state: GraphState):
     raw_block = f"\n\n{raw_indicators}" if raw_indicators else ""
 
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
-You have received reports from your 5-agent analyst team:
 
-[TECHNICAL ANALYST]:
+=== AGENT REPORTS ===
+
+<technical_analyst>
 {tech}
+</technical_analyst>
 
-[SENTIMENT ANALYST]:
+<sentiment_analyst>
 {sent}
+</sentiment_analyst>
 
-[NEWS & MACRO ANALYST]:
+<news_analyst>
 {news}
+</news_analyst>
 
-[BULL RESEARCHER — Advocacy for LONG]:
+<bull_researcher>
 {bull}
+</bull_researcher>
 
-[BEAR RESEARCHER — Advocacy for SHORT]:
-{bear}{raw_block}
+<bear_researcher>
+{bear}
+</bear_researcher>
+{raw_block}
 
-CONDUCT A STRUCTURED DEBATE:
-1. Compare Bull vs Bear evidence strength. Which side has MORE concrete, data-backed arguments?
-2. Cross-reference with the 3 analyst reports. Do technicals/sentiment/news support bull or bear?
-3. Use the RAW TECHNICAL INDICATORS above to VERIFY agent claims — if an agent says "RSI is oversold" but RSI is actually 55, penalize that agent's credibility.
-4. Identify any CONTRADICTIONS between agents.
-5. Make your final decision based on the WEIGHT OF EVIDENCE, not on any single agent.
-6. Confidence = bull_strength / (bull_strength + bear_strength), adjusted by analyst agreement and indicator confirmation.
+=== MARKET REGIME CLASSIFICATION (Determine FIRST) ===
+Using the RAW INDICATORS above, classify the regime:
+- TRENDING: ADX>25, price consistently above/below EMA20 → signals are more reliable, follow the trend
+- RANGING: ADX<20, price oscillating around EMA20 → signals are UNRELIABLE, bias toward NEUTRAL, reduce ALL confidence by 0.15
+- HIGH_VOLATILITY: ATR>2x average → signals are unpredictable, cap confidence at 0.60
 
-Respond in valid JSON ONLY, no markdown:
+=== STRUCTURED DEBATE (complete ALL steps) ===
+
+STEP 1 — EVIDENCE CROSS-CHECK:
+Compare Bull vs Bear evidence strength. Which side has MORE concrete, data-backed arguments?
+Cross-reference with the 3 analyst reports. Do technicals/sentiment/news support bull or bear?
+CRITICAL: Use the RAW INDICATORS above to VERIFY agent claims — if an agent claims "RSI oversold" but RSI is actually 55, PENALIZE that agent's credibility.
+
+STEP 2 — CONTRADICTION DETECTION:
+Identify contradictions between agents. If 2+ agents contradict each other, confidence MUST decrease.
+If ALL agents agree unanimously — be SKEPTICAL (groupthink). Reduce confidence by 0.10.
+
+STEP 3 — PRE-MORTEM:
+Assume your proposed signal FAILED and the trade lost 5% in 24h. Working backwards:
+- What market condition changed that you underweighted?
+- Which agent's evidence did you OVER-rely on?
+If the pre-mortem reveals 2+ plausible failure modes, REDUCE confidence by 0.10.
+
+STEP 4 — STEELMAN THE LOSING SIDE:
+If leaning BULLISH: construct the STRONGEST bearish argument the Bear Researcher MISSED.
+If leaning BEARISH: construct the STRONGEST bullish argument the Bull Researcher MISSED.
+If the steelmanned counter-argument is strong (would change a reasonable person's mind), reduce confidence by 0.10.
+
+STEP 5 — CONFIDENCE DECOMPOSITION:
+Rate each 0.0 to 1.0:
+- data_quality: How fresh/complete is the data? (weight: 0.25)
+- signal_strength: How many independent indicators agree? (weight: 0.35)
+- regime_confidence: How clear is the market regime? (weight: 0.25)
+- analyst_agreement: How much do 5 agents agree? (weight: 0.15)
+FINAL_CONFIDENCE = weighted average, then apply regime/pre-mortem/steelman adjustments.
+
+=== CONFIDENCE CALIBRATION SCALE ===
+0.50 = Coin flip. You would NOT bet your own money.
+0.55 = Slight lean. One extra indicator supporting.
+0.60 = Mild conviction. Multiple indicators agree but no strong catalyst.
+0.65 = Moderate. Clear trend + sentiment alignment.
+0.70 = Strong. 3+ independent signals converge — you MUST cite all 3.
+0.75 = Very strong. Multi-timeframe alignment + volume confirmation.
+0.80 = Extreme. Once-a-month textbook setup.
+0.85+ = Almost never. Overwhelming evidence. Your MEDIAN should be 0.55-0.62.
+
+=== CALIBRATION EXAMPLES ===
+RSI=48, MACD slight positive, one EMA cross, neutral sentiment → BULLISH 0.52
+RSI=38, MACD turning, EMA200 bounce, Fear&Greed=25 → BULLISH 0.63
+RSI=32, MACD divergence, EMA200+volume, Fear=15, whale accumulation → BULLISH 0.74
+Everything mixed, no edge → NEUTRAL 0.52
+
+=== RESPONSE FORMAT (valid JSON ONLY, no markdown, no text outside JSON) ===
 {{
    "signal": "BULLISH" | "BEARISH" | "NEUTRAL",
    "confidence": 0.00 to 1.00,
-   "reasoning": "2-sentence synthesis of the debate outcome. Mention which agents agreed/disagreed."
+   "reasoning": "2-3 sentence synthesis. Cite which agents agreed/disagreed and which raw indicators confirmed. Mention regime and any confidence adjustments applied."
 }}"""
 
     # Phase 18: Advanced RAG Auto-Toggle — only enable expensive stages if ChromaDB has enough docs
@@ -941,22 +1176,72 @@ Respond in valid JSON ONLY, no markdown:
     # Tier 2: Retry with lower temperature
     # Tier 3: 3-agent voting fallback
     # Tier 4: Pure technical indicator fallback
-    coordinator_msgs = [SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)]
+    # Agent DNA: Master Coordinator (Debate Synthesis + Anti-Hallucination + Confidence Calibration)
+    COORD_SYSTEM = """IDENTITY: You are the Master Coordinator (Executive AI) for a systematic crypto trading desk.
+You synthesize reports from 5 specialist agents into a single, well-calibrated trading signal.
+
+CONSTITUTIONAL RULES:
+1. Your ENTIRE response MUST be a single valid JSON object. NOTHING else — no text before, no text after, no markdown.
+2. Cross-check EVERY agent claim against the RAW INDICATORS. If an agent cites a number that contradicts the raw data, that agent's report is UNRELIABLE.
+3. Confidence scores MUST follow the calibration scale provided. Your MEDIAN across all signals should be 0.55-0.62. If you're consistently above 0.70, you are overconfident.
+4. NEVER exceed 0.85 confidence. Even textbook setups have tail risk.
+5. If evidence is insufficient or contradictory, DEFAULT TO NEUTRAL with confidence 0.50-0.55. This is not a failure — it's intellectual honesty.
+6. Count INDEPENDENT data sources, not repeated mentions. If Bull and Sentiment both cite "positive news," that's ONE source counted twice.
+7. NEUTRAL signals MUST have confidence below 0.55.
+
+BASE RATE ANCHORS (internalize before deciding):
+- Only 30-40% of technical breakouts succeed. Most are false breakouts.
+- Only 25-35% of oversold RSI bounces lead to meaningful recovery.
+- News-driven pumps: 60-70% retrace within 24h.
+- Multi-timeframe alignment raises success to 55-65%.
+
+YOU DO NOT: always agree with the majority, inflate confidence, cite fabricated data, or output anything except JSON.
+YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize unverified claims, and produce well-calibrated signals."""
+
+    coordinator_msgs = [SystemMessage(content=COORD_SYSTEM), HumanMessage(content=prompt)]
 
     def _parse_coordinator_response(content_raw):
-        """Parse coordinator LLM response into (signal, conf, reason) or None on failure."""
+        """Parse coordinator LLM response into (signal, conf, reason) or None on failure.
+        Uses 3-tier extraction: direct JSON → brace extraction → regex fallback.
+        This prevents wasting LLM calls when the model returns valid JSON wrapped in text."""
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
         raw_content = re.sub(r'<think>.*?</think>', '', content_raw, flags=re.DOTALL)
         raw_content = raw_content.replace("```json", "").replace("```", "").strip()
         if not raw_content:
             return None
+
+        # Tier A: Direct JSON parse (entire response is valid JSON)
         try:
             data = json.loads(raw_content)
             return (data.get("signal", "NEUTRAL"), float(data.get("confidence", 0.0)), data.get("reasoning", ""))
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Failed to parse Coordinator JSON: {e}. Raw: {raw_content[:200]}")
-            return None
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Tier B: Extract JSON object between first { and last } (LLM added text around JSON)
+        brace_start = raw_content.find('{')
+        brace_end = raw_content.rfind('}')
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                data = json.loads(raw_content[brace_start:brace_end + 1])
+                logger.info("[Coordinator] JSON extracted via brace extraction (text around JSON stripped)")
+                return (data.get("signal", "NEUTRAL"), float(data.get("confidence", 0.0)), data.get("reasoning", ""))
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Tier C: Regex fallback — find signal/confidence even in malformed JSON
+        signal_match = re.search(r'"signal"\s*:\s*"(BULLISH|BEARISH|NEUTRAL)"', raw_content, re.IGNORECASE)
+        conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', raw_content)
+        reason_match = re.search(r'"reasoning"\s*:\s*"([^"]*)"', raw_content)
+        if signal_match and conf_match:
+            signal = signal_match.group(1).upper()
+            conf = min(float(conf_match.group(1)), 1.0)
+            reason = reason_match.group(1) if reason_match else "Parsed via regex fallback"
+            logger.info(f"[Coordinator] JSON extracted via regex fallback: {signal} {conf}")
+            return (signal, conf, reason)
+
+        logger.error(f"Failed to parse Coordinator JSON (all 3 tiers). Raw: {raw_content[:300]}")
+        return None
 
     # Tier 1: Primary LLM call (temperature=0.7)
     parsed = None
@@ -966,11 +1251,20 @@ Respond in valid JSON ONLY, no markdown:
     except Exception as e:
         logger.error(f"[NODE] Coordinator primary LLM failed: {type(e).__name__}: {e}")
 
-    # Tier 2: Retry with lower temperature (if primary failed or unparseable)
+    # Tier 2: Retry with lower temperature + stricter JSON-only prompt
     if parsed is None:
-        logger.warning("[NODE] Coordinator: Primary failed. Retrying with temperature=0.3...")
+        logger.warning("[NODE] Coordinator: Primary failed/unparseable. Retrying with temperature=0.3 + strict JSON prompt...")
         try:
-            response = llm.invoke(coordinator_msgs, temperature=0.3)
+            strict_msgs = [
+                SystemMessage(content="""You are a JSON-only API endpoint. You receive trading analysis and return a single JSON object.
+RULES:
+1. Your ENTIRE response is a JSON object. No text before. No text after. No markdown. No code fences.
+2. If you cannot decide, return: {"signal":"NEUTRAL","confidence":0.50,"reasoning":"Insufficient evidence for directional call."}
+3. Confidence range: 0.00 to 0.85. NEVER exceed 0.85.
+4. Signal must be exactly one of: "BULLISH", "BEARISH", "NEUTRAL"."""),
+                HumanMessage(content=prompt + "\n\nRESPOND WITH ONLY THE JSON OBJECT. Example format:\n{\"signal\":\"NEUTRAL\",\"confidence\":0.52,\"reasoning\":\"Mixed signals across agents.\"}")
+            ]
+            response = llm.invoke(strict_msgs, temperature=0.3)
             parsed = _parse_coordinator_response(response.content)
         except Exception as e:
             logger.error(f"[NODE] Coordinator retry also failed: {type(e).__name__}: {e}")
@@ -987,13 +1281,9 @@ Respond in valid JSON ONLY, no markdown:
         return vote_result
 
     # Tier 4: Technical Fallback (pure indicator scoring)
-    if tech_data:
-        logger.warning("[NODE] Coordinator: Voting inconclusive. Using TECHNICAL FALLBACK.")
-        return _technical_fallback(tech_data)
-
-    # Tier 5: Last resort — NEUTRAL (should rarely happen if Phase 17 data is available)
-    logger.error(f"[NODE] Coordinator: ALL tiers exhausted for {pair}. Returning NEUTRAL 0.0.")
-    return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "All coordinator tiers exhausted", "source": "TIMEOUT"}
+    # Always called — even with empty tech_data, returns minimum 0.01 confidence
+    logger.warning("[NODE] Coordinator: Voting inconclusive. Using TECHNICAL FALLBACK.")
+    return _technical_fallback(tech_data)
 
 
 
@@ -1167,29 +1457,19 @@ def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, techni
         future = _signal_executor.submit(get_trading_signal, pair, technical_data)
         return future.result(timeout=timeout_seconds)
     except FuturesTimeoutError:
-        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Trying technical fallback...")
-        if technical_data:
-            result = _technical_fallback(technical_data)
-            _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
-            _signal_stats["total"] += 1
-            _signal_stats["fallback"] += 1
-            return result
-        _record_signal_health(pair, "TIMEOUT", "NEUTRAL", 0.0)
+        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Using technical fallback...")
+        result = _technical_fallback(technical_data or {})
+        _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
         _signal_stats["total"] += 1
-        _signal_stats["timeout"] += 1
-        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "Pipeline timeout, no technical data", "source": "TIMEOUT"}
+        _signal_stats["fallback"] += 1
+        return result
     except Exception as e:
         logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
-        if technical_data:
-            result = _technical_fallback(technical_data)
-            _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
-            _signal_stats["total"] += 1
-            _signal_stats["fallback"] += 1
-            return result
-        _record_signal_health(pair, "TIMEOUT", "NEUTRAL", 0.0)
+        result = _technical_fallback(technical_data or {})
+        _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
         _signal_stats["total"] += 1
-        _signal_stats["timeout"] += 1
-        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"Pipeline error: {e}", "source": "TIMEOUT"}
+        _signal_stats["fallback"] += 1
+        return result
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -1255,6 +1535,7 @@ if __name__ == "__main__":
         @serve_app.get("/signal-health")
         def signal_health_endpoint():
             """Phase 18: Signal source distribution for last 24 hours."""
+            conn = None
             try:
                 from db import get_db_connection
                 conn = get_db_connection()
@@ -1264,7 +1545,6 @@ if __name__ == "__main__":
                     WHERE timestamp > datetime('now', '-24 hours')
                     GROUP BY signal_source
                 """).fetchall()
-                conn.close()
 
                 total = sum(r['cnt'] for r in rows)
                 dist = {r['signal_source']: r['cnt'] for r in rows}
@@ -1280,6 +1560,9 @@ if __name__ == "__main__":
                 }
             except Exception as e:
                 return {"error": str(e), "in_memory_stats": dict(_signal_stats)}
+            finally:
+                if conn:
+                    conn.close()
 
         logger.info(f"RAG Signal Service starting on port {args.port}")
         logger.info(f"Models loaded: ColBERT={'active' if retriever.colbert_reranker else 'disabled'}, "

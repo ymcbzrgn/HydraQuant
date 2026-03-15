@@ -28,14 +28,18 @@ from speculative_rag import SpeculativeRAG
 logger = logging.getLogger(__name__)
 
 CLASSIFY_SYSTEM_PROMPT = """You are a query complexity classifier for a crypto trading RAG system.
-Classify the query into exactly ONE category:
+Classify the query into EXACTLY ONE category. Output ONLY the category name — one word, nothing else.
 
-SIMPLE — Fact lookup, single entity, e.g. "BTC price", "ETH market cap"
-MEDIUM — Multi-factor analysis, e.g. "BTC technical outlook", "ETH support/resistance levels"
-COMPLEX — Multi-hop reasoning, cross-domain, e.g. "How will Fed rate decision affect BTC/ETH correlation?"
-NO_RAG — General knowledge that doesn't need retrieval, e.g. "What is a moving average?", "How does RSI work?"
+SIMPLE — Single fact lookup, one entity. Examples: "BTC price", "ETH market cap", "SOL volume today"
+MEDIUM — Multi-factor analysis, single domain. Examples: "BTC technical outlook", "ETH support/resistance", "SOL RSI and MACD analysis"
+COMPLEX — Multi-hop reasoning, cross-domain synthesis. Examples: "How will Fed rate decision affect BTC/ETH correlation?", "Impact of ETF approval on altcoin rotation"
+NO_RAG — General crypto/finance knowledge, no live data needed. Examples: "What is a moving average?", "How does RSI work?", "Explain Bollinger Bands"
 
-Output ONLY the category name. No explanation. One word."""
+EDGE CASES:
+- "BTC news" → MEDIUM (needs retrieval but single domain)
+- "Is BTC a good buy?" → COMPLEX (requires multi-factor synthesis)
+- "BTC vs ETH performance" → COMPLEX (cross-entity comparison)
+- Internal system queries (e.g., "trading decision cross correlation") → COMPLEX"""
 
 
 class AdaptiveQueryRouter:
