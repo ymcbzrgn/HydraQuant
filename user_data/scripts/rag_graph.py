@@ -93,9 +93,11 @@ class GraphState(TypedDict):
     """
     State dictionary for the LangGraph Multi-Agent RAG Brain.
     Phase 5.2: Extended with bull/bear researcher outputs for MADAM debate.
+    Phase 17: Extended with technical_data (real OHLCV + indicators from strategy).
     """
     pair: str
     documents: List[str]
+    technical_data: Dict[str, Any]
     technical_analysis: str
     sentiment_analysis: str
     news_analysis: str
@@ -105,18 +107,262 @@ class GraphState(TypedDict):
     confidence: float
     reasoning: str
 
+# --- Phase 17: Technical Data Formatters ---
+
+def _format_technical_data(pair: str, td: dict) -> str:
+    """Format comprehensive technical data into a structured text block for LLM."""
+    lines = [f"=== LIVE TECHNICAL DATA for {pair} ==="]
+    price = td.get("current_price", 0)
+
+    # Price overview
+    lines.append(f"Current Price: ${price:,.2f}")
+    for key, label in [("price_change_1h_pct", "1H"), ("price_change_4h_pct", "4H"),
+                        ("price_change_24h_pct", "24H"), ("price_change_7d_pct", "7D")]:
+        if td.get(key) is not None:
+            lines.append(f"  {label} Change: {td[key]:+.2f}%")
+
+    # Trend (Moving Averages)
+    lines.append("\n--- TREND (Moving Averages) ---")
+    for key in ["ema_9", "ema_20", "ema_50", "ema_200", "sma_50", "sma_200"]:
+        if td.get(key) is not None:
+            label = key.upper().replace("_", " ")
+            vs_price = ((price - td[key]) / td[key] * 100) if td[key] > 0 else 0
+            lines.append(f"{label}: ${td[key]:,.2f} (price {'above' if vs_price > 0 else 'below'} by {abs(vs_price):.1f}%)")
+
+    # Multi-Timeframe
+    htf = td.get("htf", {})
+    if htf:
+        lines.append("\n--- MULTI-TIMEFRAME ---")
+        if htf.get("rsi_4h") is not None:
+            lines.append(f"4H RSI: {htf['rsi_4h']:.1f} | 4H Trend: {htf.get('trend_4h', '?')}")
+        if htf.get("ema_20_4h") is not None:
+            lines.append(f"4H EMA20: ${htf['ema_20_4h']:,.2f}")
+        if htf.get("rsi_daily") is not None:
+            lines.append(f"Daily RSI: {htf['rsi_daily']:.1f} | Daily Trend: {htf.get('trend_daily', '?')}")
+        if htf.get("ema_50_daily") is not None:
+            lines.append(f"Daily EMA50: ${htf['ema_50_daily']:,.2f}")
+
+    # Momentum
+    lines.append("\n--- MOMENTUM ---")
+    if td.get("rsi_14") is not None:
+        rsi = td["rsi_14"]
+        rsi_label = "OVERSOLD" if rsi < 30 else "OVERBOUGHT" if rsi > 70 else "neutral"
+        lines.append(f"RSI(14): {rsi:.1f} ({rsi_label})")
+    if td.get("macd") is not None:
+        hist = td.get('macd_histogram', 0)
+        lines.append(f"MACD: Line={td['macd']:.4f} Signal={td.get('macd_signal', 0):.4f} Hist={hist:+.4f} ({'bullish' if hist > 0 else 'bearish'} momentum)")
+    if td.get("adx_14") is not None:
+        adx = td["adx_14"]
+        lines.append(f"ADX(14): {adx:.1f} ({'STRONG trend' if adx > 25 else 'WEAK/ranging'})")
+
+    # Volatility
+    lines.append("\n--- VOLATILITY ---")
+    if td.get("atr_14") is not None:
+        atr_pct = (td["atr_14"] / price * 100) if price > 0 else 0
+        lines.append(f"ATR(14): ${td['atr_14']:,.2f} ({atr_pct:.2f}% of price)")
+    if td.get("bb_upper") is not None and td.get("bb_lower") is not None:
+        bb_mid = td.get("bb_mid", (td["bb_upper"] + td["bb_lower"]) / 2)
+        bb_width = ((td["bb_upper"] - td["bb_lower"]) / bb_mid * 100) if bb_mid > 0 else 0
+        lines.append(f"Bollinger: [${td['bb_lower']:,.2f} — ${bb_mid:,.2f} — ${td['bb_upper']:,.2f}] Width={bb_width:.1f}%")
+
+    # Key Levels
+    levels = td.get("levels", {})
+    if levels:
+        lines.append("\n--- KEY LEVELS ---")
+        for label in ["24h", "7d", "30d"]:
+            h, l = levels.get(f"high_{label}"), levels.get(f"low_{label}")
+            if h and l:
+                rng = ((h - l) / l * 100) if l > 0 else 0
+                lines.append(f"{label} Range: ${l:,.2f} — ${h:,.2f} ({rng:.1f}%)")
+        if levels.get("support"):
+            lines.append(f"Support Levels: {', '.join(f'${s:,.2f}' for s in levels['support'])}")
+        if levels.get("resistance"):
+            lines.append(f"Resistance Levels: {', '.join(f'${r:,.2f}' for r in levels['resistance'])}")
+        fib = levels.get("fibonacci", {})
+        if fib:
+            lines.append(f"Fibonacci (from ${fib.get('swing_low', 0):,.2f} to ${fib.get('swing_high', 0):,.2f}):")
+            for lvl in ["fib_236", "fib_382", "fib_500", "fib_618", "fib_786"]:
+                if fib.get(lvl):
+                    pct = lvl.replace("fib_", "").replace("0", "").strip()
+                    lines.append(f"  {pct[:-1]}.{pct[-1]}%: ${fib[lvl]:,.2f}")
+        pivot = levels.get("pivot", {})
+        if pivot:
+            lines.append(f"Pivot: S2=${pivot.get('s2', 0):,.2f} S1=${pivot.get('s1', 0):,.2f} PP=${pivot.get('pp', 0):,.2f} R1=${pivot.get('r1', 0):,.2f} R2=${pivot.get('r2', 0):,.2f}")
+
+    # Volume Analysis
+    vol = td.get("volume", {})
+    if vol and vol.get("avg_20"):
+        lines.append(f"\n--- VOLUME ---")
+        lines.append(f"Current: {vol['current']:,.0f} | 20-Avg: {vol['avg_20']:,.0f} | Ratio: {vol.get('ratio', 0):.2f}x ({'above' if vol.get('ratio', 0) > 1 else 'below'} average)")
+        if vol.get("trend"):
+            lines.append(f"Volume Trend: {vol['trend']} ({vol.get('trend_pct', 0):+.1f}%)")
+
+    # Candlestick Patterns
+    patterns = td.get("patterns", [])
+    if patterns:
+        lines.append(f"\n--- CANDLESTICK PATTERNS ---")
+        lines.append(f"Detected: {', '.join(patterns)}")
+
+    # Daily Summaries (7 days)
+    daily = td.get("daily_summaries", [])
+    if daily:
+        lines.append(f"\n--- DAILY SUMMARIES (last {len(daily)} days) ---")
+        for d in daily:
+            o, c = d.get("open", 0), d.get("close", 0)
+            chg = ((c - o) / o * 100) if o > 0 else 0
+            lines.append(f"  {d.get('date', '?')}: O=${o:,.2f} C=${c:,.2f} ({chg:+.1f}%) H=${d.get('high', 0):,.2f} L=${d.get('low', 0):,.2f}")
+
+    # Last 24 candles (compact: just last 12 to save tokens, full 24 available)
+    candles = td.get("last_candles", [])
+    if candles:
+        show = candles[-12:]  # Last 12h for detail, AI has daily summaries for context
+        lines.append(f"\n--- LAST {len(show)} HOURLY CANDLES ---")
+        for c in show:
+            t = c.get("time", "?")
+            o, cl = c.get("open", 0), c.get("close", 0)
+            direction = "▲" if cl >= o else "▼"
+            body_pct = abs(cl - o) / o * 100 if o > 0 else 0
+            lines.append(f"  {t}: ${cl:,.2f} {direction}{body_pct:.1f}% V={c.get('volume', 0):,.0f}")
+
+    return "\n".join(lines)
+
+
+def _format_tech_summary_compact(td: dict) -> str:
+    """Compact tech summary for Bull/Bear researcher context — includes multi-timeframe."""
+    if not td or not td.get("current_price"):
+        return ""
+    parts = []
+    parts.append(f"Price: ${td['current_price']:,.2f} (1H: {td.get('price_change_1h_pct', 0):+.1f}%, 24H: {td.get('price_change_24h_pct', 0):+.1f}%, 7D: {td.get('price_change_7d_pct', 0):+.1f}%)")
+
+    indicators = []
+    if td.get("rsi_14") is not None:
+        indicators.append(f"RSI={td['rsi_14']:.0f}")
+    if td.get("macd_histogram") is not None:
+        indicators.append(f"MACD_hist={td['macd_histogram']:+.4f}")
+    if td.get("adx_14") is not None:
+        indicators.append(f"ADX={td['adx_14']:.0f}")
+    if indicators:
+        parts.append("1H Indicators: " + ", ".join(indicators))
+
+    # Multi-timeframe
+    htf = td.get("htf", {})
+    htf_parts = []
+    if htf.get("rsi_4h") is not None:
+        htf_parts.append(f"4H RSI={htf['rsi_4h']:.0f}")
+    if htf.get("trend_4h"):
+        htf_parts.append(f"4H trend={htf['trend_4h']}")
+    if htf.get("rsi_daily") is not None:
+        htf_parts.append(f"Daily RSI={htf['rsi_daily']:.0f}")
+    if htf.get("trend_daily"):
+        htf_parts.append(f"Daily trend={htf['trend_daily']}")
+    if htf_parts:
+        parts.append("Multi-TF: " + ", ".join(htf_parts))
+
+    # Key levels
+    levels = td.get("levels", {})
+    if levels.get("support"):
+        parts.append(f"Support: {', '.join(f'${s:,.0f}' for s in levels['support'][:2])}")
+    if levels.get("resistance"):
+        parts.append(f"Resistance: {', '.join(f'${r:,.0f}' for r in levels['resistance'][:2])}")
+
+    # Patterns
+    patterns = td.get("patterns", [])
+    if patterns:
+        parts.append(f"Candle Pattern: {', '.join(patterns)}")
+
+    # Volume
+    vol = td.get("volume", {})
+    if vol.get("ratio"):
+        parts.append(f"Volume: {vol['ratio']:.1f}x avg ({vol.get('trend', '?')})")
+
+    return "\n".join(parts)
+
+
+def _format_tech_for_coordinator(td: dict) -> str:
+    """Fact-check block for coordinator — raw numbers to verify agent claims."""
+    if not td or not td.get("current_price"):
+        return ""
+    p = td["current_price"]
+    lines = ["[RAW TECHNICAL INDICATORS — Use these to FACT-CHECK agent claims]"]
+
+    # Price
+    parts = [f"Price: ${p:,.2f}"]
+    for key, label in [("price_change_1h_pct", "1H"), ("price_change_24h_pct", "24H"), ("price_change_7d_pct", "7D")]:
+        if td.get(key) is not None:
+            parts.append(f"{label}: {td[key]:+.1f}%")
+    lines.append(" | ".join(parts))
+
+    # Momentum
+    mom = []
+    if td.get("rsi_14") is not None:
+        mom.append(f"RSI={td['rsi_14']:.0f}")
+    if td.get("macd_histogram") is not None:
+        mom.append(f"MACD_hist={td['macd_histogram']:+.4f}")
+    if td.get("adx_14") is not None:
+        mom.append(f"ADX={td['adx_14']:.0f}")
+    if mom:
+        lines.append("Momentum: " + " | ".join(mom))
+
+    # Multi-timeframe
+    htf = td.get("htf", {})
+    if htf:
+        htf_parts = []
+        if htf.get("trend_4h"):
+            htf_parts.append(f"4H={htf['trend_4h']}(RSI={htf.get('rsi_4h', '?')})")
+        if htf.get("trend_daily"):
+            htf_parts.append(f"Daily={htf['trend_daily']}(RSI={htf.get('rsi_daily', '?')})")
+        if htf_parts:
+            lines.append("Multi-TF: " + " | ".join(htf_parts))
+
+    # Moving averages
+    ma_parts = []
+    for key in ["ema_9", "ema_20", "ema_50", "ema_200", "sma_200"]:
+        if td.get(key) is not None:
+            ma_parts.append(f"{key.upper()}=${td[key]:,.0f}")
+    if ma_parts:
+        lines.append("MAs: " + " > ".join(ma_parts))
+
+    # Key levels
+    levels = td.get("levels", {})
+    if levels.get("support"):
+        lines.append(f"S/R: Support={[f'${s:,.0f}' for s in levels['support']]} Resistance={[f'${r:,.0f}' for r in levels.get('resistance', [])]}")
+
+    # Volume + Patterns
+    vol = td.get("volume", {})
+    patterns = td.get("patterns", [])
+    extras = []
+    if vol.get("ratio"):
+        extras.append(f"Vol={vol['ratio']:.1f}x avg")
+    if patterns:
+        extras.append(f"Patterns: {', '.join(patterns)}")
+    if extras:
+        lines.append(" | ".join(extras))
+
+    return "\n".join(lines)
+
+
 # --- Parallel Analyst Nodes ---
 
 def analyze_technical(state: GraphState):
-    """Fetches and analyzes real-time technical indicators."""
+    """Analyzes technical indicators — uses REAL data from strategy when available, DuckDuckGo fallback."""
     logger.info("---[NODE] TECHNICAL ANALYST---")
     pair = state.get("pair", "BTC/USDT")
+    tech_data = state.get("technical_data") or {}
 
-    try:
-        search_res = web_search_tool.invoke(f"{pair} current technical analysis RSI MACD support resistance price prediction")
-    except Exception as e:
-        logger.warning(f"Technical Search Failed: {e}")
-        search_res = "Unable to fetch live technical data."
+    # Phase 17: Use REAL indicator data from strategy if available
+    if tech_data and tech_data.get("current_price"):
+        tech_context = _format_technical_data(pair, tech_data)
+        search_res = ""
+        logger.info(f"[Technical] Using REAL indicator data for {pair} (price=${tech_data['current_price']:,.2f})")
+    else:
+        # Fallback: DuckDuckGo (legacy, when no data from strategy)
+        logger.warning(f"[Technical] No real indicator data for {pair}. Falling back to web search.")
+        try:
+            search_res = web_search_tool.invoke(f"{pair} current technical analysis RSI MACD support resistance price prediction")
+        except Exception as e:
+            logger.warning(f"Technical Search Failed: {e}")
+            search_res = "Unable to fetch live technical data."
+        tech_context = ""
 
     # Phase 15: MAGMA Graph Context (Semantic + Causal)
     magma_context = ""
@@ -125,11 +371,27 @@ def analyze_technical(state: GraphState):
             semantic_edges = _magma.query(f"{pair} tech analysis", graph_types=["semantic", "causal"], max_hops=1)
             if semantic_edges:
                 ext_nodes = [f"{e['source']} -> {e['relation']} -> {e['target']}" for e in semantic_edges[:10]]
-                magma_context = "\\nMAGMA Historic Technical Correlations:\\n" + "\\n".join(ext_nodes)
+                magma_context = "\nMAGMA Historic Technical Correlations:\n" + "\n".join(ext_nodes)
         except Exception as e:
             logger.warning(f"MAGMA Technical lookup failed: {e}")
 
-    prompt = f"""You are a master Crypto Technical Analyst. 
+    if tech_context:
+        prompt = f"""You are a master Crypto Technical Analyst with access to REAL-TIME indicator data.
+
+Analyze these LIVE technical indicators for {pair}:
+{tech_context}
+{magma_context}
+
+Based on these REAL numbers, provide a dense 2-3 sentence technical analysis:
+1. Identify the current trend (bullish/bearish/ranging) from EMA/SMA alignment and price position
+2. Assess momentum (RSI overbought/oversold, MACD cross direction, ADX strength)
+3. Note volatility regime (ATR%, Bollinger Band width) and key levels (support/resistance from BB & EMAs)
+4. Analyze the last candle patterns (momentum, reversals, volume confirmation)
+
+State whether the technicals lean BULLISH, BEARISH, or NEUTRAL.
+NEVER provide a final trading signal. ONLY provide your technical perspective."""
+    else:
+        prompt = f"""You are a master Crypto Technical Analyst.
 Analyze these current technical indicators and market search results for {pair}:
 {search_res}
 {magma_context}
@@ -271,23 +533,30 @@ def research_bullish(state: GraphState):
     """Bull Researcher: Collects and advocates for bullish evidence."""
     logger.info("---[NODE] BULL RESEARCHER---")
     pair = state.get("pair", "BTC/USDT")
-    
+    tech_data = state.get("technical_data") or {}
+
     # RAG-Fusion: search for bullish signals from multiple angles
     bull_results = rag_fusion.fused_search(
         f"{pair} bullish signals support RSI oversold accumulation",
         retriever, n_queries=3, top_k_per_query=5
     )
     bull_context = "\n".join([r.get("text", str(r)) for r in bull_results[:5]])
-    
+
+    # Phase 17: Add real technical data for data-backed arguments
+    tech_summary = _format_tech_summary_compact(tech_data)
+    tech_block = f"\n\nREAL-TIME INDICATORS:\n{tech_summary}" if tech_summary else ""
+
     prompt = f"""You are a BULL RESEARCHER for {pair}. Your job is to build the STRONGEST possible bullish case.
 
 Relevant evidence:
-{bull_context}
+{bull_context}{tech_block}
 
 Build your bullish argument covering:
 1. Technical strength: RSI oversold bounce, support levels holding, volume increases
 2. Sentiment tailwinds: positive news, Fear & Greed trending toward Greed
 3. On-chain: whale accumulation, exchange outflows, hodler behavior
+
+Use the REAL indicator values above to support your arguments with specific numbers (e.g., "RSI at 35 is approaching oversold territory").
 
 Output format:
 - BULL_STRENGTH: 0.0-1.0 (how strong is the bullish case?)
@@ -310,23 +579,30 @@ def research_bearish(state: GraphState):
     """Bear Researcher: Collects and advocates for bearish evidence."""
     logger.info("---[NODE] BEAR RESEARCHER---")
     pair = state.get("pair", "BTC/USDT")
-    
+    tech_data = state.get("technical_data") or {}
+
     # RAG-Fusion: search for bearish signals from multiple angles
     bear_results = rag_fusion.fused_search(
         f"{pair} bearish signals resistance rejection death cross distribution",
         retriever, n_queries=3, top_k_per_query=5
     )
     bear_context = "\n".join([r.get("text", str(r)) for r in bear_results[:5]])
-    
+
+    # Phase 17: Add real technical data for data-backed arguments
+    tech_summary = _format_tech_summary_compact(tech_data)
+    tech_block = f"\n\nREAL-TIME INDICATORS:\n{tech_summary}" if tech_summary else ""
+
     prompt = f"""You are a BEAR RESEARCHER for {pair}. Your job is to build the STRONGEST possible bearish case.
 
 Relevant evidence:
-{bear_context}
+{bear_context}{tech_block}
 
 Build your bearish argument covering:
 1. Technical weakness: resistance rejection, death cross, declining volume
 2. Sentiment headwinds: negative news, Fear & Greed trending toward Fear
 3. On-chain: whale distribution, exchange inflows, miner selling
+
+Use the REAL indicator values above to support your arguments with specific numbers (e.g., "MACD histogram at -0.0045 confirms bearish momentum").
 
 Output format:
 - BEAR_STRENGTH: 0.0-1.0 (how strong is the bearish case?)
@@ -354,7 +630,12 @@ def coordinator_debate(state: GraphState):
     news = state.get("news_analysis", "No News")
     bull = state.get("bull_case", "No bull case")
     bear = state.get("bear_case", "No bear case")
-    
+    tech_data = state.get("technical_data") or {}
+
+    # Phase 17: Raw indicator block for coordinator cross-referencing
+    raw_indicators = _format_tech_for_coordinator(tech_data)
+    raw_block = f"\n\n{raw_indicators}" if raw_indicators else ""
+
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
 You have received reports from your 5-agent analyst team:
 
@@ -371,16 +652,16 @@ You have received reports from your 5-agent analyst team:
 {bull}
 
 [BEAR RESEARCHER — Advocacy for SHORT]:
-{bear}
+{bear}{raw_block}
 
 CONDUCT A STRUCTURED DEBATE:
 1. Compare Bull vs Bear evidence strength. Which side has MORE concrete, data-backed arguments?
 2. Cross-reference with the 3 analyst reports. Do technicals/sentiment/news support bull or bear?
-3. Identify any CONTRADICTIONS between agents.
-4. Make your final decision based on the WEIGHT OF EVIDENCE, not on any single agent.
-5. Confidence = bull_strength / (bull_strength + bear_strength), adjusted by analyst agreement.
+3. Use the RAW TECHNICAL INDICATORS above to VERIFY agent claims — if an agent says "RSI is oversold" but RSI is actually 55, penalize that agent's credibility.
+4. Identify any CONTRADICTIONS between agents.
+5. Make your final decision based on the WEIGHT OF EVIDENCE, not on any single agent.
+6. Confidence = bull_strength / (bull_strength + bear_strength), adjusted by analyst agreement and indicator confirmation.
 
-        
 Respond in valid JSON ONLY, no markdown:
 {{
    "signal": "BULLISH" | "BEARISH" | "NEUTRAL",
@@ -480,9 +761,9 @@ workflow.add_edge("coordinator_debate", END)
 # Compile graph
 rag_bot = workflow.compile()
 
-def get_trading_signal(pair: str) -> dict:
+def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
     """Entry point for Freqtrade to request a trading decision from the Analyst Team."""
-    logger.info(f"Initiating Multi-Agent Analyst Team for {pair}...")
+    logger.info(f"Initiating Multi-Agent Analyst Team for {pair}{'  [with LIVE indicators]' if technical_data else ''}...")
     
     # Phase 9: Semantic Cache (module-level singleton)
     query_str = f"trading signal analysis for {pair}"
@@ -507,6 +788,7 @@ def get_trading_signal(pair: str) -> dict:
     inputs = {
         "pair": pair,
         "documents": [],
+        "technical_data": technical_data or {},
         "technical_analysis": "",
         "sentiment_analysis": "",
         "news_analysis": "",
@@ -582,10 +864,10 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 
 _signal_executor = ThreadPoolExecutor(max_workers=4)
 
-def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45) -> dict:
+def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, technical_data: dict = None) -> dict:
     """Wraps get_trading_signal with a thread-based timeout (uvicorn-safe)."""
     try:
-        future = _signal_executor.submit(get_trading_signal, pair)
+        future = _signal_executor.submit(get_trading_signal, pair, technical_data)
         return future.result(timeout=timeout_seconds)
     except FuturesTimeoutError:
         logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Returning NEUTRAL.")
@@ -605,7 +887,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.serve:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
         from fastapi.middleware.cors import CORSMiddleware
         import uvicorn
         import gc
@@ -635,6 +917,16 @@ if __name__ == "__main__":
         @serve_app.get("/signal/{pair:path}")
         def signal_endpoint(pair: str):
             return get_trading_signal_with_timeout(pair, timeout_seconds=45)
+
+        @serve_app.post("/signal/{pair:path}")
+        async def signal_endpoint_post(pair: str, request: Request):
+            """Phase 17: POST endpoint accepts technical_data from strategy."""
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            technical_data = body.get("technical_data")
+            return get_trading_signal_with_timeout(pair, timeout_seconds=45, technical_data=technical_data)
 
         @serve_app.get("/health")
         def health():

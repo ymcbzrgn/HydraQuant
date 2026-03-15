@@ -36,7 +36,7 @@ class AIFreqtradeSizer(IStrategy):
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
     can_short = True  # Futures: enable both LONG and SHORT
-    startup_candle_count = 60  # Enough for SMA 50 + ATR 14
+    startup_candle_count = 400  # EMA 200 + daily RSI warmup + multi-timeframe resampling
 
     # Minimal ROI (handled mostly by AI and custom stoploss)
     minimal_roi = {
@@ -127,16 +127,29 @@ class AIFreqtradeSizer(IStrategy):
         t0 = _time.time()
 
         def fetch_one(p):
-            """Fetch signal for one pair via RAG service."""
+            """Fetch signal for one pair via RAG service (Phase 17: POST with technical data)."""
             sig = {"signal": "NEUTRAL", "confidence": 0.0, "timestamp": current_time}
             try:
                 import requests
                 url = self.config.get('ai_config', {}).get(
                     'rag_service_url', 'http://127.0.0.1:8891')
+
+                # Phase 17: Get analyzed dataframe for real indicator data
+                technical_data = None
+                try:
+                    df, _ = self.dp.get_analyzed_dataframe(p, self.timeframe)
+                    if df is not None and len(df) > 0:
+                        technical_data = self._extract_technical_data(df, p)
+                except Exception:
+                    pass
+
                 _t = _time.time()
-                resp = requests.get(f"{url}/signal/{p}", timeout=30)
+                if technical_data:
+                    resp = requests.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=30)
+                else:
+                    resp = requests.get(f"{url}/signal/{p}", timeout=30)
                 lat = (_time.time() - _t) * 1000
-                logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code})")
+                logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code}, POST={'Y' if technical_data else 'N'})")
                 if resp.status_code == 200:
                     parsed = resp.json()
                     sig["signal"] = parsed.get("signal", "NEUTRAL")
@@ -200,7 +213,277 @@ class AIFreqtradeSizer(IStrategy):
             logger.error(f"Error connecting to AI SQLite DB: {e}")
             return None
 
-    def _get_ai_signal(self, pair: str, current_time: datetime) -> dict:
+    def _extract_technical_data(self, dataframe: pd.DataFrame, pair: str) -> dict:
+        """
+        Phase 17 Enhanced: Extract comprehensive multi-resolution technical data for RAG service.
+
+        Telescopic approach:
+        - Micro (24h): Full OHLCV candles for immediate price action
+        - Short (7d): Daily summaries for medium-term trend
+        - Long (30d): Key levels only for strategic context
+        Plus: S/R levels, Fibonacci, pivot points, multi-timeframe, patterns, volume profile.
+        """
+        if dataframe is None or len(dataframe) < 2:
+            return {}
+
+        last = dataframe.iloc[-1]
+        prev = dataframe.iloc[-2]
+        price = float(last['close'])
+        prev_price = float(prev['close'])
+
+        def _safe(val):
+            if pd.isna(val):
+                return None
+            return round(float(val), 4)
+
+        def _pct_change(current, past):
+            return round(((current - past) / past * 100), 2) if past > 0 else 0.0
+
+        # === PRICE CHANGES (multi-horizon) ===
+        change_1h = _pct_change(price, prev_price)
+        change_4h = _pct_change(price, float(dataframe.iloc[-5]['close'])) if len(dataframe) >= 5 else 0.0
+        change_24h = _pct_change(price, float(dataframe.iloc[-25]['close'])) if len(dataframe) >= 25 else 0.0
+        change_7d = _pct_change(price, float(dataframe.iloc[-169]['close'])) if len(dataframe) >= 169 else 0.0
+
+        # === BASIC INDICATORS (1h timeframe) ===
+        td = {
+            "current_price": round(price, 2),
+            "price_change_1h_pct": change_1h,
+            "price_change_4h_pct": change_4h,
+            "price_change_24h_pct": change_24h,
+            "price_change_7d_pct": change_7d,
+            "rsi_14": _safe(last.get('rsi')),
+            "macd": _safe(last.get('macd')),
+            "macd_signal": _safe(last.get('macdsignal')),
+            "macd_histogram": _safe(last.get('macdhist')),
+            "atr_14": _safe(last.get('atr')),
+            "adx_14": _safe(last.get('adx')),
+            "ema_9": _safe(last.get('ema_9')),
+            "ema_20": _safe(last.get('ema_20')),
+            "ema_50": _safe(last.get('ema_50')),
+            "ema_200": _safe(last.get('ema_200')),
+            "sma_50": _safe(last.get('sma_50')),
+            "sma_200": _safe(last.get('sma_200')),
+            "bb_upper": _safe(last.get('bb_upper')),
+            "bb_mid": _safe(last.get('bb_mid')),
+            "bb_lower": _safe(last.get('bb_lower')),
+        }
+
+        # === KEY LEVELS (Support/Resistance/Fibonacci/Pivots) ===
+        levels = {}
+
+        # Time-horizon highs and lows
+        for n, label in [(24, "24h"), (168, "7d"), (720, "30d")]:
+            if len(dataframe) >= n:
+                chunk = dataframe.tail(n)
+                levels[f"high_{label}"] = round(float(chunk['high'].max()), 2)
+                levels[f"low_{label}"] = round(float(chunk['low'].min()), 2)
+            elif label == "30d" and len(dataframe) >= 168:
+                levels["high_30d"] = round(float(dataframe['high'].max()), 2)
+                levels["low_30d"] = round(float(dataframe['low'].min()), 2)
+
+        # Swing-based Support/Resistance
+        supports, resistances = self._find_swing_levels(dataframe, price)
+        levels["support"] = supports
+        levels["resistance"] = resistances
+
+        # Fibonacci retracement (from recent swing)
+        lookback = min(100, len(dataframe))
+        recent = dataframe.tail(lookback)
+        swing_high = float(recent['high'].max())
+        swing_low = float(recent['low'].min())
+        if swing_high > swing_low:
+            diff = swing_high - swing_low
+            levels["fibonacci"] = {
+                "swing_high": round(swing_high, 2),
+                "swing_low": round(swing_low, 2),
+                "fib_236": round(swing_low + 0.236 * diff, 2),
+                "fib_382": round(swing_low + 0.382 * diff, 2),
+                "fib_500": round(swing_low + 0.500 * diff, 2),
+                "fib_618": round(swing_low + 0.618 * diff, 2),
+                "fib_786": round(swing_low + 0.786 * diff, 2),
+            }
+
+        # Classic Pivot Points (from yesterday's 24 candles)
+        if len(dataframe) >= 25:
+            yesterday = dataframe.iloc[-25:-1]
+            yh, yl, yc = float(yesterday['high'].max()), float(yesterday['low'].min()), float(yesterday.iloc[-1]['close'])
+            pp = (yh + yl + yc) / 3
+            levels["pivot"] = {
+                "pp": round(pp, 2),
+                "r1": round(2 * pp - yl, 2), "r2": round(pp + (yh - yl), 2),
+                "s1": round(2 * pp - yh, 2), "s2": round(pp - (yh - yl), 2),
+            }
+
+        td["levels"] = levels
+
+        # === VOLUME ANALYSIS ===
+        volume = {}
+        if 'volume' in dataframe.columns and len(dataframe) >= 20:
+            curr_vol = float(last.get('volume', 0))
+            avg_vol = float(dataframe.tail(20)['volume'].mean())
+            volume["current"] = round(curr_vol, 0)
+            volume["avg_20"] = round(avg_vol, 0)
+            volume["ratio"] = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 0
+            if len(dataframe) >= 10:
+                recent_5 = float(dataframe.tail(5)['volume'].mean())
+                prev_5 = float(dataframe.iloc[-10:-5]['volume'].mean())
+                if prev_5 > 0:
+                    vol_chg = ((recent_5 - prev_5) / prev_5 * 100)
+                    volume["trend"] = "rising" if vol_chg > 10 else "declining" if vol_chg < -10 else "stable"
+                    volume["trend_pct"] = round(vol_chg, 1)
+        td["volume"] = volume
+
+        # === CANDLESTICK PATTERNS (last candle) ===
+        patterns = []
+        pattern_cols = {
+            'cdl_doji': 'Doji', 'cdl_engulfing': 'Engulfing',
+            'cdl_hammer': 'Hammer', 'cdl_shooting_star': 'Shooting Star',
+            'cdl_morning_star': 'Morning Star', 'cdl_evening_star': 'Evening Star',
+            'cdl_three_white': 'Three White Soldiers', 'cdl_three_black': 'Three Black Crows',
+            'cdl_harami': 'Harami', 'cdl_inverted_hammer': 'Inverted Hammer',
+        }
+        for col, name in pattern_cols.items():
+            val = last.get(col, 0)
+            if pd.notna(val) and val != 0:
+                direction = "bullish" if val > 0 else "bearish"
+                patterns.append(f"{name} ({direction})")
+        td["patterns"] = patterns
+
+        # === MULTI-TIMEFRAME INDICATORS (derived from 1h data) ===
+        td["htf"] = self._compute_higher_timeframe(dataframe)
+
+        # === LAST 24 CANDLES (detailed OHLCV) ===
+        n_candles = min(24, len(dataframe))
+        candles = []
+        for i in range(n_candles, 0, -1):
+            row = dataframe.iloc[-i]
+            candles.append({
+                "time": str(row['date']),
+                "open": round(float(row['open']), 2),
+                "high": round(float(row['high']), 2),
+                "low": round(float(row['low']), 2),
+                "close": round(float(row['close']), 2),
+                "volume": round(float(row.get('volume', 0)), 0),
+            })
+        td["last_candles"] = candles
+
+        # === DAILY SUMMARIES (7 days, aggregated from 1h) ===
+        td["daily_summaries"] = self._compute_daily_summaries(dataframe, n_days=7)
+
+        return td
+
+    @staticmethod
+    def _find_swing_levels(dataframe: pd.DataFrame, current_price: float,
+                           window: int = 5, n_levels: int = 3):
+        """Find support/resistance from swing highs and lows in recent price action."""
+        lookback = min(100, len(dataframe))
+        df = dataframe.tail(lookback)
+        highs = df['high'].values
+        lows = df['low'].values
+        supports = []
+        resistances = []
+
+        for i in range(window, len(df) - window):
+            local_lows = lows[max(0, i - window):i + window + 1]
+            local_highs = highs[max(0, i - window):i + window + 1]
+            if lows[i] == min(local_lows):
+                supports.append(float(lows[i]))
+            if highs[i] == max(local_highs):
+                resistances.append(float(highs[i]))
+
+        # Deduplicate nearby levels (within 1%)
+        def _dedup(levels, threshold=0.01):
+            if not levels:
+                return []
+            levels.sort()
+            deduped = [levels[0]]
+            for lv in levels[1:]:
+                if abs(lv - deduped[-1]) / deduped[-1] > threshold:
+                    deduped.append(lv)
+            return deduped
+
+        supports = _dedup(supports)
+        resistances = _dedup(resistances)
+
+        # Filter: supports below current price, resistances above
+        supports = sorted([s for s in supports if s < current_price], reverse=True)[:n_levels]
+        resistances = sorted([r for r in resistances if r > current_price])[:n_levels]
+
+        return [round(s, 2) for s in supports], [round(r, 2) for r in resistances]
+
+    def _compute_higher_timeframe(self, dataframe: pd.DataFrame) -> dict:
+        """Derive 4H and Daily indicators from 1h candles via resampling."""
+        htf = {}
+        try:
+            df_temp = dataframe.copy()
+            df_temp['date'] = pd.to_datetime(df_temp['date'])
+            df_temp = df_temp.set_index('date')
+
+            # 4H timeframe
+            if len(df_temp) >= 56:  # 14 periods × 4h = 56 candles
+                df_4h = df_temp.resample('4h').agg({
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                }).dropna()
+                if len(df_4h) >= 14:
+                    rsi_4h = ta.RSI(df_4h, timeperiod=14)
+                    ema_20_4h = ta.EMA(df_4h, timeperiod=20)
+                    if len(rsi_4h) > 0 and pd.notna(rsi_4h.iloc[-1]):
+                        htf["rsi_4h"] = round(float(rsi_4h.iloc[-1]), 1)
+                    if len(ema_20_4h) > 0 and pd.notna(ema_20_4h.iloc[-1]):
+                        htf["ema_20_4h"] = round(float(ema_20_4h.iloc[-1]), 2)
+                    # 4H trend: price vs EMA20 on 4h
+                    if htf.get("ema_20_4h"):
+                        p = float(df_4h.iloc[-1]['close'])
+                        htf["trend_4h"] = "bullish" if p > htf["ema_20_4h"] else "bearish"
+
+            # Daily timeframe
+            if len(df_temp) >= 336:  # 14 days × 24h
+                df_daily = df_temp.resample('1D').agg({
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                }).dropna()
+                if len(df_daily) >= 14:
+                    rsi_d = ta.RSI(df_daily, timeperiod=14)
+                    if len(rsi_d) > 0 and pd.notna(rsi_d.iloc[-1]):
+                        htf["rsi_daily"] = round(float(rsi_d.iloc[-1]), 1)
+                    if len(df_daily) >= 50:
+                        ema_50_d = ta.EMA(df_daily, timeperiod=50)
+                        if len(ema_50_d) > 0 and pd.notna(ema_50_d.iloc[-1]):
+                            htf["ema_50_daily"] = round(float(ema_50_d.iloc[-1]), 2)
+                    p_daily = float(df_daily.iloc[-1]['close'])
+                    # Daily trend from EMA alignment
+                    if htf.get("ema_50_daily"):
+                        htf["trend_daily"] = "bullish" if p_daily > htf["ema_50_daily"] else "bearish"
+        except Exception as e:
+            logger.debug(f"[Phase17] Higher timeframe computation failed: {e}")
+
+        return htf
+
+    @staticmethod
+    def _compute_daily_summaries(dataframe: pd.DataFrame, n_days: int = 7) -> list:
+        """Aggregate 1h candles into daily OHLCV summaries."""
+        summaries = []
+        try:
+            df_temp = dataframe.copy()
+            df_temp['date'] = pd.to_datetime(df_temp['date'])
+            df_temp = df_temp.set_index('date')
+            daily = df_temp.resample('1D').agg({
+                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+            }).dropna()
+            for _, row in daily.tail(n_days).iterrows():
+                summaries.append({
+                    "date": str(row.name.date()),
+                    "open": round(float(row['open']), 2),
+                    "high": round(float(row['high']), 2),
+                    "low": round(float(row['low']), 2),
+                    "close": round(float(row['close']), 2),
+                    "volume": round(float(row['volume']), 0),
+                })
+        except Exception as e:
+            logger.debug(f"[Phase17] Daily summary computation failed: {e}")
+        return summaries
+
+    def _get_ai_signal(self, pair: str, current_time: datetime, dataframe: pd.DataFrame = None) -> dict:
         """
         The Bridge (Phase 5.1): Asks the RAG Signal Service for a decision.
         HTTP-first with subprocess fallback. Models stay loaded in the service.
@@ -217,6 +500,14 @@ class AIFreqtradeSizer(IStrategy):
         logger.info(f"AI Signal Cache Miss for {pair}. Asking RAG Signal Service...")
         signal_data = {"signal": "NEUTRAL", "confidence": 0.0, "timestamp": current_time}
 
+        # Phase 17: Extract technical data from dataframe for RAG service
+        technical_data = None
+        if dataframe is not None and len(dataframe) > 0:
+            try:
+                technical_data = self._extract_technical_data(dataframe, pair)
+            except Exception as e:
+                logger.debug(f"[Phase17] Failed to extract technical data for {pair}: {e}")
+
         try:
             import requests
             import time as _time
@@ -224,12 +515,20 @@ class AIFreqtradeSizer(IStrategy):
                 'rag_service_url', 'http://127.0.0.1:8891')
 
             _t0 = _time.time()
-            response = requests.get(
-                f"{rag_service_url}/signal/{pair}",
-                timeout=30  # Fast-fail: 20 pairs × 30s = 10min << 60min candle
-            )
+            # Phase 17: POST with technical data when available, GET fallback
+            if technical_data:
+                response = requests.post(
+                    f"{rag_service_url}/signal/{pair}",
+                    json={"technical_data": technical_data},
+                    timeout=30
+                )
+            else:
+                response = requests.get(
+                    f"{rag_service_url}/signal/{pair}",
+                    timeout=30  # Fast-fail: 20 pairs × 30s = 10min << 60min candle
+                )
             _latency = (_time.time() - _t0) * 1000
-            logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code})")
+            logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code}, POST={'Y' if technical_data else 'N'})")
             if response.status_code == 200:
                 parsed = response.json()
                 signal_data["signal"] = parsed.get("signal", "NEUTRAL")
@@ -284,8 +583,12 @@ class AIFreqtradeSizer(IStrategy):
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
         dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
         dataframe['adx'] = ta.ADX(dataframe, timeperiod=14)
+        dataframe['ema_9'] = ta.EMA(dataframe, timeperiod=9)
         dataframe['ema_20'] = ta.EMA(dataframe, timeperiod=20)
+        dataframe['ema_50'] = ta.EMA(dataframe, timeperiod=50)
+        dataframe['ema_200'] = ta.EMA(dataframe, timeperiod=200)
         dataframe['sma_50'] = ta.SMA(dataframe, timeperiod=50)
+        dataframe['sma_200'] = ta.SMA(dataframe, timeperiod=200)
 
         macd = ta.MACD(dataframe)
         dataframe['macd'] = macd['macd']
@@ -294,7 +597,20 @@ class AIFreqtradeSizer(IStrategy):
 
         bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
         dataframe['bb_lower'] = bollinger['lowerband']
+        dataframe['bb_mid'] = bollinger['middleband']
         dataframe['bb_upper'] = bollinger['upperband']
+
+        # Phase 17: Candlestick pattern detection (for AI context)
+        dataframe['cdl_doji'] = ta.CDLDOJI(dataframe)
+        dataframe['cdl_engulfing'] = ta.CDLENGULFING(dataframe)
+        dataframe['cdl_hammer'] = ta.CDLHAMMER(dataframe)
+        dataframe['cdl_shooting_star'] = ta.CDLSHOOTINGSTAR(dataframe)
+        dataframe['cdl_morning_star'] = ta.CDLMORNINGSTAR(dataframe)
+        dataframe['cdl_evening_star'] = ta.CDLEVENINGSTAR(dataframe)
+        dataframe['cdl_three_white'] = ta.CDL3WHITESOLDIERS(dataframe)
+        dataframe['cdl_three_black'] = ta.CDL3BLACKCROWS(dataframe)
+        dataframe['cdl_harami'] = ta.CDLHARAMI(dataframe)
+        dataframe['cdl_inverted_hammer'] = ta.CDLINVERTEDHAMMER(dataframe)
 
         # Sentiment features from SQLite (used by custom_stake_amount)
         conn = self._get_sqlite_connection()
@@ -351,7 +667,7 @@ class AIFreqtradeSizer(IStrategy):
                         self._semantic_cache = SemanticCache(db_path=self.db_path)
                     self._semantic_cache.invalidate(pair=pair)
 
-            ai_decision = self._get_ai_signal(pair, last_time)
+            ai_decision = self._get_ai_signal(pair, last_time, dataframe=df)
             signal_type = ai_decision.get('signal', 'NEUTRAL')
             confidence = ai_decision.get('confidence', 0.0)
             is_bullish = signal_type == 'BULLISH'
