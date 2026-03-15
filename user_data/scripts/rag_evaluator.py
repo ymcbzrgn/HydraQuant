@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(__file__))
 
 from llm_router import LLMRouter
 from langchain_core.messages import SystemMessage, HumanMessage
+from json_utils import extract_json_strict
 
 logger = logging.getLogger(__name__)
 
@@ -140,23 +141,23 @@ class RAGQualityEvaluator:
     def _llm_judge(self, prompt: str) -> Dict[str, Any]:
         """Use LLM to score a specific metric."""
         messages = [
-            SystemMessage(content="You are a strict RAG quality evaluator. Output only valid JSON."),
+            SystemMessage(content="You are a strict RAG quality evaluator. Your ENTIRE response must be a single valid JSON object with 'score' and 'reason' keys. No text before or after."),
             HumanMessage(content=prompt)
         ]
         try:
             response = self.router.invoke(messages)
             text = str(response.content).strip()
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-            # Extract JSON from potential markdown code blocks
-            if "```" in text:
-                text = text.split("```")[1].replace("json", "").strip()
             if not text:
                 logger.warning("[RAGAS] Empty LLM response. Returning default score.")
                 return {"score": 0.5, "reason": "Empty LLM response"}
-            return json.loads(text)
-        except (json.JSONDecodeError, Exception) as e:
-            logger.warning(f"[RAGAS] LLM judge parse error: {e}")
-            return {"score": 0.5, "reason": f"Parse error: {str(e)[:100]}"}
+            result = extract_json_strict(text, required_keys=["score"])
+            if result is None:
+                logger.warning(f"[RAGAS] JSON extraction failed. Raw: {text[:200]}")
+                return {"score": 0.5, "reason": "JSON extraction failed"}
+            return result
+        except Exception as e:
+            logger.warning(f"[RAGAS] LLM judge error: {e}")
+            return {"score": 0.5, "reason": f"Error: {str(e)[:100]}"}
 
     def evaluate_single(
         self,

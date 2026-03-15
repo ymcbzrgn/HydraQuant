@@ -20,6 +20,7 @@ sys.path.append(os.path.dirname(__file__))
 
 from llm_router import LLMRouter
 from langchain_core.messages import SystemMessage, HumanMessage
+from json_utils import extract_json_strict
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +106,13 @@ Score the relevance of these documents to the query."""
         try:
             response = self.router.invoke(messages)
             content = str(response.content).strip()
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-            content = content.replace("```json", "").replace("```", "").strip()
             if not content:
                 logger.warning("[CRAG] Empty LLM response. Failing open as CORRECT.")
                 return ("CORRECT", 0.5, "Empty LLM response — fail-open")
-            result = json.loads(content)
+            result = extract_json_strict(content, required_keys=["relevance_score"])
+            if result is None:
+                logger.warning(f"[CRAG] Failed to extract JSON. Failing open. Raw: {content[:200]}")
+                return ("CORRECT", 0.5, "JSON extraction failed — fail-open")
 
             score = float(result.get("relevance_score", 0.0))
             reason = result.get("reason", "No reason provided.")

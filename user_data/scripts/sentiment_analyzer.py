@@ -76,6 +76,7 @@ def _llm_sentiment_batch(articles: list) -> list:
         from langchain_core.messages import SystemMessage, HumanMessage
         import json
 
+        from json_utils import extract_json_array
         router = LLMRouter(temperature=0.0, request_timeout=30)
 
         SYSTEM = """IDENTITY: You are a crypto market sentiment classifier with expertise in financial NLP.
@@ -118,10 +119,8 @@ No markdown, no backticks, ONLY raw JSON array."""
 
             response = router.invoke(messages)
             content = str(response.content).strip()
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-            content = content.replace("```json", "").replace("```", "").strip()
 
-            scores = json.loads(content)
+            scores = extract_json_array(content)
             if isinstance(scores, list):
                 for j, a in enumerate(batch):
                     score = float(scores[j]) if j < len(scores) else 0.0

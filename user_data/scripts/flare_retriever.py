@@ -107,15 +107,38 @@ class FLARERetriever:
         
         try:
             response = self.router.invoke([HumanMessage(content=prompt)])
-            score_text = str(response.content).strip()
-            # Extract float
-            match = re.search(r'\d+\.\d+|\d+', score_text)
+            score_text = str(response.content).strip().lower()
+
+            # Tier 1: Direct float extraction (LLM returned "0.7" or "Score: 0.3")
+            match = re.search(r'(\d+\.\d+)', score_text)
             if match:
-                return float(match.group())
-            return 1.0
+                val = float(match.group(1))
+                return min(max(val, 0.0), 1.0)  # Clamp to 0-1
+
+            # Tier 2: Integer (LLM returned "1" or "0")
+            match = re.search(r'\b([01])\b', score_text)
+            if match:
+                return float(match.group(1))
+
+            # Tier 3: Verbal confidence mapping (LLM said words instead of numbers)
+            verbal_map = {
+                "very high": 0.95, "high": 0.85, "confident": 0.8,
+                "moderately": 0.6, "moderate": 0.6, "medium": 0.5,
+                "low": 0.3, "uncertain": 0.25, "speculative": 0.2,
+                "very low": 0.1, "hallucinated": 0.05, "fabricated": 0.05,
+            }
+            for phrase, val in verbal_map.items():
+                if phrase in score_text:
+                    logger.info(f"[FLARE] Verbal confidence mapped: '{phrase}' → {val}")
+                    return val
+
+            # Tier 4: Fail-safe — if we truly can't parse, assume LOW confidence
+            # (triggers retrieval, which is the SAFER option vs. letting bad text through)
+            logger.warning(f"[FLARE] Could not parse confidence from: '{score_text[:100]}'. Defaulting to 0.3 (trigger retrieval).")
+            return 0.3
         except Exception as e:
             logger.error(f"[FLARE] Confidence assessment failed: {e}")
-            return 1.0
+            return 0.3  # Fail-SAFE: trigger retrieval rather than let uncertain text through
 
     def _retrieve_for_sentence(self, sentence: str) -> List[str]:
         """Retrieve additional context for a low-confidence sentence."""
