@@ -84,11 +84,20 @@ Output EXACTLY a valid JSON object:
             ], priority="medium")
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)
 
-            if not str(critique_str).strip():
+            # Normalize: Gemini v1 may return list of content blocks (already handled in
+            # llm_router, but be defensive in case of direct calls or cached responses)
+            if isinstance(critique_str, list):
+                critique_str = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in critique_str
+                )
+
+            critique_str = str(critique_str).strip()
+            if not critique_str:
                 logger.warning("[Self-RAG] Empty response from LLM. Failing open.")
                 return {"faithfulness": 1.0, "relevance": 1.0, "confidence": 1.0, "passed": True}
 
-            metrics = extract_json_strict(str(critique_str), required_keys=["faithfulness"])
+            metrics = extract_json_strict(critique_str, required_keys=["faithfulness"])
             if metrics is None:
                 logger.warning(f"[Self-RAG] JSON extraction failed. Failing open. Raw: {str(critique_str)[:200]}")
                 return {"faithfulness": 1.0, "relevance": 1.0, "confidence": 1.0, "passed": True}

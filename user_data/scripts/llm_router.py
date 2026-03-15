@@ -590,7 +590,20 @@ class LLMRouter:
             raise ValueError("All API keys are exhausted or unavailable.")
 
         return chain
-            
+
+    def is_any_provider_available(self) -> bool:
+        """Quick check: is at least one provider not rate-limited?
+        Callers can use this to skip LLM work entirely when all providers are exhausted."""
+        try:
+            chain = self._get_chain()
+            # Check if any model in the chain is actually available (not penalized)
+            for model in chain:
+                if not self._is_key_penalized(model) and not self._is_model_penalized(model):
+                    return True
+            return False
+        except ValueError:
+            return False
+
     def _cooldown_for(self, model) -> float:
         """Return the appropriate cooldown duration based on provider type."""
         if isinstance(model, ChatGoogleGenerativeAI):
@@ -682,6 +695,17 @@ class LLMRouter:
         """
         global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain(priority=priority)
+
+        # Fast-fail: if ALL models in the chain are already penalized from prior calls,
+        # raise immediately instead of looping through skip checks for up to 90s.
+        active_count = sum(
+            1 for m in chain
+            if not self._is_key_penalized(m) and not self._is_model_penalized(m)
+        )
+        if active_count == 0:
+            logger.error("[FastFail] All providers are rate-limited from prior calls. Raising immediately.")
+            raise ValueError("All providers exhausted (all models in penalty box).")
+
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
         wall_start = time.time()
@@ -723,9 +747,23 @@ class LLMRouter:
                     m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                     logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
                     self._penalize_model(model)
+                    self._check_key_cascade(model)  # Cascade if all models on key return empty
                     if is_gemini:
                         gemini_consecutive_fails += 1
                     continue
+
+                # Normalize content: Gemini v1 output_version returns list of content blocks
+                # instead of a plain string. Unwrap here so ALL callers receive a string.
+                if isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and "text" in block:
+                            text_parts.append(block["text"])
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                        else:
+                            text_parts.append(str(block))
+                    response.content = "".join(text_parts)
 
                 in_tok = 0
                 out_tok = 0
@@ -784,6 +822,16 @@ class LLMRouter:
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
         global _GEMINI_CIRCUIT_OPEN_UNTIL
         chain = self._get_chain(priority=priority)
+
+        # Fast-fail: if ALL models are penalized, raise immediately
+        active_count = sum(
+            1 for m in chain
+            if not self._is_key_penalized(m) and not self._is_model_penalized(m)
+        )
+        if active_count == 0:
+            logger.error("[FastFail] All providers rate-limited. Raising immediately (async).")
+            raise ValueError("All providers exhausted (all models in penalty box).")
+
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
         wall_start = time.time()
@@ -822,9 +870,22 @@ class LLMRouter:
                     m_name = getattr(model, "model_name", getattr(model, "model", "?"))
                     logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
                     self._penalize_model(model)
+                    self._check_key_cascade(model)
                     if is_gemini:
                         gemini_consecutive_fails += 1
                     continue
+
+                # Normalize content: Gemini v1 content blocks → string
+                if isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and "text" in block:
+                            text_parts.append(block["text"])
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                        else:
+                            text_parts.append(str(block))
+                    response.content = "".join(text_parts)
 
                 in_tok = 0
                 out_tok = 0

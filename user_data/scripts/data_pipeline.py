@@ -207,16 +207,30 @@ class DataPipeline:
                 self.memorag.update_global_memory(docs_to_insert)
 
             # Phase 5.1 & Phase 15: Extract Entities and build MAGMA Knowledge Graph
+            # Entity extraction is non-critical enrichment. Skip if LLM providers are exhausted
+            # to preserve quota for signal generation (the critical path).
+            _skip_entities = False
+            try:
+                if hasattr(kg, 'router') and hasattr(kg.router, 'is_any_provider_available'):
+                    if not kg.router.is_any_provider_available():
+                        logger.warning("[DataPipeline] All LLM providers exhausted — skipping entity extraction to preserve quota.")
+                        _skip_entities = True
+            except Exception:
+                pass
+
+            entity_failures = 0
             for article in articles:
+                if _skip_entities or entity_failures >= 3:
+                    break  # Stop trying after 3 consecutive failures or if providers exhausted
                 if article['id'] in successful_db_ids:
                     try:
                         extracted = kg.extract_from_text(article['summary'], source_reference=article['url'])
                         if extracted and isinstance(extracted, dict) and 'entities' in extracted:
                             entities = extracted['entities']
+                            entity_failures = 0  # Reset on success
                             logger.info(f"Extracted {len(entities)} entities for art_{article['id']}")
-                            
+
                             # Phase 15: MAGMA Entity Graph
-                            # If two entities are extracted from the same article, we assume an 'entity' correlation edge
                             if isinstance(entities, list):
                                 for i in range(len(entities)):
                                     for j in range(i + 1, len(entities)):
@@ -224,11 +238,15 @@ class DataPipeline:
                                             source_e = entities[i].get('name', 'UNKNOWN')
                                             target_e = entities[j].get('name', 'UNKNOWN')
                                             if source_e != 'UNKNOWN' and target_e != 'UNKNOWN':
-                                                # Bidirectional correlation
                                                 self.magma.add_edge("entity", source_e, "correlates", target_e, metadata={"source": article['url']})
                                                 self.magma.add_edge("entity", target_e, "correlates", source_e, metadata={"source": article['url']})
+                        else:
+                            entity_failures += 1
                     except Exception as e:
+                        entity_failures += 1
                         logger.warning(f"Entity extraction failed for art_{article['id']}: {e}")
+                        if entity_failures >= 3:
+                            logger.warning("[DataPipeline] 3 consecutive entity extraction failures — skipping remaining articles.")
                 
         except Exception as e:
             logger.error(f"Failed to push embeddings to DB: {e}")

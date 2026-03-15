@@ -19,12 +19,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def extract_json(text: str) -> dict | None:
+def extract_json(text) -> dict | None:
     """
     Robustly extract a JSON object from LLM response text.
-    Handles: raw JSON, JSON wrapped in text, markdown code fences, <think> tags.
+    Handles: raw JSON, JSON wrapped in text, markdown code fences, <think> tags,
+    and Gemini v1 content blocks [{'type': 'text', 'text': '...'}].
     Returns parsed dict or None if all tiers fail.
     """
+    # Pre-process: unwrap Gemini v1 content blocks if passed as list
+    if isinstance(text, list):
+        parts = []
+        for block in text:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+            else:
+                parts.append(str(block))
+        text = " ".join(parts)
+
     if not text or not isinstance(text, str):
         return None
 
