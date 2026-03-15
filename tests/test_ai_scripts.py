@@ -442,10 +442,14 @@ def test_autonomy_kelly_fraction(tmp_db):
         assert frac > 0, f"L{level} Kelly fraction must be > 0 (Trade-First philosophy)"
 
     # Test promotion (L0→L1 needs 20 nano trades, 3 days)
-    promoted = mgr.check_promotion(total_trades=25, sharpe=0.0, max_dd_pct=0.0, days_at_level=5)
-    assert promoted is True, "L0→L1 should promote after 20 trades and 3 days"
-    assert mgr.get_level() == 1
-    assert mgr.get_kelly_fraction() == 0.07  # L1 trades bigger
+    # Mock Telegram to prevent real notifications during tests
+    from unittest.mock import patch, MagicMock
+    with patch('telegram_notifier.AITelegramNotifier') as mock_notifier:
+        mock_notifier.return_value.send_alert = MagicMock()
+        promoted = mgr.check_promotion(total_trades=25, sharpe=0.0, max_dd_pct=0.0, days_at_level=5)
+        assert promoted is True, "L0→L1 should promote after 20 trades and 3 days"
+        assert mgr.get_level() == 1
+        assert mgr.get_kelly_fraction() == 0.07  # L1 trades bigger
 
 
 # ============================================================
@@ -1794,9 +1798,9 @@ def test_flare_high_confidence_no_retrieval(mock_flare):
             
             if "Generate an analytical response" in prompt:
                 return MockResponse("Everything is fine. No uncertainty here.")
-            elif "You are evaluating the confidence" in prompt:
+            elif "factual confidence" in prompt or "evaluating the confidence" in prompt:
                 return MockResponse("0.9")
-                
+
             return MockResponse("Fallback mock.")
             
     mock_flare.router = HighConfMockRouter()
