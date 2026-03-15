@@ -25,17 +25,13 @@ class LLMCostTracker:
         # --- Groq (FREE tier — nominal costs for tracking) ---
         "openai/gpt-oss-120b": {"input": 0.0, "output": 0.0},
         "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},  # If paid; free tier = $0
-        "qwen-qwq-32b": {"input": 0.0, "output": 0.0},
-        "deepseek-r1-distill-llama-70b": {"input": 0.0, "output": 0.0},
         "qwen/qwen3-32b": {"input": 0.0, "output": 0.0},
-        "deepseek-r1-distill-qwen-32b": {"input": 0.0, "output": 0.0},
         "moonshotai/kimi-k2-instruct": {"input": 0.0, "output": 0.0},
         "meta-llama/llama-4-scout-17b-16e-instruct": {"input": 0.0, "output": 0.0},
         "openai/gpt-oss-20b": {"input": 0.0, "output": 0.0},
         "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},   # If paid; free tier = $0
         # --- Cerebras (FREE tier) ---
-        "qwen3-235b-a22b": {"input": 0.0, "output": 0.0},
-        "llama3.3-70b": {"input": 0.0, "output": 0.0},
+        "qwen-3-235b-a22b-instruct-2507": {"input": 0.0, "output": 0.0},
         "llama3.1-8b": {"input": 0.0, "output": 0.0},
         # --- DeepSeek ---
         "deepseek-chat": {"input": 0.27, "output": 1.10},
