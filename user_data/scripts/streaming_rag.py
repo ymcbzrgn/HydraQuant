@@ -12,7 +12,11 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from ai_config import AI_DB_PATH
-from rag_embedding import DualEmbeddingPipeline
+try:
+    from rag_embedding import DualEmbeddingPipeline
+except ImportError as _e:
+    logging.getLogger(__name__).error(f"[StreamingRAG] DualEmbeddingPipeline import failed: {_e}")
+    DualEmbeddingPipeline = None
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,7 @@ class StreamingRAG:
     def __init__(self):
         """StreamingRAG with Hot Buffer vs. Cold Storage mechanics."""
         self._init_hot_buffer()
-        self._embedder = DualEmbeddingPipeline()  # Reuse single instance
+        self._embedder = DualEmbeddingPipeline() if DualEmbeddingPipeline is not None else None
 
     def _init_hot_buffer(self):
         """In-memory or fast SQLite hot buffer for documents < 1 hour old."""
@@ -47,6 +51,9 @@ class StreamingRAG:
         
         # Immediate sync embedding
         pipeline = self._embedder
+        if pipeline is None:
+            logger.warning(f"[StreamingRAG] Embedder unavailable, skipping ingest for {doc_id}")
+            return
         embeddings = pipeline.get_embeddings(content)
         if not embeddings or 'gemini' not in embeddings:
             logger.warning(f"Failed to ingest document {doc_id} into hot buffer: Embedding failed.")
@@ -73,6 +80,8 @@ class StreamingRAG:
         import numpy as np
         
         pipeline = self._embedder
+        if pipeline is None:
+            return []
         query_embeddings = pipeline.get_embeddings(query)
         if not query_embeddings or 'gemini' not in query_embeddings:
             return []
