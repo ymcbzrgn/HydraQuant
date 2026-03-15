@@ -177,7 +177,6 @@ class LLMRouter:
         if self.cerebras_key:
             cerebras_model_names = [
                 "qwen3-235b-a22b",  # 235B params, strongest reasoning on Cerebras free tier
-                "gpt-oss-120b",     # 120B params, OpenAI open-weight (Apache 2)
                 "llama3.3-70b",     # 70B params, good general purpose
                 "llama3.1-8b",      # 8B params, fastest but smallest
             ]
