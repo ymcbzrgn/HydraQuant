@@ -104,7 +104,7 @@ Score the relevance of these documents to the query."""
         ]
 
         try:
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="medium")
             content = str(response.content).strip()
             if not content:
                 logger.warning("[CRAG] Empty LLM response. Failing open as CORRECT.")
@@ -140,7 +140,7 @@ Score the relevance of these documents to the query."""
         ]
 
         try:
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             rewritten = str(response.content).strip().strip('"').strip("'")
             logger.info(f"[CRAG] Query rewrite: '{original_query[:40]}...' → '{rewritten[:40]}...'")
             return rewritten

@@ -13,14 +13,49 @@ class LLMCostTracker:
     Maintains a daily budget to prevent massive unexpected API bills.
     """
     
-    # Cost per 1M tokens (Input, Output) in USD
+    # Cost per 1M tokens (Input, Output) in USD — March 2026 prices
+    # FREE tier providers use nominal costs for tracking; real spend is $0
     COSTS_PER_1M = {
-        "gemini-2.5-flash": {"input": 0.15, "output": 0.60},
+        # --- Gemini (Google) ---
+        "gemini-2.5-flash": {"input": 0.30, "output": 1.25},       # Corrected: was 0.15/0.60
         "gemini-2.5-flash-lite": {"input": 0.075, "output": 0.30},
         "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
-        "gemini-embedding-001": {"input": 0.0, "output": 0.0},  # Free tier
-        "gemini-embedding-2-preview": {"input": 0.0, "output": 0.0},  # Free tier
+        "gemini-embedding-001": {"input": 0.0, "output": 0.0},
+        "gemini-embedding-2-preview": {"input": 0.0, "output": 0.0},
+        # --- Groq (FREE tier — nominal costs for tracking) ---
+        "openai/gpt-oss-120b": {"input": 0.0, "output": 0.0},
+        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},  # If paid; free tier = $0
+        "qwen-qwq-32b": {"input": 0.0, "output": 0.0},
+        "deepseek-r1-distill-llama-70b": {"input": 0.0, "output": 0.0},
+        "qwen/qwen3-32b": {"input": 0.0, "output": 0.0},
+        "deepseek-r1-distill-qwen-32b": {"input": 0.0, "output": 0.0},
+        "moonshotai/kimi-k2-instruct": {"input": 0.0, "output": 0.0},
+        "meta-llama/llama-4-scout-17b-16e-instruct": {"input": 0.0, "output": 0.0},
+        "openai/gpt-oss-20b": {"input": 0.0, "output": 0.0},
+        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},   # If paid; free tier = $0
+        # --- Cerebras (FREE tier) ---
+        "qwen3-235b-a22b": {"input": 0.0, "output": 0.0},
+        "llama3.3-70b": {"input": 0.0, "output": 0.0},
+        "llama3.1-8b": {"input": 0.0, "output": 0.0},
+        # --- DeepSeek ---
+        "deepseek-chat": {"input": 0.27, "output": 1.10},
+        # --- SambaNova (FREE tier) ---
+        "Meta-Llama-3.3-70B-Instruct": {"input": 0.0, "output": 0.0},
+        "Meta-Llama-3.1-8B-Instruct": {"input": 0.0, "output": 0.0},
+        # --- Mistral (experiment plan) ---
+        "mistral-large-latest": {"input": 2.00, "output": 6.00},
+        "mistral-small-latest": {"input": 0.10, "output": 0.30},
+    }
+
+    # Provider-level fallback costs for unknown models
+    _PROVIDER_FALLBACK_COSTS = {
+        "groq": {"input": 0.0, "output": 0.0},
+        "cerebras": {"input": 0.0, "output": 0.0},
+        "sambanova": {"input": 0.0, "output": 0.0},
+        "openrouter": {"input": 0.0, "output": 0.0},       # Free models only
+        "deepseek": {"input": 0.27, "output": 1.10},
+        "mistral": {"input": 0.10, "output": 0.30},         # Small pricing as fallback
+        "gemini": {"input": 0.30, "output": 1.25},           # Flash pricing as fallback
     }
 
     def __init__(self, db_path=None):
@@ -52,20 +87,29 @@ class LLMCostTracker:
         except Exception as e:
             logger.error(f"Failed to init llm_calls table: {e}")
 
-    def calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
-        # Normalize model name for lookup
-        model_key = model.lower()
-        if "flash-lite" in model_key or "lite" in model_key:
-            model_key = "gemini-2.5-flash-lite"
-        elif "pro" in model_key:
-            model_key = "gemini-2.5-pro"
-        elif "llama" in model_key:
-            model_key = "llama-3.3-70b-versatile"
-        else:
-            # Default to flash pricing if unknown
-            model_key = "gemini-2.5-flash"
-            
-        costs = self.COSTS_PER_1M.get(model_key, self.COSTS_PER_1M["gemini-2.5-flash"])
+    def calculate_cost(self, model: str, input_tokens: int, output_tokens: int,
+                       provider: str = "") -> float:
+        """Calculate cost with 3-tier lookup: exact match → provider fallback → heuristic."""
+        # Tier 1: Exact model name match (handles models/ prefix from Gemini)
+        clean = model.replace("models/", "")
+        costs = self.COSTS_PER_1M.get(clean)
+
+        # Tier 2: Provider-level fallback
+        if costs is None and provider:
+            costs = self._PROVIDER_FALLBACK_COSTS.get(provider)
+
+        # Tier 3: Heuristic substring match (backward compat)
+        if costs is None:
+            model_lower = clean.lower()
+            if "flash-lite" in model_lower or "lite" in model_lower:
+                costs = self.COSTS_PER_1M["gemini-2.5-flash-lite"]
+            elif "pro" in model_lower:
+                costs = self.COSTS_PER_1M["gemini-2.5-pro"]
+            elif "flash" in model_lower:
+                costs = self.COSTS_PER_1M["gemini-2.5-flash"]
+            else:
+                costs = {"input": 0.0, "output": 0.0}
+
         input_cost = (input_tokens / 1_000_000) * costs["input"]
         output_cost = (output_tokens / 1_000_000) * costs["output"]
         return input_cost + output_cost

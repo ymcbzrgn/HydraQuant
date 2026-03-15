@@ -126,9 +126,17 @@ class DeploymentChecker:
         if has_gemini:
             providers.append(f"Gemini ({len(router.gemini_keys)} keys)")
         if has_groq:
-            providers.append("Groq")
+            providers.append(f"Groq ({len(router.groq_models)})")
+        if router.cerebras_models:
+            providers.append(f"Cerebras ({len(router.cerebras_models)})")
+        if router.deepseek_models:
+            providers.append(f"DeepSeek ({len(router.deepseek_models)})")
+        if router.sambanova_models:
+            providers.append(f"SambaNova ({len(router.sambanova_models)})")
+        if router.mistral_models:
+            providers.append(f"Mistral ({len(router.mistral_models)})")
         if has_openrouter:
-            providers.append("OpenRouter")
+            providers.append(f"OpenRouter ({len(router.openrouter_models)})")
 
         if not providers:
             return False, "No LLM providers configured"

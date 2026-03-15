@@ -65,7 +65,7 @@ class BidirectionalRAG:
         ]
         
         try:
-            response = self.router.invoke(prompt, temperature=0.1)
+            response = self.router.invoke(prompt, temperature=0.1, priority="low")
             lesson = str(response.content).strip()
             
             # Save the lesson

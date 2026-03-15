@@ -98,6 +98,7 @@ class LLMRouter:
         self.cost_tracker = LLMCostTracker()
         self._key_lock = threading.Lock()  # Thread-safe key rotation
         self._provider_map = {}  # id(model) → provider name for cost tracking
+        self._model_by_name: Dict[str, Any] = {}  # model_name → model object (for priority routing)
 
         # 1. Primary Models (Provider-Internal Failover): Gemini
         # We handle multiple API keys dynamically.
@@ -152,23 +153,33 @@ class LLMRouter:
         self.fallback_1 = None  # Keep for backward compat checks
         if self.groq_key:
             groq_model_names = [
-                "llama-3.3-70b-versatile",       # 30 RPM, 1K RPD, smartest (70B)
-                "qwen/qwen3-32b",                # 60 RPM, 1K RPD (32B, strong reasoning)
-                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, 1K RPD (17B MoE)
-                "llama-3.1-8b-instant",         # 30 RPM, 14.4K RPD, fastest but smallest (8B)
+                # Tier A: Smartest (finance benchmark leaders)
+                "openai/gpt-oss-120b",              # AIME 96.6%, reasoning mode, 260-500 t/s
+                "llama-3.3-70b-versatile",          # 30 RPM, 1K RPD, solid workhorse
+                "qwen-qwq-32b",                     # Reasoning model, MATH 90.6%, 400 t/s
+                "deepseek-r1-distill-llama-70b",    # FinEval 91.52%, 42 t/s (slow but smart)
+                # Tier B: Mid-range
+                "qwen/qwen3-32b",                   # 60 RPM, dual-mode, 535 t/s
+                "deepseek-r1-distill-qwen-32b",     # Budget reasoning, 388 t/s
+                "moonshotai/kimi-k2-instruct",      # 1T MoE, 256K context
+                # Tier C: Fast/cheap
+                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, multimodal
+                "openai/gpt-oss-20b",              # 900-1000 t/s, fastest
+                "llama-3.1-8b-instant",            # 14.4K RPD, most free usage
             ]
             for m_name in groq_model_names:
-                self.groq_models.append(ChatGroq(
+                m = ChatGroq(
                     model=m_name,
                     api_key=self.groq_key,
                     temperature=self.temperature,
                     timeout=self.fallback_timeout,
                     max_retries=0
-                ))
+                )
+                self.groq_models.append(m)
+                self._provider_map[id(m)] = "groq"
+                self._model_by_name[m_name] = m
             self.fallback_1 = self.groq_models[0]  # backward compat
             logger.info(f"Loaded {len(self.groq_models)} Groq models: {groq_model_names}")
-            for m in self.groq_models:
-                self._provider_map[id(m)] = "groq"
 
         # 3. Cerebras (OpenAI-compatible, 30 RPM, 1M tokens/day, ultra-fast inference)
         # Ordered: smartest → dumbest. Cerebras free tier includes Qwen3-235B, GPT-OSS-120B, Llama 3.3-70B
@@ -191,6 +202,7 @@ class LLMRouter:
                 )
                 self.cerebras_models.append(m)
                 self._provider_map[id(m)] = "cerebras"
+                self._model_by_name[m_name] = m
             logger.info(f"Loaded {len(self.cerebras_models)} Cerebras models: {cerebras_model_names}")
 
         # 4. DeepSeek (OpenAI-compatible, 5M free tokens on signup)
@@ -209,6 +221,7 @@ class LLMRouter:
                 )
                 self.deepseek_models.append(m)
                 self._provider_map[id(m)] = "deepseek"
+                self._model_by_name[m_name] = m
             logger.info(f"Loaded {len(self.deepseek_models)} DeepSeek models: {deepseek_model_names}")
 
         # 5. SambaNova (OpenAI-compatible, 200K tokens/day free, Llama 405B access)
@@ -230,6 +243,7 @@ class LLMRouter:
                 )
                 self.sambanova_models.append(m)
                 self._provider_map[id(m)] = "sambanova"
+                self._model_by_name[m_name] = m
             logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models: {sambanova_model_names}")
 
         # 6. Mistral (OpenAI-compatible, 2 RPM experiment plan, 1B tokens/month)
@@ -252,6 +266,7 @@ class LLMRouter:
                 )
                 self.mistral_models.append(m)
                 self._provider_map[id(m)] = "mistral"
+                self._model_by_name[m_name] = m
             logger.info(f"Loaded {len(self.mistral_models)} Mistral models: {mistral_model_names}")
 
         # 7. OpenRouter (dynamic free models — ultimate fallback)
@@ -271,6 +286,7 @@ class LLMRouter:
                 )
                 self.openrouter_models.append(m)
                 self._provider_map[id(m)] = "openrouter"
+                self._model_by_name[m_name] = m
             if self.openrouter_models:
                 self.fallback_2 = self.openrouter_models[0]  # backward compat
             logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter free models: {openrouter_model_names}")
@@ -280,7 +296,7 @@ class LLMRouter:
         """Discover available Gemini chat models from API. Cached for 10 minutes."""
         FALLBACK_MODELS = [
             "models/gemini-2.5-flash",
-            "models/gemini-2.0-flash",
+            "models/gemini-2.5-flash-lite-preview-06-17",
         ]
 
         # Return cached result if fresh
@@ -339,6 +355,8 @@ class LLMRouter:
                         continue
                     # Skip dead/shutdown models
                     if short == "gemini-3-pro-preview":  # Shut down March 9, 2026
+                        continue
+                    if short.startswith("gemini-2.0-"):  # Deprecated June 1, 2026
                         continue
                     deduped.append(name)
                 discovered = deduped
@@ -418,9 +436,112 @@ class LLMRouter:
             logger.warning(f"OpenRouter model discovery failed: {e}. Using fallback list.")
             return FALLBACK_MODELS
 
-    def _get_chain(self) -> List[Any]:
-        """Constructs and returns the active LangChain fallbacks without rate-limited keys/models."""
-        chain = []
+    # Provider ordering per priority level — ALL models always included, only ORDER changes
+    _PROVIDER_ORDER = {
+        "critical": [
+            # Finance reasoning accuracy: Cerebras Qwen3-235B (PRBench 39.14) → GPT-OSS-120B (AIME 96.6)
+            # → DeepSeek V3.2 (live +4.9%) → Groq reasoning → rest
+            ("cerebras", None),
+            ("groq", ["openai/gpt-oss-120b", "qwen-qwq-32b", "deepseek-r1-distill-llama-70b",
+                      "llama-3.3-70b-versatile", "qwen/qwen3-32b", "deepseek-r1-distill-qwen-32b",
+                      "moonshotai/kimi-k2-instruct", "meta-llama/llama-4-scout-17b-16e-instruct",
+                      "openai/gpt-oss-20b", "llama-3.1-8b-instant"]),
+            ("deepseek", None),
+            ("mistral", None),
+            ("sambanova", None),
+            ("openrouter", None),
+        ],
+        "high": [
+            # Gemini already at front (added by caller), then smart models
+            ("groq", ["openai/gpt-oss-120b", "qwen-qwq-32b", "llama-3.3-70b-versatile",
+                      "qwen/qwen3-32b", "deepseek-r1-distill-qwen-32b",
+                      "moonshotai/kimi-k2-instruct", "deepseek-r1-distill-llama-70b",
+                      "meta-llama/llama-4-scout-17b-16e-instruct",
+                      "openai/gpt-oss-20b", "llama-3.1-8b-instant"]),
+            ("cerebras", None),
+            ("deepseek", None),
+            ("mistral", None),
+            ("sambanova", None),
+            ("openrouter", None),
+        ],
+        "medium": [
+            # Speed + quality balance: fast models first
+            ("groq", ["openai/gpt-oss-20b", "qwen/qwen3-32b", "llama-3.1-8b-instant",
+                      "openai/gpt-oss-120b", "qwen-qwq-32b", "llama-3.3-70b-versatile",
+                      "deepseek-r1-distill-qwen-32b", "moonshotai/kimi-k2-instruct",
+                      "meta-llama/llama-4-scout-17b-16e-instruct",
+                      "deepseek-r1-distill-llama-70b"]),
+            ("cerebras", None),
+            ("deepseek", None),
+            ("sambanova", None),
+            ("mistral", None),
+            ("openrouter", None),
+        ],
+        "low": [
+            # Cheapest/fastest first: throughput kings
+            ("groq", ["llama-3.1-8b-instant", "openai/gpt-oss-20b",
+                      "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct",
+                      "deepseek-r1-distill-qwen-32b", "llama-3.3-70b-versatile",
+                      "openai/gpt-oss-120b", "qwen-qwq-32b",
+                      "moonshotai/kimi-k2-instruct", "deepseek-r1-distill-llama-70b"]),
+            ("cerebras", ["llama3.1-8b", "llama3.3-70b", "qwen3-235b-a22b"]),
+            ("sambanova", ["Meta-Llama-3.1-8B-Instruct", "Meta-Llama-3.3-70B-Instruct"]),
+            ("deepseek", None),
+            ("mistral", ["mistral-small-latest", "mistral-large-latest"]),
+            ("openrouter", None),
+        ],
+    }
+
+    def _build_priority_chain(self, priority: str) -> List[Any]:
+        """Build non-Gemini chain ordered by priority. INVARIANT: all models always included."""
+        order = self._PROVIDER_ORDER.get(priority, self._PROVIDER_ORDER["high"])
+        chain: List[Any] = []
+        seen: set = set()
+
+        provider_lists = {
+            "groq": self.groq_models,
+            "cerebras": self.cerebras_models,
+            "deepseek": self.deepseek_models,
+            "mistral": self.mistral_models,
+            "sambanova": self.sambanova_models,
+            "openrouter": self.openrouter_models,
+        }
+
+        for provider_name, model_order in order:
+            models = provider_lists.get(provider_name, [])
+            if model_order is None:
+                # All models in their default order
+                for m in models:
+                    if id(m) not in seen:
+                        chain.append(m)
+                        seen.add(id(m))
+            else:
+                # Specific order from priority config
+                for m_name in model_order:
+                    m = self._model_by_name.get(m_name)
+                    if m is not None and id(m) not in seen:
+                        chain.append(m)
+                        seen.add(id(m))
+
+        # INVARIANT: append any remaining models not yet in chain (dynamic discovery, etc.)
+        all_non_gemini = (self.deepseek_models + self.mistral_models +
+                          self.cerebras_models + self.groq_models +
+                          self.sambanova_models + self.openrouter_models)
+        for m in all_non_gemini:
+            if id(m) not in seen:
+                chain.append(m)
+                seen.add(id(m))
+
+        return chain
+
+    def _get_chain(self, priority: Optional[str] = None) -> List[Any]:
+        """Constructs and returns the active LangChain fallbacks without rate-limited keys/models.
+
+        Args:
+            priority: Route priority ("critical", "high", "medium", "low") or None for default.
+        """
+        chain: List[Any] = []
+        gemini_chain: List[Any] = []
         current_time = time.time()
 
         # Circuit breaker: if Gemini is globally down, skip ALL Gemini models entirely
@@ -443,21 +564,34 @@ class LLMRouter:
                 # Filter out individually penalized models — don't add dead weight to chain
                 active_models = [m for m in self.gemini_models_by_key[key]
                                  if not self._is_model_penalized(m)]
-                chain.extend(active_models)
+                gemini_chain.extend(active_models)
 
         elif gemini_circuit_open:
             remaining = _GEMINI_CIRCUIT_OPEN_UNTIL - current_time
             logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
                         f"Closes in {remaining:.0f}s.")
 
-        # Fallback chain: ordered by model intelligence for best trade signal quality
-        # DeepSeek V3.2 (685B MoE) → Mistral Large → Cerebras (Qwen3-235B+) → Groq (70B+) → SambaNova → OpenRouter
-        chain.extend(self.deepseek_models)
-        chain.extend(self.mistral_models)
-        chain.extend(self.cerebras_models)
-        chain.extend(self.groq_models)
-        chain.extend(self.sambanova_models)
-        chain.extend(self.openrouter_models)
+        # Build non-Gemini chain based on priority
+        if priority is None:
+            # Backward compat: original ordering
+            non_gemini = (self.deepseek_models + self.mistral_models +
+                          self.cerebras_models + self.groq_models +
+                          self.sambanova_models + self.openrouter_models)
+        else:
+            non_gemini = self._build_priority_chain(priority)
+
+        # Gemini placement depends on priority
+        if priority == "critical":
+            # CRITICAL: Smartest non-Gemini first, Gemini in middle
+            # Finance benchmarks: Cerebras Qwen3-235B and GPT-OSS-120B beat Gemini Flash
+            gemini_reversed = list(reversed(gemini_chain))  # pro first if available
+            chain = non_gemini[:3] + gemini_reversed + non_gemini[3:]
+        elif priority == "low":
+            # LOW: Fastest/cheapest first, Gemini after initial fast models
+            chain = non_gemini[:5] + gemini_chain + non_gemini[5:]
+        else:
+            # HIGH, MEDIUM, None: Gemini first (fastest, most reliable JSON)
+            chain = gemini_chain + non_gemini
 
         if not chain:
             raise ValueError("All API keys are exhausted or unavailable.")
@@ -544,16 +678,17 @@ class LLMRouter:
                                f"Key penalized for {duration}s.")
 
     def invoke(self, messages: List[Any], temperature: Optional[float] = None,
-              max_wall_time: float = 90.0, **kwargs):
+              max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
         """Synchronously invokes the custom failover loop with Cooldown tracking.
 
         Args:
             temperature: Optional per-call temperature override. Uses model.bind()
                          which creates a lightweight wrapper (no new connections).
             max_wall_time: Maximum total seconds for the entire failover chain (default 90s).
+            priority: Route priority ("critical", "high", "medium", "low") or None for default.
         """
         global _GEMINI_CIRCUIT_OPEN_UNTIL
-        chain = self._get_chain()
+        chain = self._get_chain(priority=priority)
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
         wall_start = time.time()
@@ -607,7 +742,7 @@ class LLMRouter:
 
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
                 provider = self._provider_map.get(id(model), "unknown")
-                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
+                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok, provider)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
                 # Success — reset circuit breaker if Gemini recovered
@@ -652,10 +787,10 @@ class LLMRouter:
         raise ValueError("No fallbacks available.")
 
     async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None,
-                      max_wall_time: float = 90.0, **kwargs):
+                      max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
         """Asynchronously invokes the custom failover loop with Cooldown tracking."""
         global _GEMINI_CIRCUIT_OPEN_UNTIL
-        chain = self._get_chain()
+        chain = self._get_chain(priority=priority)
         last_exception: Optional[Exception] = None
         gemini_consecutive_fails = 0
         wall_start = time.time()
@@ -706,7 +841,7 @@ class LLMRouter:
 
                 m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
                 provider = self._provider_map.get(id(model), "unknown")
-                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok)
+                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok, provider)
                 self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
 
                 # Success — reset circuit breaker if Gemini recovered

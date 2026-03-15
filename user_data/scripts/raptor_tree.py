@@ -110,7 +110,7 @@ Texts:
 
 Provide only the summary text without any preamble.
 """
-        response = self.router.invoke([HumanMessage(content=prompt)])
+        response = self.router.invoke([HumanMessage(content=prompt)], priority="low")
         return str(response.content).strip()
 
     def _persist_tree(self, nodes: List[Dict[str, Any]], level: int):
@@ -145,7 +145,7 @@ Are you asking about a specific metric/event (Leaf), a sector/asset theme (Clust
 Question: "{question}"
 Reply exactly with one word: LEAF, CLUSTER, or META.
 """
-        response = self.router.invoke([HumanMessage(content=abstraction_prompt)])
+        response = self.router.invoke([HumanMessage(content=abstraction_prompt)], priority="low")
         classifier = str(response.content).strip().upper()
         
         if "META" in classifier:

@@ -92,7 +92,7 @@ COMPRESSION RULES:
             response = self.router.invoke([
                 SystemMessage(content="You are a Global Memory Compressor for a crypto trading system. Maintain a concise, accurate, timestamped summary of market state. Prioritize actionable information over narrative. NEVER fabricate data — only compress what's provided."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="low")
             
             content_raw = response.content
             if isinstance(content_raw, list):
@@ -142,7 +142,7 @@ RULES:
             response = self.router.invoke([
                 SystemMessage(content="You generate keyword-dense draft answers for retrieval augmentation. Use ONLY the provided global memory — NEVER fabricate data. If memory lacks relevant info, return the original query."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="low")
             
             content_raw = response.content
             if isinstance(content_raw, list):

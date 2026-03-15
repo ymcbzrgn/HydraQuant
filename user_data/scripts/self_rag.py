@@ -81,7 +81,7 @@ Output EXACTLY a valid JSON object:
             critique_response = self.router.invoke([
                 SystemMessage(content="You are a strict RAG quality evaluator. Your ENTIRE response must be a single valid JSON object. No text before or after."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="medium")
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)
 
             if not str(critique_str).strip():

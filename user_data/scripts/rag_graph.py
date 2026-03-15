@@ -665,7 +665,7 @@ End with: TECHNICAL LEAN: BULLISH / BEARISH / NEUTRAL.
 NEVER provide a final trading signal. ONLY your technical perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content=TECH_SYSTEM), HumanMessage(content=prompt)])
+        response = llm.invoke([SystemMessage(content=TECH_SYSTEM), HumanMessage(content=prompt)], priority="high")
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -764,7 +764,7 @@ End with: SENTIMENT LEAN: BULLISH / BEARISH / NEUTRAL
 NEVER provide a final trading signal. ONLY your sentiment perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content=SENT_SYSTEM), HumanMessage(content=prompt)], temperature=0.4)
+        response = llm.invoke([SystemMessage(content=SENT_SYSTEM), HumanMessage(content=prompt)], temperature=0.4, priority="medium")
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -858,7 +858,7 @@ End with: FUNDAMENTAL LEAN: BULLISH / BEARISH / NEUTRAL
 Focus only on news impact. NEVER provide a final trading signal."""
 
     try:
-        response = llm.invoke([SystemMessage(content=NEWS_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=NEWS_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="medium")
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -937,7 +937,7 @@ SECTION D — ANTI-CONFIRMATION CHECK:
 - INVALIDATION: Specific price or event that kills the bull case"""
 
     try:
-        response = llm.invoke([SystemMessage(content=BULL_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=BULL_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="high")
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1016,7 +1016,7 @@ SECTION D — TAIL RISK CHECK:
 - INVALIDATION: Specific price or event that kills the bear case"""
 
     try:
-        response = llm.invoke([SystemMessage(content=BEAR_SYSTEM), HumanMessage(content=prompt)], temperature=0.3)
+        response = llm.invoke([SystemMessage(content=BEAR_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="high")
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1246,7 +1246,7 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
     # Tier 1: Primary LLM call (temperature=0.7)
     parsed = None
     try:
-        response = llm.invoke(coordinator_msgs, temperature=0.7)
+        response = llm.invoke(coordinator_msgs, temperature=0.7, priority="critical")
         parsed = _parse_coordinator_response(response.content)
     except Exception as e:
         logger.error(f"[NODE] Coordinator primary LLM failed: {type(e).__name__}: {e}")
@@ -1264,7 +1264,7 @@ RULES:
 4. Signal must be exactly one of: "BULLISH", "BEARISH", "NEUTRAL"."""),
                 HumanMessage(content=prompt + "\n\nRESPOND WITH ONLY THE JSON OBJECT. Example format:\n{\"signal\":\"NEUTRAL\",\"confidence\":0.52,\"reasoning\":\"Mixed signals across agents.\"}")
             ]
-            response = llm.invoke(strict_msgs, temperature=0.3)
+            response = llm.invoke(strict_msgs, temperature=0.3, priority="critical")
             parsed = _parse_coordinator_response(response.content)
         except Exception as e:
             logger.error(f"[NODE] Coordinator retry also failed: {type(e).__name__}: {e}")

@@ -45,7 +45,7 @@ class SpeculativeRAG:
         # 2. Divide docs into subsets
         if not all_evidence:
             logger.warning("[SpeculativeRAG] No evidence found. Returning generic fallback.")
-            fallback = self.router.invoke([HumanMessage(content=query)])
+            fallback = self.router.invoke([HumanMessage(content=query)], priority="low")
             return {
                 "best_draft": str(fallback.content).strip(),
                 "best_draft_index": 0,
@@ -97,7 +97,7 @@ class SpeculativeRAG:
             response = self.router.invoke([
                 SystemMessage(content="You generate evidence-grounded analytical drafts. ONLY cite information present in the provided evidence. NEVER fabricate data."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="low")
             draft = str(response.content).strip()
             return draft
         except Exception as e:
@@ -126,7 +126,7 @@ class SpeculativeRAG:
             response = self.router.invoke([
                 SystemMessage(content="You are a strict verification judge. Evaluate ONLY factual alignment with evidence. The draft with the most evidence-backed claims wins."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="low")
             verification_text = str(response.content).strip()
 
             # Parse index with multi-tier extraction

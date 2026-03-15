@@ -96,7 +96,7 @@ class AdaptiveQueryRouter:
                 SystemMessage(content=CLASSIFY_SYSTEM_PROMPT),
                 HumanMessage(content=f"Query: {query}")
             ]
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             raw = str(response.content).strip().upper()
 
             # Tier 1: Exact match (LLM returned just the word)
