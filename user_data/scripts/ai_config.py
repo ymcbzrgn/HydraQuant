@@ -10,6 +10,9 @@ AI_DB_PATH = os.environ.get(
     os.path.join(BASE_DIR, "db", "ai_data.sqlite")
 )
 
+# Model Server (BGE, ColBERT, FlashRank served via HTTP)
+MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://127.0.0.1:8895")
+
 # ChromaDB Persist Directory for Embeddings
 CHROMA_PERSIST_DIR = os.environ.get(
     "CHROMA_PERSIST_DIR",

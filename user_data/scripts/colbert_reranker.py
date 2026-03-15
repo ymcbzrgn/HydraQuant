@@ -1,93 +1,78 @@
-import torch
 import logging
+import time
+import httpx
 from typing import List, Dict
-from transformers import AutoTokenizer, AutoModel
+
+from ai_config import MODEL_SERVER_URL
 
 logger = logging.getLogger(__name__)
 
+
 class ColBERTReranker:
-    """ColBERTv2 Late Interaction Reranker. Evaluates fine-grained token-level match scores."""
-    # Class-level singleton: model loaded ONCE, shared across all instances
-    _tokenizer = None
-    _model = None
+    """ColBERTv2 Late Interaction Reranker via model server HTTP.
+    Replaces in-process torch/transformers loading with HTTP calls to
+    the centralized model server at MODEL_SERVER_URL/rerank/colbert.
+    """
+    _http_client = None
+    _last_fail = 0.0
+    _COOLDOWN_SECS = 60  # skip calls for 60s after failure
 
-    def __init__(self, model_name="jinaai/jina-colbert-v2"):
-        if ColBERTReranker._model is None:
-            logger.info(f"Loading ColBERT locally: {model_name} (CPU mode, one-time)")
-            # trust_remote_code=True is required for jina-colbert (both tokenizer and model)
-            ColBERTReranker._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            ColBERTReranker._model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-            ColBERTReranker._model.eval()
-        self.tokenizer = ColBERTReranker._tokenizer
-        self.model = ColBERTReranker._model
-
-    def _get_embeddings(self, text: str) -> torch.Tensor:
-        inputs = self.tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            # Embedding outputs for query and document tokens
-            return outputs.last_hidden_state[0]
-
-    def _max_sim_score(self, query_embs: torch.Tensor, doc_embs: torch.Tensor) -> float:
-        """
-        Compute MaxSim between query tokens and document tokens.
-        """
-        # Normalize to allow dot product as cosine similarity
-        q_norm = torch.nn.functional.normalize(query_embs, p=2, dim=1)
-        d_norm = torch.nn.functional.normalize(doc_embs, p=2, dim=1)
-        
-        # Sim matrix shape: (query_len, doc_len)
-        sim_matrix = torch.matmul(q_norm, d_norm.T)
-        
-        # Max over doc tokens: shape (query_len,)
-        max_sims = torch.max(sim_matrix, dim=1).values
-        
-        # Sum of max similarities across query tokens
-        return float(torch.sum(max_sims))
+    def __init__(self):
+        if ColBERTReranker._http_client is None:
+            ColBERTReranker._http_client = httpx.Client(timeout=10)
+            logger.info(f"[ColBERT] HTTP client initialized → {MODEL_SERVER_URL}/rerank/colbert")
 
     def rerank(self, query: str, documents: List[Dict], top_k: int = 5) -> List[Dict]:
-        """Token-level late interaction scoring."""
+        """Token-level late interaction scoring via model server."""
         if not documents:
             return []
-            
-        try:
-            query_embs = self._get_embeddings(query)
-        except Exception as e:
-            logger.error(f"Failed to encode query in ColBERT: {e}")
+
+        # Circuit breaker: skip if server failed recently
+        now = time.time()
+        if now - ColBERTReranker._last_fail < self._COOLDOWN_SECS:
             return documents[:top_k]
-            
-        scored_docs = []
+
+        # Extract text from document dicts
+        doc_texts = []
         for doc in documents:
-            text = doc.get("content", doc.get("text", ""))
-            if not text:
-                scored_docs.append(doc)
-                continue
-                
-            try:
-                doc_embs = self._get_embeddings(text)
-                score = self._max_sim_score(query_embs, doc_embs)
-                
-                scored_doc = doc.copy()
-                scored_doc["colbert_score"] = score
-                scored_docs.append(scored_doc)
-            except Exception as e:
-                logger.error(f"Failed to score doc in ColBERT: {e}")
-                scored_docs.append(doc)
-                
-        # Filter and normalize scores
-        scored_docs.sort(key=lambda x: x.get("colbert_score", 0.0), reverse=True)
-        top_docs = scored_docs[:top_k]
-        
-        # Normalize colbert scores between 0 and 1 for ensemble purposes
-        if top_docs:
-            max_score = max(doc.get("colbert_score", 0.0) for doc in top_docs)
-            min_score = min(doc.get("colbert_score", 0.0) for doc in top_docs)
-            range_score = max_score - min_score if max_score > min_score else 1.0
-            
-            for doc in top_docs:
-                if "colbert_score" in doc:
-                    doc["colbert_normalized"] = (doc["colbert_score"] - min_score) / range_score
-                else:
-                    doc["colbert_normalized"] = 0.0
-                    
-        return top_docs
+            text = doc.get("text", doc.get("content", ""))
+            doc_texts.append(text if text else "")
+
+        try:
+            resp = self._http_client.post(
+                f"{MODEL_SERVER_URL}/rerank/colbert",
+                json={"query": query, "documents": doc_texts, "top_k": top_k}
+            )
+            resp.raise_for_status()
+            server_results = resp.json().get("results", [])
+
+            if not server_results:
+                return documents[:top_k]
+
+            # Map server scores back to original document dicts
+            scored_docs = []
+            for sr in server_results:
+                idx = sr.get("index", 0)
+                if 0 <= idx < len(documents):
+                    scored_doc = documents[idx].copy()
+                    scored_doc["colbert_score"] = sr.get("score", 0.0)
+                    scored_docs.append(scored_doc)
+
+            # Normalize colbert scores between 0 and 1 for ensemble purposes
+            if scored_docs:
+                max_score = max(doc.get("colbert_score", 0.0) for doc in scored_docs)
+                min_score = min(doc.get("colbert_score", 0.0) for doc in scored_docs)
+                range_score = max_score - min_score if max_score > min_score else 1.0
+
+                for doc in scored_docs:
+                    if "colbert_score" in doc:
+                        doc["colbert_normalized"] = (doc["colbert_score"] - min_score) / range_score
+                    else:
+                        doc["colbert_normalized"] = 0.0
+
+            return scored_docs
+
+        except Exception as e:
+            ColBERTReranker._last_fail = now
+            logger.warning(f"[ColBERT] Server call failed: {e}. Returning original order.")
+            return documents[:top_k]
