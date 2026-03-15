@@ -61,7 +61,7 @@ class HyDEGenerator:
         ]
 
         try:
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             hypothetical = str(response.content).strip()
             logger.info(f"[HyDE] Generated hypothetical ({len(hypothetical)} chars) for: '{query[:50]}'")
             return hypothetical

@@ -64,7 +64,7 @@ class RAGFusion:
         ]
 
         try:
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             raw = str(response.content).strip()
             queries = [q.strip() for q in raw.split('\n') if q.strip()]
 

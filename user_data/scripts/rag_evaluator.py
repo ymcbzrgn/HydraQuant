@@ -145,7 +145,7 @@ class RAGQualityEvaluator:
             HumanMessage(content=prompt)
         ]
         try:
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             text = str(response.content).strip()
             if not text:
                 logger.warning("[RAGAS] Empty LLM response. Returning default score.")

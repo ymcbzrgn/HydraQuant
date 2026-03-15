@@ -117,7 +117,7 @@ No markdown, no backticks, ONLY raw JSON array."""
                 HumanMessage(content=f"Score these {len(texts)} articles:\n{numbered}")
             ]
 
-            response = router.invoke(messages)
+            response = router.invoke(messages, priority="medium")
             content = str(response.content).strip()
 
             scores = extract_json_array(content)

@@ -108,7 +108,7 @@ class ErrorCategorizer:
         try:
             logger.info(f"Pinging LLM to categorize loss on {trade['pair']} (ID: {trade['id']})...")
             # Invoke the Round-Robin failover architecture constructed in Phase 5.3
-            response = self.router.invoke(messages)
+            response = self.router.invoke(messages, priority="low")
             # Handle LangChain output formatting differences (List vs String)
             content = response.content
             if isinstance(content, list):

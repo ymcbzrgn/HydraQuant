@@ -505,7 +505,7 @@ def test_hyde_generates_hypothetical():
 
     # Test with a mock router that returns a fixed response
     class MockRouter:
-        def invoke(self, messages):
+        def invoke(self, messages, **kwargs):
             class Response:
                 content = "BTC is currently trading at 98K with RSI at 65. Support at 95K, resistance at 100K."
             return Response()
@@ -527,7 +527,7 @@ def test_rag_fusion_multi_query():
     fusion = RAGFusion.__new__(RAGFusion)
 
     class MockRouter:
-        def invoke(self, messages):
+        def invoke(self, messages, **kwargs):
             class Response:
                 content = "BTC teknik analiz RSI MACD\nBitcoin son haberler sentiment\nBTC whale hareketleri on-chain"
             return Response()

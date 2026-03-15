@@ -134,7 +134,7 @@ class CoTRAG:
             response = self.router.invoke([
                 SystemMessage(content=f"You are a specialized crypto analyst executing the '{label}' step of a structured reasoning chain. Be precise, cite data, and never hallucinate."),
                 HumanMessage(content=prompt)
-            ])
+            ], priority="medium")
             analysis = str(response.content).strip()
         except Exception as e:
             logger.error(f"[CoT-RAG] LLM Execution failed for '{label}': {e}")

@@ -31,7 +31,7 @@ class FLARERetriever:
         ]
         
         try:
-            initial_response = self.router.invoke(messages)
+            initial_response = self.router.invoke(messages, priority="medium")
             initial_text = str(initial_response.content).strip()
         except Exception as e:
             logger.error(f"[FLARE] Initial generation failed: {e}")
@@ -67,7 +67,7 @@ class FLARERetriever:
                     f"Only return the rewritten sentence.\n\nSentence to rewrite: {sentence}"
                 )
                 try:
-                    regen_response = self.router.invoke([HumanMessage(content=regen_prompt)])
+                    regen_response = self.router.invoke([HumanMessage(content=regen_prompt)], priority="medium")
                     regenerated_sentence = str(regen_response.content).strip()
                     final_sentences.append(regenerated_sentence)
                 except Exception as e:
@@ -106,7 +106,7 @@ class FLARERetriever:
         )
         
         try:
-            response = self.router.invoke([HumanMessage(content=prompt)])
+            response = self.router.invoke([HumanMessage(content=prompt)], priority="medium")
             score_text = str(response.content).strip().lower()
 
             # Tier 1: Direct float extraction (LLM returned "0.7" or "Score: 0.3")
