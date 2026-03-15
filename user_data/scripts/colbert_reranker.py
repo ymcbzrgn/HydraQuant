@@ -19,7 +19,7 @@ class ColBERTReranker:
 
     def __init__(self):
         if ColBERTReranker._http_client is None:
-            ColBERTReranker._http_client = httpx.Client(timeout=10)
+            ColBERTReranker._http_client = httpx.Client(timeout=30)
             logger.info(f"[ColBERT] HTTP client initialized → {MODEL_SERVER_URL}/rerank/colbert")
 
     def rerank(self, query: str, documents: List[Dict], top_k: int = 5) -> List[Dict]:
