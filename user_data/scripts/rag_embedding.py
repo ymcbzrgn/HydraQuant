@@ -90,7 +90,7 @@ class DualEmbeddingPipeline:
 
         # BGE via model server HTTP (one-time health check at first init)
         if DualEmbeddingPipeline._http_client is None:
-            DualEmbeddingPipeline._http_client = httpx.Client(timeout=10)
+            DualEmbeddingPipeline._http_client = httpx.Client(timeout=30)
 
         if not DualEmbeddingPipeline._bge_server_checked:
             DualEmbeddingPipeline._bge_server_checked = True
