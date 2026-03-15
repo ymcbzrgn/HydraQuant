@@ -7,8 +7,21 @@ import time
 import threading
 import numpy as np
 from dotenv import load_dotenv
-from google import genai
-from sentence_transformers import SentenceTransformer
+
+# --- Resilient imports: embedding works even if one backend is missing ---
+_GENAI_AVAILABLE = False
+try:
+    from google import genai
+    _GENAI_AVAILABLE = True
+except ImportError as _e:
+    logging.getLogger(__name__).warning(f"[Embedding] google.genai unavailable: {_e}. Gemini embedding disabled — using BGE local only.")
+
+_ST_AVAILABLE = False
+try:
+    from sentence_transformers import SentenceTransformer
+    _ST_AVAILABLE = True
+except ImportError as _e:
+    logging.getLogger(__name__).warning(f"[Embedding] sentence_transformers unavailable: {_e}. BGE local model disabled — using Gemini API only.")
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -56,11 +69,11 @@ class DualEmbeddingPipeline:
 
     def __init__(self):
         all_keys = _load_all_gemini_keys()
-        if not all_keys:
-            logger.warning("[Embedding] No Gemini API keys found. Will use BGE-only mode.")
 
         # Create genai clients for all keys (singleton, shared across instances)
-        if DualEmbeddingPipeline._genai_clients is None:
+        if _GENAI_AVAILABLE and DualEmbeddingPipeline._genai_clients is None:
+            if not all_keys:
+                logger.warning("[Embedding] No Gemini API keys found. Will use BGE-only mode.")
             DualEmbeddingPipeline._genai_clients = []
             for key in all_keys:
                 try:
@@ -69,12 +82,32 @@ class DualEmbeddingPipeline:
                 except Exception as e:
                     logger.warning(f"[Embedding] Failed to create client for key ...{key[-6:]}: {e}")
             logger.info(f"[Embedding] Initialized {len(DualEmbeddingPipeline._genai_clients)} Gemini embedding clients")
+        elif not _GENAI_AVAILABLE:
+            if DualEmbeddingPipeline._genai_clients is None:
+                DualEmbeddingPipeline._genai_clients = []
+            logger.info("[Embedding] Gemini SDK unavailable — skipping API embedding init.")
 
-        # BGE-Financial local model (always available)
-        if DualEmbeddingPipeline._bge_model is None:
-            logger.info("Loading local BGE-Financial embedding model (one-time)...")
+        # BGE-Financial local model (load if sentence_transformers is available)
+        if _ST_AVAILABLE and DualEmbeddingPipeline._bge_model is None:
+            logger.info("Loading local BGE-Financial embedding model (one-time, CPU)...")
             DualEmbeddingPipeline._bge_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
+            logger.info("[Embedding] BGE-Financial loaded successfully.")
+        elif not _ST_AVAILABLE and DualEmbeddingPipeline._bge_model is None:
+            logger.warning("[Embedding] sentence_transformers unavailable — BGE local model disabled.")
+
         self.local_model = DualEmbeddingPipeline._bge_model
+
+        # Log active mode
+        has_gemini = bool(DualEmbeddingPipeline._genai_clients)
+        has_bge = self.local_model is not None
+        if has_gemini and has_bge:
+            logger.info("[Embedding] Mode: DUAL (Gemini API + BGE local)")
+        elif has_gemini:
+            logger.info("[Embedding] Mode: GEMINI-ONLY (no local model)")
+        elif has_bge:
+            logger.info("[Embedding] Mode: BGE-ONLY (no API)")
+        else:
+            logger.error("[Embedding] Mode: NONE — no embedding backend available!")
 
     def _get_db_connection(self):
         conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -113,6 +146,8 @@ class DualEmbeddingPipeline:
 
     def _gemini_embed(self, text: str):
         """Try all keys × all models. Returns embedding list or None."""
+        if not _GENAI_AVAILABLE:
+            return None
         clients = DualEmbeddingPipeline._genai_clients or []
         if not clients:
             return None
@@ -182,16 +217,29 @@ class DualEmbeddingPipeline:
         # 2. Generate Embeddings (Cache Miss)
         logger.debug("Cache miss. Generating Dual Embeddings...")
 
-        # BGE-Financial (always available, local)
-        bge_emb = self.local_model.encode(text, normalize_embeddings=True).tolist()
+        # BGE-Financial local model (if available)
+        bge_emb = None
+        if self.local_model is not None:
+            try:
+                bge_emb = self.local_model.encode(text, normalize_embeddings=True).tolist()
+            except Exception as e:
+                logger.error(f"[Embedding] BGE encode failed: {e}")
 
-        # Gemini (with key rotation + fallback)
-        gemini_emb = self._gemini_embed(text)
+        # Gemini API (with key rotation + fallback)
+        gemini_emb = None
+        if _GENAI_AVAILABLE:
+            gemini_emb = self._gemini_embed(text)
 
-        if gemini_emb is None:
-            # All Gemini keys exhausted → use BGE-only mode
-            logger.debug("[Embedding] All Gemini keys exhausted. Using BGE-only embedding.")
-            gemini_emb = bge_emb  # Use BGE as Gemini substitute
+        # Fallback logic: ensure both slots are filled
+        if gemini_emb is None and bge_emb is not None:
+            logger.debug("[Embedding] Gemini unavailable. Using BGE for both slots.")
+            gemini_emb = bge_emb
+        elif bge_emb is None and gemini_emb is not None:
+            logger.debug("[Embedding] BGE unavailable. Using Gemini for both slots.")
+            bge_emb = gemini_emb
+        elif gemini_emb is None and bge_emb is None:
+            logger.error("[Embedding] BOTH backends failed! Cannot generate embeddings.")
+            return {"gemini": [], "bge": [], "cached": False}
 
         # 3. Save to Cache
         try:

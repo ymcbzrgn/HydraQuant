@@ -170,19 +170,25 @@ class DataPipeline:
             
         # Push to Vector DB
         try:
+            embedded_count = 0
             if docs_to_insert:
-                self.retriever.add_documents(
+                embedded_count = self.retriever.add_documents(
                     documents=docs_to_insert,
                     metadatas=metadatas_to_insert,
                     ids=ids_to_insert
-                )
-                
-            # Flag as embedded in SQLite
-            if successful_db_ids:
+                ) or 0
+
+            # Flag as embedded ONLY if vectors were actually stored in ChromaDB.
+            # If only FTS5 was written (embedded_count=0), do NOT flag — next cycle
+            # will retry embedding when the embedder is available. FTS5 inserts are
+            # idempotent (DELETE + INSERT) so retries are safe.
+            if successful_db_ids and embedded_count > 0:
                 format_strings = ','.join(['?'] * len(successful_db_ids))
                 c.execute(f"UPDATE market_news SET is_embedded = 1 WHERE id IN ({format_strings})", tuple(successful_db_ids))
                 conn.commit()
-                logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles.")
+                logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles ({embedded_count} chunks to ChromaDB).")
+            elif successful_db_ids:
+                logger.warning(f"Added {len(docs_to_insert)} chunks to FTS5 only. NOT flagging is_embedded — will retry when embedder is available.")
                 
             # Phase 14: StreamingRAG Ingestion
             for metadata, content, d_id in zip(metadatas_to_insert, docs_to_insert, ids_to_insert):

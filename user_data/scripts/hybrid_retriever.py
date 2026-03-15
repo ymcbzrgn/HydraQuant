@@ -49,11 +49,13 @@ class HybridRetriever:
         if self.embedder is None:
             logger.error("[HybridRetriever] DualEmbeddingPipeline unavailable. Search will be degraded.")
         try:
-            from flashrank import Ranker
+            from flashrank import Ranker, RerankRequest
             self.reranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=os.path.join(VECTOR_DB_DIR, "flashrank_cache"))
+            self._RerankRequest = RerankRequest
         except ImportError:
             logger.warning("FlashRank not found, disabling FlashRank component.")
             self.reranker = None
+            self._RerankRequest = None
             
         try:
             from colbert_reranker import ColBERTReranker
@@ -75,73 +77,107 @@ class HybridRetriever:
         self.magma = MAGMAMemory()
         self.memorag = MemoRAG()
 
+    _db_tables_ensured = False
+
     def _get_db_connection(self):
         conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        
-        # Phase 10: Store binary BGE embeddings
-        conn.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
-            doc_id TEXT PRIMARY KEY,
-            packed_bge BLOB
-        )''')
+
+        # Create binary_embeddings table once per process, not every connection
+        if not HybridRetriever._db_tables_ensured:
+            conn.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
+                doc_id TEXT PRIMARY KEY,
+                packed_bge BLOB
+            )''')
+            HybridRetriever._db_tables_ensured = True
         return conn
 
-    def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
-        """Embeds and adds documents to BOTH ChromaDB collections (Gemini + BGE) and SQLite FTS5."""
-        if self.embedder is None:
-            logger.warning("[HybridRetriever] Embedder unavailable, cannot add documents.")
-            return
+    def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]) -> int:
+        """Embeds and adds documents to ChromaDB collections + SQLite FTS5.
+        Returns number of successfully embedded documents (0 = FTS5-only, no vectors)."""
+        embedded_count = 0
+
+        # --- Phase 1: Generate embeddings (if embedder available) ---
         gemini_embeddings = []
         bge_embeddings = []
-        for doc in documents:
-            embs = self.embedder.get_embeddings(doc)
-            gemini_embeddings.append(embs['gemini'])
-            bge_embeddings.append(embs['bge'])
-        
-        # Store Gemini vectors
-        self.collection.add(
-            ids=ids,
-            embeddings=gemini_embeddings,
-            documents=documents,
-            metadatas=metadatas
-        )
-        
-        # Store BGE vectors in parallel collection (Still stored as float just in case we need exact fallback)
-        self.bge_collection.add(
-            ids=ids,
-            embeddings=bge_embeddings,
-            documents=documents,
-            metadatas=metadatas
-        )
-        
-        # Add to FTS5 SQLite index and Binary BGE table
+        valid_indices = []  # Track which docs got valid embeddings
+
+        if self.embedder is not None:
+            for i, doc in enumerate(documents):
+                try:
+                    embs = self.embedder.get_embeddings(doc)
+                    g = embs.get('gemini', [])
+                    b = embs.get('bge', [])
+                    if g and b:  # Both must be non-empty for ChromaDB
+                        gemini_embeddings.append(g)
+                        bge_embeddings.append(b)
+                        valid_indices.append(i)
+                    else:
+                        logger.warning(f"[HybridRetriever] Empty embedding for doc {ids[i]}, skipping ChromaDB.")
+                except Exception as e:
+                    logger.warning(f"[HybridRetriever] Embedding failed for doc {ids[i]}: {e}")
+        else:
+            logger.warning("[HybridRetriever] Embedder unavailable — documents will be added to FTS5 only (keyword search).")
+
+        # --- Phase 2: Store vectors in ChromaDB (only valid embeddings) ---
+        if valid_indices:
+            valid_ids = [ids[i] for i in valid_indices]
+            valid_docs = [documents[i] for i in valid_indices]
+            valid_metas = [metadatas[i] for i in valid_indices]
+
+            try:
+                self.collection.add(
+                    ids=valid_ids,
+                    embeddings=gemini_embeddings,
+                    documents=valid_docs,
+                    metadatas=valid_metas
+                )
+                self.bge_collection.add(
+                    ids=valid_ids,
+                    embeddings=bge_embeddings,
+                    documents=valid_docs,
+                    metadatas=valid_metas
+                )
+                embedded_count = len(valid_indices)
+            except Exception as e:
+                logger.error(f"[HybridRetriever] ChromaDB add failed: {e}")
+
+        # --- Phase 3: ALWAYS add to FTS5 (no embeddings needed) + Binary BGE ---
+        # O(1) lookup for binary BGE phase
+        _valid_set = set(valid_indices)
+        _valid_pos = {orig_i: pos for pos, orig_i in enumerate(valid_indices)}
         try:
-            # Generate packed BGE representations for fast binary filtering
             packed_bges = None
-            if hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+            if valid_indices and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
                 import numpy as np
                 packed_bges = self.binary_quantizer.binarize_and_pack(np.array(bge_embeddings))
-                
+
             with self._get_db_connection() as conn:
                 cursor = conn.cursor()
                 for i, (doc_id, doc_text) in enumerate(zip(ids, documents)):
-                    # FTS5 doesn't natively support INSERT OR REPLACE gracefully without rowid,
-                    # so we delete the existing doc_id if it exists, then insert.
                     cursor.execute("DELETE FROM bm25_index WHERE doc_id = ?", (doc_id,))
                     cursor.execute(
-                        "INSERT INTO bm25_index (doc_id, content) VALUES (?, ?)", 
+                        "INSERT INTO bm25_index (doc_id, content) VALUES (?, ?)",
                         (doc_id, doc_text)
                     )
-                    
-                    if packed_bges is not None:
-                        # Store binary BGE BLOB
-                        cursor.execute("INSERT OR REPLACE INTO binary_embeddings (doc_id, packed_bge) VALUES (?, ?)", 
-                                       (doc_id, packed_bges[i].tobytes()))
+
+                    # Binary BGE only for docs that have valid embeddings
+                    if packed_bges is not None and i in _valid_set:
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO binary_embeddings (doc_id, packed_bge) VALUES (?, ?)",
+                            (doc_id, packed_bges[_valid_pos[i]].tobytes())
+                        )
                 conn.commit()
-            logger.info(f"Added {len(documents)} docs to Chroma DB & SQLite FTS5 including Binary BGE.")
+
+            if embedded_count > 0:
+                logger.info(f"Added {len(documents)} docs to FTS5 + {embedded_count} to ChromaDB.")
+            else:
+                logger.info(f"Added {len(documents)} docs to FTS5 only (keyword search). ChromaDB: 0 (embedder {'unavailable' if self.embedder is None else 'failed'}).")
         except Exception as e:
-            logger.error(f"Error adding to SQLite FTS5 BM25 or Binary BGE: {e}")
+            logger.error(f"Error adding to SQLite FTS5 / Binary BGE: {e}")
+
+        return embedded_count
 
     def reciprocal_rank_fusion(self, results_lists: List[List[str]], k=60) -> List[str]:
         """Calculates RRF score to combine multiple ranked lists."""
@@ -166,30 +202,49 @@ class HybridRetriever:
         5. RRF Fusion -> Top 20
         6. FlashRank + ColBERT -> Top K
         """
-        if self.embedder is None:
-            logger.warning("[HybridRetriever] Embedder unavailable, returning empty results.")
-            return []
         # Phase 15: Generate MemoRAG Global Draft Context
         original_query = query
         if self.memorag:
-            draft = self.memorag.generate_draft(query)
-            if draft and draft != query:
-                # Merge draft context for denser embedding vector extraction
-                query = f"{query} | Context Draft: {draft}"
-                logger.info("MemoRAG injected global draft into search query.")
-                
-        query_embs = self.embedder.get_embeddings(query)
-        
+            try:
+                draft = self.memorag.generate_draft(query)
+                if draft and draft != query:
+                    query = f"{query} | Context Draft: {draft}"
+                    logger.info("MemoRAG injected global draft into search query.")
+            except Exception as e:
+                logger.warning(f"MemoRAG draft failed: {e}")
+
+        query_embs = None
+        if self.embedder is not None:
+            try:
+                query_embs = self.embedder.get_embeddings(query)
+                # If embedder returned empty vectors, treat as unavailable
+                if query_embs and not query_embs.get("gemini"):
+                    query_embs = None
+            except Exception as e:
+                logger.error(f"[HybridRetriever] Embedding query failed: {e}")
+                query_embs = None
+
+        if query_embs is None:
+            logger.warning("[HybridRetriever] Embedder unavailable — falling back to BM25-only search.")
+
         # 1. Sparse Search (SQLite FTS5 BM25) - Widen the funnel
         bm25_top_ids = []
         try:
             with self._get_db_connection() as conn:
                 cursor = conn.cursor()
-                sanitized_query = original_query.replace('"', '').replace("'", "")
-                fts_query = f'"{sanitized_query}"'
-                
+                # Build OR query from individual terms for high recall.
+                # Rerankers downstream handle precision.
+                # Old: phrase match '"word1 word2 word3"' → required exact adjacent sequence → ~0 results
+                # New: 'word1 OR word2 OR word3' → matches any term → high recall
+                sanitized = original_query.replace('"', '').replace("'", "").replace("/", " ")
+                terms = [t for t in sanitized.split() if len(t) > 1 and t.isalnum()]
+                if terms:
+                    fts_query = " OR ".join(terms)
+                else:
+                    fts_query = sanitized.strip()
+
                 cursor.execute(
-                    "SELECT doc_id FROM bm25_index WHERE bm25_index MATCH ? ORDER BY rank LIMIT 300", 
+                    "SELECT doc_id FROM bm25_index WHERE bm25_index MATCH ? ORDER BY rank LIMIT 300",
                     (fts_query,)
                 )
                 rows = cursor.fetchall()
@@ -197,7 +252,7 @@ class HybridRetriever:
                 
                 # 2. Pre-filter BM25 results with Binary Quantization (BGE Hamming Distance)
                 # Instead of hitting Chroma with float BGE, we do an ultra-fast local binary filter
-                if bm25_top_ids and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+                if bm25_top_ids and query_embs and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
                     import numpy as np
                     q_bin = self.binary_quantizer.binarize_and_pack(np.array(query_embs['bge']))
                     placeholders = ",".join(["?"] * len(bm25_top_ids))
@@ -223,16 +278,17 @@ class HybridRetriever:
         except Exception as e:
             logger.error(f"SQLite FTS5 / Binary Search failed: {e}")
 
-        # 3. Dense Search — Gemini embeddings
+        # 3. Dense Search — Gemini embeddings (only if embedder available)
         dense_gemini_ids = []
-        
-        collection_count = self.collection.count()
-        if collection_count > 0:
-            dense_results = self.collection.query(
-                query_embeddings=[query_embs['gemini']],
-                n_results=min(30, collection_count)
-            )
-            dense_gemini_ids = dense_results['ids'][0] if dense_results['ids'] else []
+
+        if query_embs:
+            collection_count = self.collection.count()
+            if collection_count > 0:
+                dense_results = self.collection.query(
+                    query_embeddings=[query_embs['gemini']],
+                    n_results=min(30, collection_count)
+                )
+                dense_gemini_ids = dense_results['ids'][0] if dense_results['ids'] else []
 
         # (BGE float search is bypassed completely by the binary quantizer pre-filter above)
         dense_bge_ids = []
@@ -243,29 +299,55 @@ class HybridRetriever:
 
         # Fetch actual documents for generating reranking payloads
         passages = []
+        found_ids = set()
         if fused_top_20:
-            fetched = self.collection.get(ids=fused_top_20, include=["documents", "metadatas"])
-            if fetched and fetched['documents']:
-                for i, doc_id in enumerate(fetched['ids']):
-                    meta = fetched['metadatas'][i] if fetched['metadatas'] else {}
-                    child_text = fetched['documents'][i]
-                    
-                    # Parent-Child Retrieval: If this is a child chunk and we have the parent,
-                    # return the FULL parent text instead of just the 128-token child fragment.
-                    # This is the critical fix from EVALUATION.md lines 125-129.
-                    if meta.get('type') == 'news_child' and meta.get('parent_text'):
-                        display_text = meta['parent_text']
-                    else:
-                        display_text = child_text
-                    
-                    passages.append({
-                        "id": doc_id,
-                        "text": display_text,
-                        "meta": meta
-                    })
+            # Primary: fetch from ChromaDB (has metadata + parent text)
+            try:
+                fetched = self.collection.get(ids=fused_top_20, include=["documents", "metadatas"])
+                if fetched and fetched['documents']:
+                    for i, doc_id in enumerate(fetched['ids']):
+                        meta = fetched['metadatas'][i] if fetched['metadatas'] else {}
+                        child_text = fetched['documents'][i]
 
-        if not passages:
-            passages = []
+                        # Parent-Child Retrieval: return FULL parent text for child chunks
+                        if meta.get('type') == 'news_child' and meta.get('parent_text'):
+                            display_text = meta['parent_text']
+                        else:
+                            display_text = child_text
+
+                        passages.append({
+                            "id": doc_id,
+                            "text": display_text,
+                            "meta": meta
+                        })
+                        found_ids.add(doc_id)
+            except Exception as e:
+                logger.warning(f"[HybridRetriever] ChromaDB fetch failed: {e}")
+
+            # Fallback: fetch missing docs from FTS5 (for FTS5-only docs without embeddings)
+            missing_ids = [did for did in fused_top_20 if did not in found_ids]
+            if missing_ids:
+                try:
+                    count_before = len(found_ids)
+                    with self._get_db_connection() as conn:
+                        cursor = conn.cursor()
+                        placeholders = ",".join(["?"] * len(missing_ids))
+                        cursor.execute(
+                            f"SELECT doc_id, content FROM bm25_index WHERE doc_id IN ({placeholders})",
+                            missing_ids
+                        )
+                        for row in cursor.fetchall():
+                            passages.append({
+                                "id": row['doc_id'],
+                                "text": row['content'],
+                                "meta": {"source": "fts5_fallback"}
+                            })
+                            found_ids.add(row['doc_id'])
+                    recovered = len(found_ids) - count_before
+                    if recovered > 0:
+                        logger.info(f"[HybridRetriever] Recovered {recovered}/{len(missing_ids)} docs from FTS5 fallback.")
+                except Exception as e:
+                    logger.warning(f"[HybridRetriever] FTS5 text fallback failed: {e}")
 
         # Phase 14: StreamingRAG Integration (Boost recent hot memory)
         try:
@@ -317,8 +399,8 @@ class HybridRetriever:
 
         # 4. Multi-Reranker Ensemble
         flashrank_results = []
-        if self.reranker:
-            rerank_request = RerankRequest(query=query, passages=passages)
+        if self.reranker and self._RerankRequest:
+            rerank_request = self._RerankRequest(query=query, passages=passages)
             flashrank_results = self.reranker.rerank(rerank_request)
             if flashrank_results:
                 max_score = max(float(doc.get("score", 0.0)) for doc in flashrank_results)
