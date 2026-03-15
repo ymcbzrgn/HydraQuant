@@ -86,42 +86,69 @@ class AIFreqtradeSizer(IStrategy):
         self._telegram = AITelegramNotifier()
         self._last_portfolio_sync = None  # Track last sync time
 
-        logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget & Telegram.")
+        # Phase 18: Staggered batching — process 10 pairs per batch, 6 min apart
+        self._batch_queue = []          # Pairs waiting for fetch in current cycle
+        self._batch_index = 0           # Current position in queue
+        self._batch_size = 10           # Pairs per batch
+        self._batch_interval_secs = 360  # 6 minutes between batches
+        self._last_batch_time = 0       # Unix timestamp of last batch
+
+        logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget, Telegram & Staggered Batching.")
 
     def bot_loop_start(self, current_time, **kwargs):
         """
-        Pre-fetch AI signals for ALL pairs in parallel (5 workers).
-        Runs BEFORE analyze() → populate_entry_trend reads from cache (instant).
-        Total analysis drops from ~38min (sequential) to ~2-4min (parallel).
+        Phase 18: Staggered batch pre-fetch — 10 pairs per batch, 6 min apart.
+        100 pairs / 10 per batch = 10 batches × 6min = 60min full cycle.
+        Each batch: 10 pairs × 9 LLM calls = 90 calls → 15 calls/min → no rate limit issues.
         """
         if self.dp.runmode.value not in ('dry_run', 'live'):
             return
 
-        try:
-            pairs = self.dp.current_whitelist()
-        except Exception:
-            return
-        if not pairs:
-            return
-
-        # Find pairs that need fresh signals
-        pairs_to_fetch = []
-        for pair in pairs:
-            cached = self.ai_signal_cache.get(pair)
-            if cached:
-                time_diff = (current_time - cached['timestamp']).total_seconds() / 3600
-                ttl = self._neutral_ttl_hours if cached.get('signal') == 'NEUTRAL' else self.cache_ttl_hours
-                if time_diff < ttl:
-                    continue
-            pairs_to_fetch.append(pair)
-
-        if not pairs_to_fetch:
-            logger.info(f"[bot_loop_start] All {len(pairs)} pairs cached. Skipping pre-fetch.")
-            return
-
-        logger.warning(f"[bot_loop_start] Pre-fetching {len(pairs_to_fetch)}/{len(pairs)} signals in parallel...")
-
         import time as _time
+
+        # Throttle: only process one batch per interval
+        now = _time.time()
+        if (now - self._last_batch_time) < self._batch_interval_secs:
+            return  # Not time yet
+
+        # If queue empty, rebuild from pairs needing refresh
+        if not self._batch_queue:
+            try:
+                pairs = self.dp.current_whitelist()
+            except Exception:
+                return
+            if not pairs:
+                return
+
+            pairs_to_fetch = []
+            for pair in pairs:
+                cached = self.ai_signal_cache.get(pair)
+                if cached:
+                    time_diff = (current_time - cached['timestamp']).total_seconds() / 3600
+                    ttl = self._neutral_ttl_hours if cached.get('signal') == 'NEUTRAL' else self.cache_ttl_hours
+                    if time_diff < ttl:
+                        continue
+                pairs_to_fetch.append(pair)
+
+            if not pairs_to_fetch:
+                return
+
+            self._batch_queue = pairs_to_fetch
+            self._batch_index = 0
+            total_batches = (len(pairs_to_fetch) + self._batch_size - 1) // self._batch_size
+            logger.info(f"[bot_loop_start] New cycle: {len(pairs_to_fetch)} pairs in {total_batches} batches ({self._batch_size}/batch, {self._batch_interval_secs}s interval)")
+
+        # Slice current batch
+        current_batch = self._batch_queue[self._batch_index : self._batch_index + self._batch_size]
+        if not current_batch:
+            self._batch_queue = []
+            self._batch_index = 0
+            return
+
+        batch_num = (self._batch_index // self._batch_size) + 1
+        total_batches = (len(self._batch_queue) + self._batch_size - 1) // self._batch_size
+        logger.warning(f"[bot_loop_start] Batch {batch_num}/{total_batches}: fetching {len(current_batch)} pairs...")
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         t0 = _time.time()
@@ -163,7 +190,7 @@ class AIFreqtradeSizer(IStrategy):
 
         results = {}
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(fetch_one, p): p for p in pairs_to_fetch}
+            futures = {executor.submit(fetch_one, p): p for p in current_batch}
             for future in as_completed(futures):
                 try:
                     pair, signal = future.result(timeout=45)
@@ -178,8 +205,18 @@ class AIFreqtradeSizer(IStrategy):
             s = sig.get('signal', 'UNKNOWN')
             dist[s] = dist.get(s, 0) + 1
         logger.warning(
-            f"[bot_loop_start] Pre-fetched {len(results)}/{len(pairs_to_fetch)} in {elapsed:.1f}s | {dist}"
+            f"[bot_loop_start] Batch {batch_num}/{total_batches}: {len(results)} signals in {elapsed:.1f}s | {dist}"
         )
+
+        # Advance to next batch
+        self._batch_index += self._batch_size
+        self._last_batch_time = now
+
+        # If last batch, reset queue for next cycle
+        if self._batch_index >= len(self._batch_queue):
+            logger.info(f"[bot_loop_start] Cycle complete. All {len(self._batch_queue)} pairs processed.")
+            self._batch_queue = []
+            self._batch_index = 0
 
     def get_entry_signal(self, pair, timeframe, dataframe):
         """

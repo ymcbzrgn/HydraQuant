@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from db import get_db_connection
-from rag_embedding import DualEmbeddingPipeline
+try:
+    from rag_embedding import DualEmbeddingPipeline
+except ImportError as _imp_err:
+    import logging as _lg
+    _lg.getLogger(__name__).error(f"[IMPORT] DualEmbeddingPipeline failed: {_imp_err}. Embedding disabled.")
+    DualEmbeddingPipeline = None
 from rag_chunker import ContentChunker
 
 # Phase 14 & 15: StreamingRAG, RAPTOR, MAGMA
@@ -40,7 +45,9 @@ class HybridRetriever:
             name=f"{collection_name}_bge",
             metadata={"hnsw:space": "cosine"}
         )
-        self.embedder = DualEmbeddingPipeline()
+        self.embedder = DualEmbeddingPipeline() if DualEmbeddingPipeline is not None else None
+        if self.embedder is None:
+            logger.error("[HybridRetriever] DualEmbeddingPipeline unavailable. Search will be degraded.")
         try:
             from flashrank import Ranker
             self.reranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=os.path.join(VECTOR_DB_DIR, "flashrank_cache"))
@@ -82,6 +89,9 @@ class HybridRetriever:
 
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
         """Embeds and adds documents to BOTH ChromaDB collections (Gemini + BGE) and SQLite FTS5."""
+        if self.embedder is None:
+            logger.warning("[HybridRetriever] Embedder unavailable, cannot add documents.")
+            return
         gemini_embeddings = []
         bge_embeddings = []
         for doc in documents:
@@ -156,6 +166,9 @@ class HybridRetriever:
         5. RRF Fusion -> Top 20
         6. FlashRank + ColBERT -> Top K
         """
+        if self.embedder is None:
+            logger.warning("[HybridRetriever] Embedder unavailable, returning empty results.")
+            return []
         # Phase 15: Generate MemoRAG Global Draft Context
         original_query = query
         if self.memorag:
