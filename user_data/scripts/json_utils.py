@@ -23,10 +23,10 @@ def extract_json(text) -> dict | None:
     """
     Robustly extract a JSON object from LLM response text.
     Handles: raw JSON, JSON wrapped in text, markdown code fences, <think> tags,
-    and Gemini v1 content blocks [{'type': 'text', 'text': '...'}].
+    Gemini v1 content blocks [{'type': 'text', 'text': '...'}] (as list or string repr).
     Returns parsed dict or None if all tiers fail.
     """
-    # Pre-process: unwrap Gemini v1 content blocks if passed as list
+    # Pre-process: unwrap Gemini v1 content blocks if passed as actual list
     if isinstance(text, list):
         parts = []
         for block in text:
@@ -40,6 +40,18 @@ def extract_json(text) -> dict | None:
 
     if not text or not isinstance(text, str):
         return None
+
+    # Pre-process: detect str() repr of Gemini v1 content blocks.
+    # When str() is called on [{'type': 'text', 'text': '{"key": "val"}'}],
+    # it produces a Python repr with single quotes that isn't valid JSON.
+    # Extract the inner JSON from the 'text' field.
+    _content_block_pattern = re.compile(
+        r"\[\s*\{\s*'type'\s*:\s*'text'\s*,\s*'text'\s*:\s*'(.+?)'\s*\}\s*\]",
+        re.DOTALL
+    )
+    _match = _content_block_pattern.search(text)
+    if _match:
+        text = _match.group(1).replace("\\'", "'")
 
     # Pre-clean: remove <think> blocks and markdown fences
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)

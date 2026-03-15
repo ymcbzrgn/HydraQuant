@@ -8,9 +8,9 @@ from typing import List, Dict, Any
 from db import get_db_connection
 try:
     from rag_embedding import DualEmbeddingPipeline
-except ImportError as _imp_err:
+except Exception as _imp_err:
     import logging as _lg
-    _lg.getLogger(__name__).error(f"[IMPORT] DualEmbeddingPipeline failed: {_imp_err}. Embedding disabled.")
+    _lg.getLogger(__name__).error(f"[IMPORT] DualEmbeddingPipeline failed: {type(_imp_err).__name__}: {_imp_err}. Embedding disabled.")
     DualEmbeddingPipeline = None
 from rag_chunker import ContentChunker
 

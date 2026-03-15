@@ -763,7 +763,16 @@ class LLMRouter:
                             text_parts.append(block)
                         else:
                             text_parts.append(str(block))
-                    response.content = "".join(text_parts)
+                    normalized = "".join(text_parts)
+                    try:
+                        response.content = normalized
+                    except (AttributeError, TypeError):
+                        # Some LangChain message types have read-only content;
+                        # wrap in a simple AIMessage as fallback.
+                        from langchain_core.messages import AIMessage
+                        response = AIMessage(content=normalized, response_metadata=getattr(response, 'response_metadata', {}))
+                        if hasattr(response, 'usage_metadata'):
+                            response.usage_metadata = getattr(response, 'usage_metadata', None)
 
                 in_tok = 0
                 out_tok = 0
@@ -885,7 +894,12 @@ class LLMRouter:
                             text_parts.append(block)
                         else:
                             text_parts.append(str(block))
-                    response.content = "".join(text_parts)
+                    normalized = "".join(text_parts)
+                    try:
+                        response.content = normalized
+                    except (AttributeError, TypeError):
+                        from langchain_core.messages import AIMessage
+                        response = AIMessage(content=normalized, response_metadata=getattr(response, 'response_metadata', {}))
 
                 in_tok = 0
                 out_tok = 0
