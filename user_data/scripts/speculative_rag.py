@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -127,11 +128,12 @@ class SpeculativeRAG:
                 HumanMessage(content=prompt)
             ])
             verification_text = str(response.content).strip()
-            
-            # Parse index
+
+            # Parse index with multi-tier extraction
             best_idx = 0
             reasoning = verification_text
-            
+
+            # Tier 1: Exact format "BEST_DRAFT_INDEX: N"
             if "BEST_DRAFT_INDEX:" in verification_text:
                 parts = verification_text.split("BEST_DRAFT_INDEX:", 1)
                 after_idx = parts[1].strip()
@@ -141,6 +143,22 @@ class SpeculativeRAG:
                     if 0 <= idx < len(drafts):
                         best_idx = idx
                 reasoning = parts[1].replace(idx_str, "", 1).strip()
+            else:
+                # Tier 2: Find "Draft N" or "draft N" pattern in text
+                draft_match = re.search(r'[Dd]raft\s*#?\s*(\d+)', verification_text)
+                if draft_match:
+                    idx = int(draft_match.group(1))
+                    if 0 <= idx < len(drafts):
+                        best_idx = idx
+                        logger.info(f"[SpeculativeRAG] Extracted draft index via 'Draft N' pattern: {best_idx}")
+                else:
+                    # Tier 3: Find any standalone digit that could be a draft index
+                    digit_match = re.search(r'\b(\d)\b', verification_text)
+                    if digit_match:
+                        idx = int(digit_match.group(1))
+                        if 0 <= idx < len(drafts):
+                            best_idx = idx
+                            logger.info(f"[SpeculativeRAG] Extracted draft index via digit pattern: {best_idx}")
                 
             return {
                 "best_draft": drafts[best_idx],

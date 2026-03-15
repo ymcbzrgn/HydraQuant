@@ -3,6 +3,7 @@ import re
 from typing import Dict, Any, List
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_router import LLMRouter
+from json_utils import extract_json_strict
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +83,15 @@ Output EXACTLY a valid JSON object:
                 HumanMessage(content=prompt)
             ])
             critique_str = critique_response.content if hasattr(critique_response, "content") else str(critique_response)
-            critique_str = re.sub(r'<think>.*?</think>', '', str(critique_str), flags=re.DOTALL)
-            critique_str = critique_str.replace("```json", "").replace("```", "").strip()
 
-            if not critique_str:
+            if not str(critique_str).strip():
                 logger.warning("[Self-RAG] Empty response from LLM. Failing open.")
                 return {"faithfulness": 1.0, "relevance": 1.0, "confidence": 1.0, "passed": True}
 
-            import json
-            metrics = json.loads(critique_str)
+            metrics = extract_json_strict(str(critique_str), required_keys=["faithfulness"])
+            if metrics is None:
+                logger.warning(f"[Self-RAG] JSON extraction failed. Failing open. Raw: {str(critique_str)[:200]}")
+                return {"faithfulness": 1.0, "relevance": 1.0, "confidence": 1.0, "passed": True}
             
             f_score = float(metrics.get("faithfulness", 0.0))
             r_score = float(metrics.get("relevance", 0.0))

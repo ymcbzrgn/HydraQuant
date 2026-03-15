@@ -132,7 +132,21 @@ Text:
             else:
                 return None
                 
-            extracted_data = self.parser.parse(response.content)
+            # Try LangChain parser first, fallback to robust extraction
+            try:
+                extracted_data = self.parser.parse(response.content)
+            except Exception as parse_err:
+                logger.warning(f"LangChain parser failed: {parse_err}. Trying robust JSON extraction...")
+                from json_utils import extract_json
+                extracted_data = extract_json(str(response.content))
+                if extracted_data is None:
+                    logger.error(f"Robust extraction also failed. Raw: {str(response.content)[:300]}")
+                    return None
+                # Ensure required structure
+                if "entities" not in extracted_data:
+                    extracted_data["entities"] = []
+                if "relationships" not in extracted_data:
+                    extracted_data["relationships"] = []
             self._save_to_db(extracted_data, source_reference)
             return extracted_data
         except Exception as e:

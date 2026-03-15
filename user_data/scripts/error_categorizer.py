@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 from llm_router import LLMRouter
 from langchain_core.messages import SystemMessage, HumanMessage
 from ai_config import AI_DB_PATH as DB_PATH
+from json_utils import extract_json_strict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -116,15 +117,14 @@ class ErrorCategorizer:
             
             content_str = str(content).strip()
 
-            # Clean possible markdown JSON wrappers gracefully
-            content_str = re.sub(r'<think>.*?</think>', '', content_str, flags=re.DOTALL)
-            content_str = content_str.replace("```json", "").replace("```", "").strip()
-
             if not content_str:
                 logger.warning(f"[ErrorCategorizer] Empty LLM response for trade {trade['id']}. Skipping.")
                 return False
 
-            result = json.loads(content_str)
+            result = extract_json_strict(content_str, required_keys=["error_category"])
+            if result is None:
+                logger.error(f"[ErrorCategorizer] Failed to extract JSON for trade {trade['id']}. Raw: {content_str[:300]}")
+                return False
             category = result.get("error_category", "UNKNOWN")
             explanation = result.get("explanation", "Failed to parse explanation.")
             
@@ -140,9 +140,6 @@ class ErrorCategorizer:
             logger.info(f"Classified ID {trade['id']} as {category}.")
             return True
             
-        except json.JSONDecodeError as e:
-            logger.error(f"LLM did not return valid JSON for trade {trade['id']}: {e}\nRaw Output: {content}")
-            return False
         except Exception as e:
             logger.error(f"Routing/API Error during classification for ID {trade['id']}: {e}")
             return False

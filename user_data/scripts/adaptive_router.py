@@ -97,14 +97,22 @@ class AdaptiveQueryRouter:
                 HumanMessage(content=f"Query: {query}")
             ]
             response = self.router.invoke(messages)
-            category = str(response.content).strip().upper()
+            raw = str(response.content).strip().upper()
 
-            if category in ("SIMPLE", "MEDIUM", "COMPLEX", "NO_RAG"):
-                logger.info(f"[AdaptiveRAG] LLM classify → {category}: '{query[:50]}'")
-                return category
-            else:
-                logger.warning(f"[AdaptiveRAG] LLM returned unexpected: '{category}'. Defaulting to MEDIUM.")
-                return "MEDIUM"
+            # Tier 1: Exact match (LLM returned just the word)
+            if raw in ("SIMPLE", "MEDIUM", "COMPLEX", "NO_RAG"):
+                logger.info(f"[AdaptiveRAG] LLM classify → {raw}: '{query[:50]}'")
+                return raw
+
+            # Tier 2: Keyword extraction (LLM wrapped the category in text)
+            # e.g., "The category is COMPLEX" or "I'd classify this as MEDIUM."
+            for cat in ("COMPLEX", "NO_RAG", "SIMPLE", "MEDIUM"):  # Check most specific first
+                if cat in raw:
+                    logger.info(f"[AdaptiveRAG] LLM classify (extracted) → {cat}: '{query[:50]}'")
+                    return cat
+
+            logger.warning(f"[AdaptiveRAG] LLM returned unparseable: '{raw[:100]}'. Defaulting to MEDIUM.")
+            return "MEDIUM"
 
         except Exception as e:
             logger.warning(f"[AdaptiveRAG] Classification failed: {e}. Defaulting to MEDIUM.")
