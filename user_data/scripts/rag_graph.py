@@ -32,6 +32,9 @@ from speculative_rag import SpeculativeRAG
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
+# Phase 18: Signal health tracking (in-memory counters, lightweight)
+_signal_stats = {"ai": 0, "fallback": 0, "voting": 0, "timeout": 0, "total": 0}
+
 # =============================================================================
 # MODULE-LEVEL SINGLETONS — created ONCE at import/startup, reused forever.
 # This is THE memory leak fix: no more per-request instantiation.
@@ -339,6 +342,224 @@ def _format_tech_for_coordinator(td: dict) -> str:
         lines.append(" | ".join(extras))
 
     return "\n".join(lines)
+
+
+# --- Phase 18: Fallback Functions (when LLM is exhausted) ---
+
+def _technical_fallback(tech_data: dict) -> dict:
+    """
+    Rule-based technical scoring using Phase 17 indicators.
+    Used when ALL LLMs are exhausted. Max confidence cap: 0.35.
+    """
+    if not tech_data or not tech_data.get("current_price"):
+        return {"signal": "NEUTRAL", "confidence": 0.0,
+                "reasoning": "[Technical Fallback] No indicator data available", "source": "FALLBACK"}
+
+    score = 0.0
+    reasons = []
+    price = tech_data["current_price"]
+
+    # RSI (weight 0.15)
+    rsi = tech_data.get("rsi_14")
+    if rsi is not None:
+        if rsi < 30:
+            score += 0.15
+            reasons.append(f"RSI={rsi:.0f}(oversold)")
+        elif rsi > 70:
+            score -= 0.15
+            reasons.append(f"RSI={rsi:.0f}(overbought)")
+        elif rsi < 45:
+            score += 0.05
+        elif rsi > 55:
+            score -= 0.05
+
+    # MACD histogram (weight 0.15)
+    macd_hist = tech_data.get("macd_histogram")
+    if macd_hist is not None:
+        if macd_hist > 0:
+            score += 0.15
+            reasons.append(f"MACD_hist={macd_hist:+.4f}(bull)")
+        else:
+            score -= 0.15
+            reasons.append(f"MACD_hist={macd_hist:+.4f}(bear)")
+
+    # EMA cross 9/20 (weight 0.12)
+    ema_9 = tech_data.get("ema_9")
+    ema_20 = tech_data.get("ema_20")
+    if ema_9 is not None and ema_20 is not None:
+        if ema_9 > ema_20:
+            score += 0.12
+            reasons.append("EMA9>20(bull)")
+        else:
+            score -= 0.12
+            reasons.append("EMA9<20(bear)")
+
+    # EMA alignment 20/50/200 (weight 0.10)
+    ema_50 = tech_data.get("ema_50")
+    ema_200 = tech_data.get("ema_200")
+    if ema_20 is not None and ema_50 is not None and ema_200 is not None:
+        if ema_20 > ema_50 > ema_200:
+            score += 0.10
+            reasons.append("EMA_golden")
+        elif ema_200 > ema_50 > ema_20:
+            score -= 0.10
+            reasons.append("EMA_death")
+
+    # Bollinger Bands (weight 0.08)
+    bb_lower = tech_data.get("bb_lower")
+    bb_upper = tech_data.get("bb_upper")
+    if bb_lower is not None and price <= bb_lower:
+        score += 0.08
+        reasons.append("below_BB")
+    elif bb_upper is not None and price >= bb_upper:
+        score -= 0.08
+        reasons.append("above_BB")
+
+    # ADX trend strength (weight 0.07)
+    adx = tech_data.get("adx_14")
+    if adx is not None:
+        if adx < 20:
+            score *= 0.7  # ranging market: reduce conviction
+            reasons.append(f"ADX={adx:.0f}(ranging)")
+        elif adx > 25:
+            reasons.append(f"ADX={adx:.0f}(trend)")
+
+    # Volume ratio (weight 0.07)
+    vol = tech_data.get("volume", {})
+    vol_ratio = vol.get("ratio", 1.0) if isinstance(vol, dict) else 1.0
+    if vol_ratio > 1.2:
+        # Volume confirms the current direction
+        score *= 1.1
+        reasons.append(f"Vol={vol_ratio:.1f}x(confirms)")
+    elif vol_ratio < 0.8:
+        score *= 0.85
+        reasons.append(f"Vol={vol_ratio:.1f}x(weak)")
+
+    # Multi-timeframe: 4H RSI (weight 0.08)
+    htf = tech_data.get("htf", {})
+    rsi_4h = htf.get("rsi_4h") if isinstance(htf, dict) else None
+    if rsi_4h is not None:
+        if rsi_4h < 40:
+            score += 0.08
+            reasons.append(f"4H_RSI={rsi_4h:.0f}(bull)")
+        elif rsi_4h > 60:
+            score -= 0.08
+            reasons.append(f"4H_RSI={rsi_4h:.0f}(bear)")
+
+    # Multi-timeframe: Daily trend (weight 0.08)
+    trend_daily = htf.get("trend_daily") if isinstance(htf, dict) else None
+    if trend_daily == "bullish":
+        score += 0.08
+        reasons.append("daily_trend=bull")
+    elif trend_daily == "bearish":
+        score -= 0.08
+        reasons.append("daily_trend=bear")
+
+    # S/R proximity (weight 0.05)
+    levels = tech_data.get("levels", {})
+    if isinstance(levels, dict):
+        supports = levels.get("support", [])
+        resistances = levels.get("resistance", [])
+        if supports and isinstance(supports, list) and len(supports) > 0:
+            nearest_sup = min(supports, key=lambda s: abs(price - s) if isinstance(s, (int, float)) else 999999)
+            if isinstance(nearest_sup, (int, float)) and price > 0:
+                dist_pct = (price - nearest_sup) / price * 100
+                if 0 < dist_pct < 2:
+                    score += 0.05
+                    reasons.append("near_support")
+        if resistances and isinstance(resistances, list) and len(resistances) > 0:
+            nearest_res = min(resistances, key=lambda r: abs(price - r) if isinstance(r, (int, float)) else 999999)
+            if isinstance(nearest_res, (int, float)) and price > 0:
+                dist_pct = (nearest_res - price) / price * 100
+                if 0 < dist_pct < 2:
+                    score -= 0.05
+                    reasons.append("near_resistance")
+
+    # Candlestick patterns (weight 0.05)
+    patterns = tech_data.get("patterns", [])
+    if isinstance(patterns, list):
+        for p in patterns:
+            if "bullish" in str(p).lower():
+                score += 0.025
+                reasons.append(str(p))
+            elif "bearish" in str(p).lower():
+                score -= 0.025
+                reasons.append(str(p))
+
+    # Determine signal
+    if score > 0.10:
+        signal = "BULLISH"
+    elif score < -0.10:
+        signal = "BEARISH"
+    else:
+        signal = "NEUTRAL"
+
+    # Confidence: scale and cap at 0.35
+    confidence = min(abs(score) * 0.50, 0.35)
+    confidence = round(confidence, 2)
+
+    reason_str = f"[Technical Fallback] {signal}: {'; '.join(reasons[:6])}. Score: {score:+.2f}"
+
+    return {"signal": signal, "confidence": confidence, "reasoning": reason_str, "source": "FALLBACK"}
+
+
+def _voting_fallback(tech_text: str, sent_text: str, news_text: str) -> dict:
+    """
+    Parse 3 unbiased agent outputs (Technical, Sentiment, News) for direction keywords and vote.
+    Bull/Bear researchers are excluded — they're biased by design (one always argues bullish, other bearish).
+    Used when coordinator LLM is completely exhausted.
+    """
+    bullish_kw = ["bullish", "upward", "support", "accumulation", "oversold", "bounce", "recovery", "uptrend", "buy"]
+    bearish_kw = ["bearish", "downward", "resistance", "distribution", "overbought", "rejection", "decline", "downtrend", "sell"]
+
+    bull_votes = 0
+    bear_votes = 0
+
+    for agent_text in [tech_text, sent_text, news_text]:
+        text_lower = str(agent_text).lower()
+        b_count = sum(1 for kw in bullish_kw if kw in text_lower)
+        s_count = sum(1 for kw in bearish_kw if kw in text_lower)
+        if b_count > s_count:
+            bull_votes += 1
+        elif s_count > b_count:
+            bear_votes += 1
+        # tie or both zero = no vote (neutral)
+
+    majority = max(bull_votes, bear_votes)
+    if bull_votes >= 2 and bull_votes > bear_votes:
+        signal = "BULLISH"
+    elif bear_votes >= 2 and bear_votes > bull_votes:
+        signal = "BEARISH"
+    else:
+        signal = "NEUTRAL"
+
+    # Confidence: (majority/3) * 0.40, capped at 0.30
+    if signal != "NEUTRAL" and majority >= 2:
+        confidence = min(round((majority / 3) * 0.40, 2), 0.30)
+    else:
+        confidence = 0.0
+
+    return {
+        "signal": signal,
+        "confidence": confidence,
+        "reasoning": f"[Voting Fallback] {signal} by {majority}/3 agent vote (bull={bull_votes}, bear={bear_votes}). Coordinator LLM unavailable.",
+        "source": "VOTING"
+    }
+
+
+def _record_signal_health(pair: str, source: str, signal_type: str, confidence: float):
+    """Helper: record a signal to the signal_health SQLite table."""
+    try:
+        from db import get_db_connection
+        conn = get_db_connection()
+        conn.execute(
+            "INSERT INTO signal_health (pair, signal_source, signal_type, confidence) VALUES (?, ?, ?, ?)",
+            (pair, source, signal_type, confidence)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"[SignalHealth] Failed to record: {e}")
 
 
 # --- Parallel Analyst Nodes ---
@@ -669,8 +890,19 @@ Respond in valid JSON ONLY, no markdown:
    "reasoning": "2-sentence synthesis of the debate outcome. Mention which agents agreed/disagreed."
 }}"""
 
-    # Phase 16: CoT-RAG Integration
-    if _cot_rag is not None:
+    # Phase 18: Advanced RAG Auto-Toggle — only enable expensive stages if ChromaDB has enough docs
+    _chroma_doc_count = 0
+    try:
+        _chroma_doc_count = retriever.collection.count()
+    except Exception:
+        pass
+    _advanced_rag_enabled = _chroma_doc_count >= 100
+
+    if not _advanced_rag_enabled:
+        logger.info(f"[RAG] Advanced stages disabled (ChromaDB: {_chroma_doc_count} docs < 100 threshold)")
+
+    # Phase 16: CoT-RAG Integration (only if advanced RAG enabled)
+    if _advanced_rag_enabled and _cot_rag is not None:
         try:
             cot_results = _cot_rag.reason_step_by_step(pair=pair, query=prompt)
             cot_reasoning = cot_results.get("reasoning_chain", "")
@@ -678,8 +910,12 @@ Respond in valid JSON ONLY, no markdown:
                 prompt += f"\n\n[CoT-RAG 5-Step Deep Analysis]:\n{cot_reasoning}\nEnsure the final JSON decision factors in these evidence-backed step deductions."
         except Exception as e:
             logger.error(f"[CoT-RAG] Master Coordinator execution failed: {e}")
+
+    # Complexity classification (always — cheap, needed for routing decisions)
     complexity = adaptive_router.classify(f"trading decision cross correlation {pair}")
-    if complexity == "COMPLEX" and _spec_rag is not None:
+
+    # SpeculativeRAG + FLARE — only if advanced RAG enabled AND COMPLEX query
+    if _advanced_rag_enabled and complexity == "COMPLEX" and _spec_rag is not None:
         logger.info("[MADAM-RAG] COMPLEX flow: Using Speculative RAG to draft scenarios.")
         try:
             spec_result = _spec_rag.draft_and_verify(query=prompt, num_drafts=3)
@@ -688,7 +924,7 @@ Respond in valid JSON ONLY, no markdown:
                 prompt += f"\n\n[Speculative RAG Best Draft Scenario]:\n{best_scenario}"
         except Exception as e:
             logger.error(f"[Speculative RAG] Draft and verify failed: {e}")
-            
+
         logger.info("[MADAM-RAG] COMPLEX flow: Using FLARE to verify reasoning before final JSON generation.")
         try:
             flare_context = f"Tech: {tech}\nSent: {sent}\nNews: {news}\nBull: {bull}\nBear: {bear}"
@@ -700,35 +936,64 @@ Respond in valid JSON ONLY, no markdown:
         except Exception as e:
             logger.error(f"[FLARE] Active retrieval failed: {e}. Proceeding without FLARE.")
 
-    # Final LLM call — the coordinator's own synthesis. Must succeed for a real signal.
-    try:
-        response = llm.invoke([SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)], temperature=0.7)
-        content_raw = response.content
+    # --- Phase 18: 4-Tier Coordinator LLM with Degradation Chain ---
+    # Tier 1: Primary LLM call
+    # Tier 2: Retry with lower temperature
+    # Tier 3: 3-agent voting fallback
+    # Tier 4: Pure technical indicator fallback
+    coordinator_msgs = [SystemMessage(content="You are the Master Coordinator."), HumanMessage(content=prompt)]
+
+    def _parse_coordinator_response(content_raw):
+        """Parse coordinator LLM response into (signal, conf, reason) or None on failure."""
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
-
-        # Strip thinking model tags (DeepSeek R1, Qwen reasoning, etc.)
         raw_content = re.sub(r'<think>.*?</think>', '', content_raw, flags=re.DOTALL)
         raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-
         if not raw_content:
-            logger.warning("[NODE] Coordinator received empty LLM response. Defaulting to NEUTRAL.")
-            signal, conf, reason = "NEUTRAL", 0.0, "Empty LLM response from coordinator"
-            return {"signal": signal, "confidence": conf, "reasoning": reason}
-
+            return None
         try:
             data = json.loads(raw_content)
-            signal = data.get("signal", "NEUTRAL")
-            conf = float(data.get("confidence", 0.0))
-            reason = data.get("reasoning", "")
+            return (data.get("signal", "NEUTRAL"), float(data.get("confidence", 0.0)), data.get("reasoning", ""))
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Failed to parse Coordinator JSON: {e}. Raw: {raw_content[:200]}")
-            signal, conf, reason = "NEUTRAL", 0.0, f"JSON Parsing Failure: {raw_content[:100]}"
-    except Exception as e:
-        logger.error(f"[NODE] Coordinator LLM invoke FAILED: {type(e).__name__}: {e}")
-        signal, conf, reason = "NEUTRAL", 0.0, f"Coordinator LLM error: {type(e).__name__}: {e}"
+            return None
 
-    return {"signal": signal, "confidence": conf, "reasoning": reason}
+    # Tier 1: Primary LLM call (temperature=0.7)
+    parsed = None
+    try:
+        response = llm.invoke(coordinator_msgs, temperature=0.7)
+        parsed = _parse_coordinator_response(response.content)
+    except Exception as e:
+        logger.error(f"[NODE] Coordinator primary LLM failed: {type(e).__name__}: {e}")
+
+    # Tier 2: Retry with lower temperature (if primary failed or unparseable)
+    if parsed is None:
+        logger.warning("[NODE] Coordinator: Primary failed. Retrying with temperature=0.3...")
+        try:
+            response = llm.invoke(coordinator_msgs, temperature=0.3)
+            parsed = _parse_coordinator_response(response.content)
+        except Exception as e:
+            logger.error(f"[NODE] Coordinator retry also failed: {type(e).__name__}: {e}")
+
+    # Tier 1/2 success
+    if parsed is not None:
+        signal, conf, reason = parsed
+        return {"signal": signal, "confidence": conf, "reasoning": reason, "source": "AI"}
+
+    # Tier 3: 3-Agent Voting Fallback (tech, sent, news — unbiased agents only)
+    logger.warning("[NODE] Coordinator: Both LLM calls failed. Using VOTING FALLBACK.")
+    vote_result = _voting_fallback(tech, sent, news)
+    if vote_result["confidence"] > 0:
+        return vote_result
+
+    # Tier 4: Technical Fallback (pure indicator scoring)
+    if tech_data:
+        logger.warning("[NODE] Coordinator: Voting inconclusive. Using TECHNICAL FALLBACK.")
+        return _technical_fallback(tech_data)
+
+    # Tier 5: Last resort — NEUTRAL (should rarely happen if Phase 17 data is available)
+    logger.error(f"[NODE] Coordinator: ALL tiers exhausted for {pair}. Returning NEUTRAL 0.0.")
+    return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "All coordinator tiers exhausted", "source": "TIMEOUT"}
 
 
 
@@ -773,7 +1038,12 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
     if cached_response_str:
         try:
             logger.info("[Semantic Cache] Reusing cached decision for pair.")
-            return json.loads(cached_response_str)
+            cached_result = json.loads(cached_response_str)
+            # Phase 18: Track cache hits in signal stats
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1  # cache = previous AI result
+            _record_signal_health(pair, "CACHE", cached_result.get("signal", "NEUTRAL"), cached_result.get("confidence", 0.0))
+            return cached_result
         except Exception as e:
             logger.error(f"Failed to parse cached response: {e}")
 
@@ -852,12 +1122,39 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         "confidence": confidence,
         "reasoning": reasoning
     }
-    
+
+    # Phase 18: Signal health tracking + Telegram alert
+    signal_source = final_output.get("source", "AI") if final_output else "TIMEOUT"
+    _record_signal_health(pair, signal_source, signal, confidence)
+
+    _signal_stats["total"] += 1
+    if signal_source in ("AI", "CACHE"):
+        _signal_stats["ai"] += 1
+    elif signal_source == "VOTING":
+        _signal_stats["voting"] += 1
+    else:
+        _signal_stats["fallback"] += 1
+
+    # Check AI ratio every 10 signals — alert if below 50%
+    if _signal_stats["total"] % 10 == 0 and _signal_stats["total"] > 0:
+        ai_ratio = _signal_stats["ai"] / _signal_stats["total"] * 100
+        if ai_ratio < 50.0:
+            try:
+                from telegram_notifier import AITelegramNotifier
+                AITelegramNotifier().send_alert(
+                    f"AI sinyal orani duestu: {ai_ratio:.0f}% "
+                    f"(AI:{_signal_stats['ai']}, Voting:{_signal_stats['voting']}, "
+                    f"Fallback:{_signal_stats['fallback']} / {_signal_stats['total']} total)",
+                    level="WARNING", cooldown_secs=3600
+                )
+            except Exception:
+                pass
+
     # e. Put to Semantic Cache (SemanticCache.put already rejects confidence < 0.3)
     _semantic_cache.put(query=query_str, response=json.dumps(result_dict), pair=pair)
     if confidence < 0.3:
         logger.warning(f"[Signal] Low confidence result ({confidence:.2f}) for {pair} — NOT cached, will re-analyze next time.")
-    
+
     return result_dict
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -870,11 +1167,29 @@ def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, techni
         future = _signal_executor.submit(get_trading_signal, pair, technical_data)
         return future.result(timeout=timeout_seconds)
     except FuturesTimeoutError:
-        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Returning NEUTRAL.")
-        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "Pipeline timeout"}
+        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Trying technical fallback...")
+        if technical_data:
+            result = _technical_fallback(technical_data)
+            _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["fallback"] += 1
+            return result
+        _record_signal_health(pair, "TIMEOUT", "NEUTRAL", 0.0)
+        _signal_stats["total"] += 1
+        _signal_stats["timeout"] += 1
+        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": "Pipeline timeout, no technical data", "source": "TIMEOUT"}
     except Exception as e:
         logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
-        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"Pipeline error: {e}"}
+        if technical_data:
+            result = _technical_fallback(technical_data)
+            _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["fallback"] += 1
+            return result
+        _record_signal_health(pair, "TIMEOUT", "NEUTRAL", 0.0)
+        _signal_stats["total"] += 1
+        _signal_stats["timeout"] += 1
+        return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"Pipeline error: {e}", "source": "TIMEOUT"}
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -936,6 +1251,35 @@ if __name__ == "__main__":
                 "colbert": "active" if retriever.colbert_reranker else "disabled",
                 "flashrank": "active" if retriever.reranker else "disabled",
             }
+
+        @serve_app.get("/signal-health")
+        def signal_health_endpoint():
+            """Phase 18: Signal source distribution for last 24 hours."""
+            try:
+                from db import get_db_connection
+                conn = get_db_connection()
+                rows = conn.execute("""
+                    SELECT signal_source, COUNT(*) as cnt
+                    FROM signal_health
+                    WHERE timestamp > datetime('now', '-24 hours')
+                    GROUP BY signal_source
+                """).fetchall()
+                conn.close()
+
+                total = sum(r['cnt'] for r in rows)
+                dist = {r['signal_source']: r['cnt'] for r in rows}
+                ai_count = dist.get('AI', 0) + dist.get('CACHE', 0)
+                ai_ratio = (ai_count / total * 100) if total > 0 else 100.0
+
+                return {
+                    "total_signals_24h": total,
+                    "distribution": dist,
+                    "ai_ratio_pct": round(ai_ratio, 1),
+                    "healthy": ai_ratio >= 50.0,
+                    "in_memory_stats": dict(_signal_stats)
+                }
+            except Exception as e:
+                return {"error": str(e), "in_memory_stats": dict(_signal_stats)}
 
         logger.info(f"RAG Signal Service starting on port {args.port}")
         logger.info(f"Models loaded: ColBERT={'active' if retriever.colbert_reranker else 'disabled'}, "

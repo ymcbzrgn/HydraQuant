@@ -152,10 +152,24 @@ def init_db():
         except sqlite3.OperationalError:
             pass  # column already exists
 
+    # Phase 18: Signal Health Tracking (AI vs Fallback vs Voting ratio)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS signal_health (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            pair TEXT NOT NULL,
+            signal_source TEXT NOT NULL,
+            signal_type TEXT,
+            confidence REAL,
+            latency_ms REAL
+        )
+    ''')
+
     # Create indices
     c.execute('CREATE INDEX IF NOT EXISTS idx_market_news_published ON market_news(published_at)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_ai_decisions_pair ON ai_decisions(pair)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_sentiment_rolling_coin ON coin_sentiment_rolling(coin, timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_signal_health_ts ON signal_health(timestamp)')
 
     conn.commit()
     conn.close()
