@@ -124,3 +124,4 @@ target/
 
 docker-compose-*.yml
 !docker-compose.ai.yml
+config_bybit_testnet_futures.json

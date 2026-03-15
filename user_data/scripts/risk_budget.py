@@ -29,7 +29,7 @@ class RiskBudgetManager:
     def __init__(
         self,
         portfolio_value: float = 10000.0,
-        daily_var_pct: float = 0.01,
+        daily_var_pct: float = 0.50,
         db_path: str = DB_PATH,
     ):
         self.portfolio_value = portfolio_value

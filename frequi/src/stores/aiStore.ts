@@ -140,9 +140,9 @@ function getDefaultAiApiUrl(): string {
     if (typeof window !== 'undefined' && window.location) {
         const proto = window.location.protocol; // http: or https:
         const host = window.location.hostname;
-        return `${proto}//${host}:8890`;
+        return '';
     }
-    return 'http://localhost:8890';
+    return '';
 }
 
 export const useAiStore = defineStore('ai', {
