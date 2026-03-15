@@ -9,19 +9,21 @@ import numpy as np
 from dotenv import load_dotenv
 
 # --- Resilient imports: embedding works even if one backend is missing ---
+# Catch ALL exceptions (not just ImportError) because google.genai can fail with
+# RecursionError, RuntimeError, or other non-import errors during protobuf/grpc init.
 _GENAI_AVAILABLE = False
 try:
     from google import genai
     _GENAI_AVAILABLE = True
-except ImportError as _e:
-    logging.getLogger(__name__).warning(f"[Embedding] google.genai unavailable: {_e}. Gemini embedding disabled — using BGE local only.")
+except Exception as _e:
+    logging.getLogger(__name__).warning(f"[Embedding] google.genai unavailable ({type(_e).__name__}): {_e}. Gemini embedding disabled — using BGE local only.")
 
 _ST_AVAILABLE = False
 try:
     from sentence_transformers import SentenceTransformer
     _ST_AVAILABLE = True
-except ImportError as _e:
-    logging.getLogger(__name__).warning(f"[Embedding] sentence_transformers unavailable: {_e}. BGE local model disabled — using Gemini API only.")
+except Exception as _e:
+    logging.getLogger(__name__).warning(f"[Embedding] sentence_transformers unavailable ({type(_e).__name__}): {_e}. BGE local model disabled — using Gemini API only.")
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))

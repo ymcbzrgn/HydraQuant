@@ -14,8 +14,8 @@ from datetime import datetime, timezone, timedelta
 from ai_config import AI_DB_PATH
 try:
     from rag_embedding import DualEmbeddingPipeline
-except ImportError as _e:
-    logging.getLogger(__name__).error(f"[StreamingRAG] DualEmbeddingPipeline import failed: {_e}")
+except Exception as _e:
+    logging.getLogger(__name__).error(f"[StreamingRAG] DualEmbeddingPipeline import failed: {type(_e).__name__}: {_e}")
     DualEmbeddingPipeline = None
 
 logger = logging.getLogger(__name__)

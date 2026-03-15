@@ -98,12 +98,17 @@ def compute_rolling_sentiment():
     # 2. AlphaVantage model sentiments
     av_fetcher = AlphaVantageFetcher()
     for article in av_fetcher.fetch_news_sentiment():
+        # AlphaVantage uses 'YYYYMMDDTHHMMSS' format which needs parsing.
+        # pd.to_datetime on a scalar returns Timestamp (not Series), so .fillna() fails.
+        # Use pd.notna() check instead.
+        _av_ts = pd.to_datetime(article['published_at'], format='%Y%m%dT%H%M%S', errors='coerce')
+        if not pd.notna(_av_ts):
+            _av_ts = pd.Timestamp.utcnow()
         external_records.append({
             'title': article['title'],
             'summary': '',
             'source': 'alphavantage',
-            # AlphaVantage uses 'YYYYMMDDTHHMMSS' format which needs parsing
-            'published_at': pd.to_datetime(article['published_at'], format='%Y%m%dT%H%M%S', errors='coerce').fillna(pd.Timestamp.utcnow()),
+            'published_at': _av_ts,
             'sentiment_score': article['av_sentiment_score']
         })
         

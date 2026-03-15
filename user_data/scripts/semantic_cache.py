@@ -6,7 +6,13 @@ import time
 import os
 from datetime import datetime, timezone
 from typing import Optional, Tuple
-from google import genai
+try:
+    from google import genai
+    _GENAI_AVAILABLE = True
+except Exception as _e:
+    logging.getLogger(__name__).warning(f"[SemanticCache] google.genai unavailable: {_e}. Cache embedding disabled.")
+    genai = None
+    _GENAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 

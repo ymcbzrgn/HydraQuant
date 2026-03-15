@@ -24,10 +24,13 @@ class GamRAG:
 
         # Use singleton ChromaDB client
         self.chroma_client = get_chroma_client()
+        # GAM-RAG uses ChromaDB's built-in embedding (query_texts=, add(documents=...))
+        # so we do NOT set embedding_function=None here (unlike hybrid_retriever which
+        # provides pre-computed 768-dim embeddings). This collection uses the default
+        # all-MiniLM-L6-v2 (384-dim) which is separate from the 768-dim crypto_news collection.
         self.gam_collection = self.chroma_client.get_or_create_collection(
             name="successful_trade_patterns",
-            metadata={"hnsw:space": "cosine"},
-            embedding_function=None
+            metadata={"hnsw:space": "cosine"}
         )
 
     def _ensure_paths(self, chroma_path: str):
