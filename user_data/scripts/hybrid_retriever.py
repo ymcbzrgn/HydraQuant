@@ -33,17 +33,23 @@ class HybridRetriever:
     3. Reranking (FlashRank Cross-Encoder)
     """
     
-    def __init__(self, collection_name: str = "crypto_news"):
+    def __init__(self, collection_name: str = "crypto_news", llm_router=None):
+        self._llm_router = llm_router  # Pass-through for sub-components
         self.chroma_client = get_chroma_client()
-        # Primary: Gemini embeddings (general semantic)
+        # Primary: Gemini embeddings (general semantic, 768-dim)
+        # embedding_function=None: we provide pre-computed embeddings via add(embeddings=...)
+        # Without this, ChromaDB defaults to its own 384-dim DefaultEmbeddingFunction,
+        # causing dimension mismatch when our 768-dim vectors are inserted.
         self.collection = self.chroma_client.get_or_create_collection(
-            name=collection_name, 
-            metadata={"hnsw:space": "cosine"}
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=None
         )
-        # Secondary: BGE-Financial embeddings (domain-specific)
+        # Secondary: BGE-Financial embeddings (domain-specific, 768-dim)
         self.bge_collection = self.chroma_client.get_or_create_collection(
             name=f"{collection_name}_bge",
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=None
         )
         self.embedder = DualEmbeddingPipeline() if DualEmbeddingPipeline is not None else None
         if self.embedder is None:
@@ -71,11 +77,11 @@ class HybridRetriever:
             logger.warning("BinaryQuantizer not available, disabling binary pre-filter.")
             self.binary_quantizer = None
             
-        # Phase 14 Instantiations
+        # Phase 14 Instantiations — pass shared router to avoid duplicate LLMRouter inits
         self.streaming_rag = StreamingRAG()
-        self.raptor = RAPTORTree()
+        self.raptor = RAPTORTree(llm_router=self._llm_router)
         self.magma = MAGMAMemory()
-        self.memorag = MemoRAG()
+        self.memorag = MemoRAG(llm_router=self._llm_router)
 
     _db_tables_ensured = False
 
@@ -234,14 +240,17 @@ class HybridRetriever:
                 cursor = conn.cursor()
                 # Build OR query from individual terms for high recall.
                 # Rerankers downstream handle precision.
-                # Old: phrase match '"word1 word2 word3"' → required exact adjacent sequence → ~0 results
-                # New: 'word1 OR word2 OR word3' → matches any term → high recall
-                sanitized = original_query.replace('"', '').replace("'", "").replace("/", " ")
-                terms = [t for t in sanitized.split() if len(t) > 1 and t.isalnum()]
+                # Strip ALL non-alphanumeric chars to prevent FTS5 syntax errors.
+                # Coin pairs like "0G/USDT:USDT" contain / and : which are FTS5 operators.
+                # Also prevents ( ) * + - AND OR NOT from breaking MATCH queries.
+                sanitized = "".join(c if c.isalnum() else " " for c in original_query)
+                terms = [t for t in sanitized.split() if len(t) > 1]
                 if terms:
                     fts_query = " OR ".join(terms)
                 else:
-                    fts_query = sanitized.strip()
+                    # Fallback: use any single-char terms if no multi-char terms exist
+                    terms = [t for t in sanitized.split() if t]
+                    fts_query = " OR ".join(terms) if terms else "crypto"
 
                 cursor.execute(
                     "SELECT doc_id FROM bm25_index WHERE bm25_index MATCH ? ORDER BY rank LIMIT 300",

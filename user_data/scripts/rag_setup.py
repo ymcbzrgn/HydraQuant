@@ -22,10 +22,12 @@ def init_chromadb():
     ]
     
     for coll_name in collections:
-        # We use cosine similarity as standard for financial embedding models
+        # We use cosine similarity as standard for financial embedding models.
+        # embedding_function=None: we always provide pre-computed 768-dim embeddings.
         client.get_or_create_collection(
             name=coll_name,
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=None
         )
         logger.info(f"Initialized ChromaDB collection: {coll_name}")
 

@@ -47,7 +47,8 @@ llm = LLMRouter(temperature=0.1)
 web_search_tool = DuckDuckGoSearchRun()
 
 # Single persistent retriever instance (holds ColBERT, BGE, FlashRank, ChromaDB)
-retriever = HybridRetriever()
+# Pass shared LLM router to avoid duplicate init (RAPTOR, MemoRAG create their own otherwise)
+retriever = HybridRetriever(llm_router=llm)
 
 # Phase 3.2: Corrective RAG — evaluates + fixes bad retrieval
 crag = CRAGEvaluator(router=llm)
@@ -59,7 +60,7 @@ adaptive_router = AdaptiveQueryRouter(router=llm)
 rag_fusion = RAGFusion(router=llm)
 
 # Persistent Logger for AI Decisions (Phase 3.5.1)
-decision_logger = AIDecisionLogger()
+decision_logger = AIDecisionLogger(llm_router=llm)
 
 # Phase 9: Semantic Cache + Self-RAG (were leaking per get_trading_signal call)
 _semantic_cache = SemanticCache()
@@ -73,7 +74,7 @@ except Exception as e:
     _magma = None
 
 try:
-    _kg = KnowledgeGraphManager()
+    _kg = KnowledgeGraphManager(llm_router=llm)
 except Exception as e:
     logger.error(f"[INIT] KnowledgeGraphManager failed to initialize: {e}. KG context disabled.")
     _kg = None
@@ -1318,8 +1319,23 @@ rag_bot = workflow.compile()
 
 def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
     """Entry point for Freqtrade to request a trading decision from the Analyst Team."""
+    # Concurrency gate: only 2 coins may run the full 5-agent graph simultaneously.
+    # This prevents 20+ concurrent LLM calls from exhausting all free-tier quotas.
+    acquired = _signal_semaphore.acquire(timeout=50)
+    if not acquired:
+        logger.warning(f"[Concurrency] Semaphore timeout for {pair}. Returning technical fallback.")
+        return _technical_fallback(technical_data or {})
+
+    try:
+        return _get_trading_signal_inner(pair, technical_data)
+    finally:
+        _signal_semaphore.release()
+
+
+def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
+    """Inner implementation of trading signal generation (protected by semaphore)."""
     logger.info(f"Initiating Multi-Agent Analyst Team for {pair}{'  [with LIVE indicators]' if technical_data else ''}...")
-    
+
     # Phase 9: Semantic Cache (module-level singleton)
     query_str = f"trading signal analysis for {pair}"
 
@@ -1447,7 +1463,13 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
 
     return result_dict
 
+import threading as _threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+# Concurrency limiter: max 2 coins processing the full 5-agent graph in parallel.
+# Each coin spawns 5 LLM calls (LangGraph parallel nodes). Without this,
+# 4 coins × 5 agents = 20 concurrent LLM calls exhausting all provider quotas.
+_signal_semaphore = _threading.Semaphore(2)
 
 _signal_executor = ThreadPoolExecutor(max_workers=4)
 

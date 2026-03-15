@@ -16,16 +16,17 @@ class AIDecisionLogger:
     from the Gemini/Language Models into the local SQLite database.
     This enables post-trade analysis, Kelly position sizing, and trust curve fitting.
     """
-    
-    def __init__(self, db_path: str = DB_PATH):
+
+    def __init__(self, db_path: str = DB_PATH, llm_router=None):
         self.db_path = db_path
         # Ensure DB is initialized (useful if running in isolated test)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._ensure_schema_up_to_date()
         # Phase 15: Bidirectional RAG for post-trade lesson extraction
+        # Pass shared router to avoid duplicate LLMRouter initialization
         try:
             from bidirectional_rag import BidirectionalRAG
-            self.bidi_rag = BidirectionalRAG(db_path=self.db_path)
+            self.bidi_rag = BidirectionalRAG(db_path=self.db_path, llm_router=llm_router)
         except Exception:
             self.bidi_rag = None
         

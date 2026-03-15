@@ -26,7 +26,8 @@ class GamRAG:
         self.chroma_client = get_chroma_client()
         self.gam_collection = self.chroma_client.get_or_create_collection(
             name="successful_trade_patterns",
-            metadata={"description": "Bidirectional memory of high-EV AI trade reasoning"}
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=None
         )
 
     def _ensure_paths(self, chroma_path: str):

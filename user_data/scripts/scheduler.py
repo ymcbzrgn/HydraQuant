@@ -99,6 +99,15 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Every 15 minutes: Compute rolling sentiment aggregates per coin
+        self.scheduler.add_job(
+            self._compute_rolling_sentiment,
+            'interval', minutes=15,
+            id='compute_sentiment',
+            name='Rolling Sentiment Aggregator',
+            replace_existing=True
+        )
+
         # Daily 00:00 UTC: Reset risk budget
         self.scheduler.add_job(
             self._daily_reset,
@@ -154,7 +163,7 @@ class PipelineScheduler:
         )
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 11 jobs: fetch(5m), cache_cleanup(5m), health(5m), embed(15m), flush(15m), reset(day), cleanup(day), daily_summary(23:55), weekly_summary(sun), prune_magma(sun), embed_bidi(day)")
+        logger.info("[Scheduler] Started with 12 jobs: fetch(5m), cache_cleanup(5m), health(5m), embed(15m), flush(15m), sentiment(15m), reset(day), cleanup(day), daily_summary(23:55), weekly_summary(sun), prune_magma(sun), embed_bidi(day)")
         return True
 
     def stop(self):
@@ -263,6 +272,15 @@ class PipelineScheduler:
             s_rag.flush_to_cold()
         except Exception as e:
             logger.error(f"[Scheduler:Job] StreamingRAG flush failed: {e}")
+
+    def _compute_rolling_sentiment(self):
+        """Job: Compute rolling sentiment aggregates per coin (1h, 4h, 24h windows)."""
+        logger.info("[Scheduler:Job] Computing rolling sentiment aggregates...")
+        try:
+            from coin_sentiment_aggregator import compute_rolling_sentiment
+            compute_rolling_sentiment()
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Rolling sentiment computation failed: {e}")
 
     def _health_check(self):
         """Job: Run system health check and record metrics."""

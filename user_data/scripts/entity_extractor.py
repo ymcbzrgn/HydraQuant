@@ -2,14 +2,12 @@ import os
 import sqlite3
 import logging
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
@@ -29,27 +27,12 @@ class KnowledgeGraphManager:
     """
     LazyGraphRAG module: Extracts entities and relationships from text
     using an LLM and stores them in SQLite for on-demand graph traversals.
+    Uses LLMRouter for unified rate limit tracking, multi-provider failover,
+    and cost tracking instead of direct Gemini/Groq SDK calls.
     """
-    def __init__(self):
-        # We use a fast, structured output LLM (Gemini) with Groq (Llama-3) as a fallback
-        # in case we hit Gemini API rate limits during bulk processing.
-        gemini_key = os.environ.get("GEMINI_API_KEY")
-        groq_key = os.environ.get("GROQ_API_KEY")
-        
-        self.llm = ChatGoogleGenerativeAI(
-            model="models/gemini-2.5-flash", 
-            api_key=gemini_key, 
-            temperature=0
-        ) if gemini_key else None
-        
-        self.fallback_llm = ChatGroq(
-            model="llama-3.1-8b-instant",
-            api_key=groq_key,
-            temperature=0
-        ) if groq_key else None
-        
-        if not self.llm and not self.fallback_llm:
-            logger.warning("No API keys found for Entity Extraction. Models will fail.")
+    def __init__(self, llm_router=None):
+        from llm_router import LLMRouter
+        self.router = llm_router if llm_router is not None else LLMRouter(temperature=0)
         self.parser = JsonOutputParser(pydantic_object=EntityExtractionResult)
         self._init_db_tables()
 
@@ -118,29 +101,34 @@ Text:
 """
         
         try:
-            if self.llm:
-                try:
-                    response = self.llm.invoke([HumanMessage(content=prompt)])
-                except Exception as e:
-                    logger.warning(f"Gemini API limit or failure: {e}. Attempting Groq Fallback...")
-                    if self.fallback_llm:
-                        response = self.fallback_llm.invoke([HumanMessage(content=prompt)])
-                    else:
-                        raise e
-            elif self.fallback_llm:
-                response = self.fallback_llm.invoke([HumanMessage(content=prompt)])
-            else:
-                return None
-                
+            response = self.router.invoke(
+                [
+                    SystemMessage(content="You are a financial Knowledge Graph extractor. Return ONLY valid JSON."),
+                    HumanMessage(content=prompt)
+                ],
+                temperature=0,
+                priority="low",       # Entity extraction is non-critical
+                max_wall_time=30.0     # Don't burn 90s on entity extraction
+            )
+
+            # Normalize content: Gemini v1 may return list of content blocks
+            content = response.content if hasattr(response, "content") else str(response)
+            if isinstance(content, list):
+                content = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in content
+                )
+            content = str(content).strip()
+
             # Try LangChain parser first, fallback to robust extraction
             try:
-                extracted_data = self.parser.parse(response.content)
+                extracted_data = self.parser.parse(content)
             except Exception as parse_err:
                 logger.warning(f"LangChain parser failed: {parse_err}. Trying robust JSON extraction...")
                 from json_utils import extract_json
-                extracted_data = extract_json(str(response.content))
+                extracted_data = extract_json(content)
                 if extracted_data is None:
-                    logger.error(f"Robust extraction also failed. Raw: {str(response.content)[:300]}")
+                    logger.error(f"Robust extraction also failed. Raw: {content[:300]}")
                     return None
                 # Ensure required structure
                 if "entities" not in extracted_data:
