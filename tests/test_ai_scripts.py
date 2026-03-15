@@ -1290,28 +1290,35 @@ def test_binary_quantizer_hamming():
 
 def test_colbert_reranker_scores(monkeypatch):
     from colbert_reranker import ColBERTReranker
-    
-    # Mock __init__ so we don't download the model in tests
+
+    # Mock __init__ to avoid HTTP client setup
     monkeypatch.setattr(ColBERTReranker, "__init__", lambda self, *args, **kwargs: None)
-    
+
     model = ColBERTReranker.__new__(ColBERTReranker)
-    
-    # Mock embeddings to just return something
-    monkeypatch.setattr(model, "_get_embeddings", lambda text: None)
-    
-    # Mock max_sim_score to return length of text so we can test sorting/normalization
-    monkeypatch.setattr(model, "_max_sim_score", lambda q, d: float(len(str(d))))
-    
-    docs = [{"content": "short\ntext", "id": "1"}, {"content": "very long document here indeed yes", "id": "2"}]
-    
-    # Provide dummy q_embs so the mock function can run without failing
-    monkeypatch.setattr(model, "_get_embeddings", lambda text: str(text))
-    
+
+    # Mock HTTP response: server returns results sorted by text length (score=len)
+    class MockResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"results": [
+                {"index": 1, "score": 35.0, "text": "very long document here indeed yes"},
+                {"index": 0, "score": 10.0, "text": "short text"},
+            ]}
+
+    class MockClient:
+        def post(self, url, **kwargs): return MockResponse()
+
+    model._http_client = MockClient()
+    model._last_fail = 0.0
+    model._COOLDOWN_SECS = 60
+
+    docs = [{"text": "short text", "id": "1"}, {"text": "very long document here indeed yes", "id": "2"}]
+
     results = model.rerank("query", docs)
-    
+
     assert results[0]["id"] == "2"
     assert results[1]["id"] == "1"
-    
+
     assert results[0]["colbert_normalized"] == 1.0
     assert results[1]["colbert_normalized"] == 0.0
 

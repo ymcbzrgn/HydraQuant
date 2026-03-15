@@ -36,6 +36,18 @@ logger = logging.getLogger(__name__)
 _signal_stats = {"ai": 0, "fallback": 0, "voting": 0, "timeout": 0, "total": 0}
 
 # =============================================================================
+# MODEL SERVER HEALTH CHECK — BGE, ColBERT, FlashRank served via HTTP
+# =============================================================================
+try:
+    import httpx as _httpx
+    from ai_config import MODEL_SERVER_URL as _MS_URL
+    _ms_resp = _httpx.get(f"{_MS_URL}/health", timeout=5)
+    _ms_health = _ms_resp.json()
+    logger.info(f"[STARTUP] Model server ({_MS_URL}): {_ms_health}")
+except Exception as _ms_e:
+    logger.warning(f"[STARTUP] Model server unavailable: {_ms_e}. BGE/ColBERT/FlashRank will be disabled — FTS5+Gemini fallback active.")
+
+# =============================================================================
 # MODULE-LEVEL SINGLETONS — created ONCE at import/startup, reused forever.
 # This is THE memory leak fix: no more per-request instantiation.
 # =============================================================================

@@ -5,7 +5,7 @@ import json
 import logging
 import time
 import threading
-import numpy as np
+import httpx
 from dotenv import load_dotenv
 
 # --- Resilient imports: embedding works even if one backend is missing ---
@@ -16,14 +16,7 @@ try:
     from google import genai
     _GENAI_AVAILABLE = True
 except Exception as _e:
-    logging.getLogger(__name__).warning(f"[Embedding] google.genai unavailable ({type(_e).__name__}): {_e}. Gemini embedding disabled — using BGE local only.")
-
-_ST_AVAILABLE = False
-try:
-    from sentence_transformers import SentenceTransformer
-    _ST_AVAILABLE = True
-except Exception as _e:
-    logging.getLogger(__name__).warning(f"[Embedding] sentence_transformers unavailable ({type(_e).__name__}): {_e}. BGE local model disabled — using Gemini API only.")
+    logging.getLogger(__name__).warning(f"[Embedding] google.genai unavailable ({type(_e).__name__}): {_e}. Gemini embedding disabled — using BGE server only.")
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -31,7 +24,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
 # Constants
-from ai_config import AI_DB_PATH as DB_PATH
+from ai_config import AI_DB_PATH as DB_PATH, MODEL_SERVER_URL
 
 
 def _load_all_gemini_keys() -> list:
@@ -61,13 +54,19 @@ class DualEmbeddingPipeline:
     ]
 
     # Class-level singletons
-    _bge_model = None
     _genai_clients = None  # list of (api_key, genai.Client) tuples
     _key_index = 0  # round-robin index
     _key_lock = threading.Lock()
     _key_cooldowns = {}  # api_key -> cooldown_until timestamp
 
-    KEY_COOLDOWN_SECS = 120  # 2 min cooldown on 429
+    # BGE via model server HTTP (replaces in-process SentenceTransformer)
+    _http_client = None
+    _bge_server_checked = False
+    _bge_server_active = False
+    _bge_last_fail = 0.0  # timestamp of last HTTP failure
+    _BGE_COOLDOWN_SECS = 60  # skip BGE calls for 60s after failure
+
+    KEY_COOLDOWN_SECS = 120  # 2 min cooldown on Gemini 429
 
     def __init__(self):
         all_keys = _load_all_gemini_keys()
@@ -89,25 +88,30 @@ class DualEmbeddingPipeline:
                 DualEmbeddingPipeline._genai_clients = []
             logger.info("[Embedding] Gemini SDK unavailable — skipping API embedding init.")
 
-        # BGE-Financial local model (load if sentence_transformers is available)
-        if _ST_AVAILABLE and DualEmbeddingPipeline._bge_model is None:
-            logger.info("Loading local BGE-Financial embedding model (one-time, CPU)...")
-            DualEmbeddingPipeline._bge_model = SentenceTransformer("philschmid/bge-base-financial-matryoshka")
-            logger.info("[Embedding] BGE-Financial loaded successfully.")
-        elif not _ST_AVAILABLE and DualEmbeddingPipeline._bge_model is None:
-            logger.warning("[Embedding] sentence_transformers unavailable — BGE local model disabled.")
+        # BGE via model server HTTP (one-time health check at first init)
+        if DualEmbeddingPipeline._http_client is None:
+            DualEmbeddingPipeline._http_client = httpx.Client(timeout=10)
 
-        self.local_model = DualEmbeddingPipeline._bge_model
+        if not DualEmbeddingPipeline._bge_server_checked:
+            DualEmbeddingPipeline._bge_server_checked = True
+            try:
+                resp = DualEmbeddingPipeline._http_client.get(f"{MODEL_SERVER_URL}/health")
+                health = resp.json()
+                DualEmbeddingPipeline._bge_server_active = health.get("bge") == "active"
+                logger.info(f"[Embedding] Model server health: {health}")
+            except Exception as e:
+                DualEmbeddingPipeline._bge_server_active = False
+                logger.warning(f"[Embedding] Model server at {MODEL_SERVER_URL} unavailable: {e}. BGE disabled.")
 
         # Log active mode
         has_gemini = bool(DualEmbeddingPipeline._genai_clients)
-        has_bge = self.local_model is not None
+        has_bge = DualEmbeddingPipeline._bge_server_active
         if has_gemini and has_bge:
-            logger.info("[Embedding] Mode: DUAL (Gemini API + BGE local)")
+            logger.info("[Embedding] Mode: DUAL (Gemini API + BGE model server)")
         elif has_gemini:
-            logger.info("[Embedding] Mode: GEMINI-ONLY (no local model)")
+            logger.info("[Embedding] Mode: GEMINI-ONLY (BGE server unavailable)")
         elif has_bge:
-            logger.info("[Embedding] Mode: BGE-ONLY (no API)")
+            logger.info("[Embedding] Mode: BGE-ONLY (no Gemini API)")
         else:
             logger.error("[Embedding] Mode: NONE — no embedding backend available!")
 
@@ -147,7 +151,7 @@ class DualEmbeddingPipeline:
         logger.warning(f"[Embedding] Key ...{key[-6:]} penalized for {self.KEY_COOLDOWN_SECS}s")
 
     def _gemini_embed(self, text: str):
-        """Try all keys × all models. Returns embedding list or None."""
+        """Try all keys x all models. Returns embedding list or None."""
         if not _GENAI_AVAILABLE:
             return None
         clients = DualEmbeddingPipeline._genai_clients or []
@@ -188,10 +192,33 @@ class DualEmbeddingPipeline:
         logger.warning(f"[Embedding] All {len(clients)} Gemini keys exhausted or in cooldown. Falling back to BGE.")
         return None
 
+    def _bge_embed(self, text: str):
+        """Get BGE-Financial embedding via model server HTTP. Returns list or None."""
+        # Circuit breaker: skip if server failed recently
+        now = time.time()
+        if now - DualEmbeddingPipeline._bge_last_fail < self._BGE_COOLDOWN_SECS:
+            return None
+
+        try:
+            resp = DualEmbeddingPipeline._http_client.post(
+                f"{MODEL_SERVER_URL}/embed/bge",
+                json={"texts": [text]}
+            )
+            resp.raise_for_status()
+            embeddings = resp.json().get("embeddings", [])
+            if embeddings and len(embeddings[0]) > 0:
+                return embeddings[0]
+            logger.warning("[Embedding] BGE server returned empty embedding")
+            return None
+        except Exception as e:
+            DualEmbeddingPipeline._bge_last_fail = now
+            logger.warning(f"[Embedding] BGE server call failed: {e}")
+            return None
+
     def get_embeddings(self, text: str) -> dict:
         """
         Returns both Gemini and BGE embeddings for a given text.
-        Checks SQLite cache first. Falls back to BGE-only if Gemini exhausted.
+        Checks SQLite cache first. Falls back gracefully if either backend unavailable.
         """
         text_hash = self._hash_text(text)
 
@@ -219,26 +246,23 @@ class DualEmbeddingPipeline:
         # 2. Generate Embeddings (Cache Miss)
         logger.debug("Cache miss. Generating Dual Embeddings...")
 
-        # BGE-Financial local model (if available)
-        bge_emb = None
-        if self.local_model is not None:
-            try:
-                bge_emb = self.local_model.encode(text, normalize_embeddings=True).tolist()
-            except Exception as e:
-                logger.error(f"[Embedding] BGE encode failed: {e}")
+        # BGE-Financial via model server HTTP
+        bge_emb = self._bge_embed(text)
 
         # Gemini API (with key rotation + fallback)
         gemini_emb = None
         if _GENAI_AVAILABLE:
             gemini_emb = self._gemini_embed(text)
 
-        # Fallback logic: ensure both slots are filled
+        # Fallback logic: Gemini can fill BGE slot (same 768-dim), but NOT vice versa.
+        # BGE-Financial is domain-specific — copying Gemini to BGE slot would pollute
+        # the BGE collection with wrong semantic space and may cause dimension mismatch.
         if gemini_emb is None and bge_emb is not None:
             logger.debug("[Embedding] Gemini unavailable. Using BGE for both slots.")
             gemini_emb = bge_emb
         elif bge_emb is None and gemini_emb is not None:
-            logger.debug("[Embedding] BGE unavailable. Using Gemini for both slots.")
-            bge_emb = gemini_emb
+            logger.debug("[Embedding] BGE unavailable. Returning Gemini only (BGE slot empty).")
+            bge_emb = []  # Don't copy Gemini -> avoids dimension/semantic mismatch in BGE collection
         elif gemini_emb is None and bge_emb is None:
             logger.error("[Embedding] BOTH backends failed! Cannot generate embeddings.")
             return {"gemini": [], "bge": [], "cached": False}

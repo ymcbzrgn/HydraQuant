@@ -2,10 +2,13 @@ import os
 import math
 import sqlite3
 import logging
+import time
+import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from db import get_db_connection
+from ai_config import MODEL_SERVER_URL
 try:
     from rag_embedding import DualEmbeddingPipeline
 except Exception as _imp_err:
@@ -54,21 +57,22 @@ class HybridRetriever:
         self.embedder = DualEmbeddingPipeline() if DualEmbeddingPipeline is not None else None
         if self.embedder is None:
             logger.error("[HybridRetriever] DualEmbeddingPipeline unavailable. Search will be degraded.")
+
+        # FlashRank + ColBERT via model server HTTP (replaces in-process loading)
+        self._flashrank_http = httpx.Client(timeout=10)
+        self._flashrank_last_fail = 0.0
+        self._flashrank_available = False
+        self.colbert_reranker = None
         try:
-            from flashrank import Ranker, RerankRequest
-            self.reranker = Ranker(model_name="ms-marco-TinyBERT-L-2-v2", cache_dir=os.path.join(VECTOR_DB_DIR, "flashrank_cache"))
-            self._RerankRequest = RerankRequest
-        except ImportError:
-            logger.warning("FlashRank not found, disabling FlashRank component.")
-            self.reranker = None
-            self._RerankRequest = None
-            
-        try:
-            from colbert_reranker import ColBERTReranker
-            self.colbert_reranker = ColBERTReranker()
+            health_resp = self._flashrank_http.get(f"{MODEL_SERVER_URL}/health")
+            health = health_resp.json()
+            self._flashrank_available = health.get("flashrank") == "active"
+            if health.get("colbert") == "active":
+                from colbert_reranker import ColBERTReranker
+                self.colbert_reranker = ColBERTReranker()
+            logger.info(f"[HybridRetriever] Model server health: {health}")
         except Exception as e:
-            logger.warning(f"ColBERT disabled: {e}")
-            self.colbert_reranker = None
+            logger.warning(f"[HybridRetriever] Model server unavailable: {e}. FlashRank/ColBERT disabled.")
 
         try:
             from binary_quantizer import BinaryQuantizer
@@ -105,9 +109,11 @@ class HybridRetriever:
         embedded_count = 0
 
         # --- Phase 1: Generate embeddings (if embedder available) ---
+        # Track Gemini and BGE independently — BGE may be unavailable while Gemini works fine
         gemini_embeddings = []
         bge_embeddings = []
-        valid_indices = []  # Track which docs got valid embeddings
+        gemini_valid_indices = []
+        bge_valid_indices = []
 
         if self.embedder is not None:
             for i, doc in enumerate(documents):
@@ -115,47 +121,87 @@ class HybridRetriever:
                     embs = self.embedder.get_embeddings(doc)
                     g = embs.get('gemini', [])
                     b = embs.get('bge', [])
-                    if g and b:  # Both must be non-empty for ChromaDB
+                    if g:
                         gemini_embeddings.append(g)
+                        gemini_valid_indices.append(i)
+                    if b:
                         bge_embeddings.append(b)
-                        valid_indices.append(i)
-                    else:
-                        logger.warning(f"[HybridRetriever] Empty embedding for doc {ids[i]}, skipping ChromaDB.")
+                        bge_valid_indices.append(i)
+                    if not g:
+                        logger.warning(f"[HybridRetriever] Empty Gemini embedding for doc {ids[i]}, skipping.")
                 except Exception as e:
                     logger.warning(f"[HybridRetriever] Embedding failed for doc {ids[i]}: {e}")
         else:
             logger.warning("[HybridRetriever] Embedder unavailable — documents will be added to FTS5 only (keyword search).")
 
-        # --- Phase 2: Store vectors in ChromaDB (only valid embeddings) ---
-        if valid_indices:
-            valid_ids = [ids[i] for i in valid_indices]
-            valid_docs = [documents[i] for i in valid_indices]
-            valid_metas = [metadatas[i] for i in valid_indices]
-
+        # --- Phase 2: Store vectors in ChromaDB (separate try/except per collection) ---
+        # Primary: Gemini collection — drives embedded_count
+        if gemini_valid_indices:
+            g_ids = [ids[i] for i in gemini_valid_indices]
+            g_docs = [documents[i] for i in gemini_valid_indices]
+            g_metas = [metadatas[i] for i in gemini_valid_indices]
             try:
                 self.collection.add(
-                    ids=valid_ids,
-                    embeddings=gemini_embeddings,
-                    documents=valid_docs,
-                    metadatas=valid_metas
+                    ids=g_ids, embeddings=gemini_embeddings,
+                    documents=g_docs, metadatas=g_metas
                 )
-                self.bge_collection.add(
-                    ids=valid_ids,
-                    embeddings=bge_embeddings,
-                    documents=valid_docs,
-                    metadatas=valid_metas
-                )
-                embedded_count = len(valid_indices)
+                embedded_count = len(gemini_valid_indices)
             except Exception as e:
-                logger.error(f"[HybridRetriever] ChromaDB add failed: {e}")
+                if 'dimension' in str(e).lower():
+                    logger.warning(f"[HybridRetriever] Gemini collection dimension mismatch — recreating: {e}")
+                    try:
+                        cname = self.collection.name
+                        self.chroma_client.delete_collection(cname)
+                        self.collection = self.chroma_client.get_or_create_collection(
+                            name=cname, metadata={"hnsw:space": "cosine"}, embedding_function=None
+                        )
+                        self.collection.add(
+                            ids=g_ids, embeddings=gemini_embeddings,
+                            documents=g_docs, metadatas=g_metas
+                        )
+                        embedded_count = len(gemini_valid_indices)
+                        logger.info(f"[HybridRetriever] Gemini collection recreated — {embedded_count} docs added.")
+                    except Exception as retry_e:
+                        logger.error(f"[HybridRetriever] Gemini collection retry failed: {retry_e}")
+                else:
+                    logger.error(f"[HybridRetriever] ChromaDB Gemini add failed: {e}")
+
+        # Secondary: BGE collection — independent, failure does NOT affect embedded_count
+        if bge_valid_indices:
+            b_ids = [ids[i] for i in bge_valid_indices]
+            b_docs = [documents[i] for i in bge_valid_indices]
+            b_metas = [metadatas[i] for i in bge_valid_indices]
+            try:
+                self.bge_collection.add(
+                    ids=b_ids, embeddings=bge_embeddings,
+                    documents=b_docs, metadatas=b_metas
+                )
+            except Exception as e:
+                if 'dimension' in str(e).lower():
+                    logger.warning(f"[HybridRetriever] BGE collection dimension mismatch — recreating: {e}")
+                    try:
+                        bname = self.bge_collection.name
+                        self.chroma_client.delete_collection(bname)
+                        self.bge_collection = self.chroma_client.get_or_create_collection(
+                            name=bname, metadata={"hnsw:space": "cosine"}, embedding_function=None
+                        )
+                        self.bge_collection.add(
+                            ids=b_ids, embeddings=bge_embeddings,
+                            documents=b_docs, metadatas=b_metas
+                        )
+                        logger.info(f"[HybridRetriever] BGE collection recreated — {len(bge_valid_indices)} docs added.")
+                    except Exception as retry_e:
+                        logger.error(f"[HybridRetriever] BGE collection retry failed: {retry_e}")
+                else:
+                    logger.error(f"[HybridRetriever] ChromaDB BGE add failed: {e}")
 
         # --- Phase 3: ALWAYS add to FTS5 (no embeddings needed) + Binary BGE ---
-        # O(1) lookup for binary BGE phase
-        _valid_set = set(valid_indices)
-        _valid_pos = {orig_i: pos for pos, orig_i in enumerate(valid_indices)}
+        # O(1) lookup for binary BGE phase (uses bge_valid_indices, not gemini)
+        _bge_set = set(bge_valid_indices)
+        _bge_pos = {orig_i: pos for pos, orig_i in enumerate(bge_valid_indices)}
         try:
             packed_bges = None
-            if valid_indices and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+            if bge_valid_indices and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
                 import numpy as np
                 packed_bges = self.binary_quantizer.binarize_and_pack(np.array(bge_embeddings))
 
@@ -168,11 +214,11 @@ class HybridRetriever:
                         (doc_id, doc_text)
                     )
 
-                    # Binary BGE only for docs that have valid embeddings
-                    if packed_bges is not None and i in _valid_set:
+                    # Binary BGE only for docs that have valid BGE embeddings
+                    if packed_bges is not None and i in _bge_set:
                         cursor.execute(
                             "INSERT OR REPLACE INTO binary_embeddings (doc_id, packed_bge) VALUES (?, ?)",
-                            (doc_id, packed_bges[_valid_pos[i]].tobytes())
+                            (doc_id, packed_bges[_bge_pos[i]].tobytes())
                         )
                 conn.commit()
 
@@ -204,8 +250,9 @@ class HybridRetriever:
         1. MemoRAG Draft -> Expands the original query with global conceptual context
         2. Query -> SQLite FTS5 (BM25) -> Top 300 candidates
         3. Binary Quantization -> Pre-filter BM25 Top 300 to Top 30 via Hamming distance on BGE
-        4. Query -> Chroma (Dense Gemini) -> Top 30
-        5. RRF Fusion -> Top 20
+        4a. Query -> Chroma (Dense Gemini) -> Top 30
+        4b. Query -> Chroma (Dense BGE-Financial) -> Top 30 (complementary finance-domain search)
+        5. RRF Fusion (3-way: BM25 + Gemini + BGE) -> Top 20
         6. FlashRank + ColBERT -> Top K
         """
         # Phase 15: Generate MemoRAG Global Draft Context
@@ -299,8 +346,22 @@ class HybridRetriever:
                 )
                 dense_gemini_ids = dense_results['ids'][0] if dense_results['ids'] else []
 
-        # (BGE float search is bypassed completely by the binary quantizer pre-filter above)
+        # 3b. Dense Search — BGE-Financial embeddings (complementary to binary pre-filter)
+        # Binary quantization refines BM25 candidates (same pool, better ranking).
+        # BGE dense search finds candidates BM25 missed entirely (different pool).
+        # These are complementary — true 3-way RRF needs both.
         dense_bge_ids = []
+        if query_embs and query_embs.get('bge'):
+            try:
+                bge_count = self.bge_collection.count()
+                if bge_count > 0:
+                    bge_results = self.bge_collection.query(
+                        query_embeddings=[query_embs['bge']],
+                        n_results=min(30, bge_count)
+                    )
+                    dense_bge_ids = bge_results['ids'][0] if bge_results['ids'] else []
+            except Exception as e:
+                logger.warning(f"[HybridRetriever] BGE dense search failed (non-critical): {e}")
 
         # 3. Reciprocal Rank Fusion (3-way: BM25 + Gemini Dense + BGE Dense)
         fused_ids = self.reciprocal_rank_fusion([bm25_top_ids, dense_gemini_ids, dense_bge_ids])
@@ -406,17 +467,32 @@ class HybridRetriever:
         # Phase 3.15: Temporal Decay — penalize old news before reranking
         passages = self._apply_temporal_decay(passages)
 
-        # 4. Multi-Reranker Ensemble
+        # 4. Multi-Reranker Ensemble (via model server HTTP)
         flashrank_results = []
-        if self.reranker and self._RerankRequest:
-            rerank_request = self._RerankRequest(query=query, passages=passages)
-            flashrank_results = self.reranker.rerank(rerank_request)
-            if flashrank_results:
-                max_score = max(float(doc.get("score", 0.0)) for doc in flashrank_results)
-                min_score = min(float(doc.get("score", 0.0)) for doc in flashrank_results)
-                range_score = max_score - min_score if max_score > min_score else 1.0
-                for doc in flashrank_results:
-                    doc["flashrank_normalized"] = (float(doc.get("score", 0.0)) - min_score) / range_score
+        if self._flashrank_available and (time.time() - self._flashrank_last_fail >= 60):
+            try:
+                doc_texts = [p.get("text", p.get("content", "")) for p in passages]
+                resp = self._flashrank_http.post(
+                    f"{MODEL_SERVER_URL}/rerank/flashrank",
+                    json={"query": query, "documents": doc_texts, "top_k": len(passages)}
+                )
+                resp.raise_for_status()
+                server_results = resp.json().get("results", [])
+                for sr in server_results:
+                    idx = sr.get("index", 0)
+                    if 0 <= idx < len(passages):
+                        scored = passages[idx].copy()
+                        scored["score"] = sr.get("score", 0.0)
+                        flashrank_results.append(scored)
+                if flashrank_results:
+                    max_score = max(float(doc.get("score", 0.0)) for doc in flashrank_results)
+                    min_score = min(float(doc.get("score", 0.0)) for doc in flashrank_results)
+                    range_score = max_score - min_score if max_score > min_score else 1.0
+                    for doc in flashrank_results:
+                        doc["flashrank_normalized"] = (float(doc.get("score", 0.0)) - min_score) / range_score
+            except Exception as e:
+                self._flashrank_last_fail = time.time()
+                logger.warning(f"[HybridRetriever] FlashRank server call failed: {e}")
                     
         colbert_results = []
         if self.colbert_reranker:
