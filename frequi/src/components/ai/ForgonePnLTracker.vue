@@ -2,7 +2,7 @@
   <div class="card p-4">
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-xl font-bold flex items-center gap-2">
-        <i class="pi pi-briefcase"></i> Forgone P&L
+        <i class="pi pi-briefcase"></i> Blocked Signals Impact
       </h2>
       <Button icon="pi pi-refresh" @click="refreshData" :loading="aiStore.loading" class="p-button-sm p-button-text p-button-rounded" />
     </div>
@@ -17,7 +17,7 @@
         </div>
         <div>
           <div class="font-bold text-lg">Total Theoretical P&L</div>
-          <div class="text-sm text-gray-500">From {{ aiStore.forgonePnl.recent_signals }} rejected signals</div>
+          <div class="text-sm text-gray-600 dark:text-gray-400">From {{ aiStore.forgonePnl.recent_signals }} rejected signals</div>
         </div>
       </div>
 
@@ -28,10 +28,10 @@
 
       <!-- Weekly Summary -->
       <div>
-        <h3 class="text-sm font-semibold mb-3 text-gray-500">Weekly Breakdown</h3>
+        <h3 class="text-sm font-semibold mb-3 text-gray-600 dark:text-gray-400">Weekly Breakdown</h3>
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
            <div v-for="(val, week) in aiStore.forgonePnl.weekly_summary" :key="week" 
-                class="p-2 border rounded text-center dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm"
+                class="p-2 border rounded text-center dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm"
                 :class="{'border-green-500/30': val > 0, 'border-red-500/30': val < 0}">
              <div class="text-[10px] text-gray-400 font-mono">{{ week }}</div>
              <div class="font-bold text-sm" :class="getForgoneColor(val)">

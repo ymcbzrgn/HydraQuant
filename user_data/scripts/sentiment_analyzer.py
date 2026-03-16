@@ -14,46 +14,56 @@ MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 ONNX_DIR = os.path.join(MODELS_DIR, "onnx")
 PT_DIR = os.path.join(MODELS_DIR, "pytorch")
 
-# Graceful import: don't crash if transformers/torch not installed
-_HAS_TRANSFORMERS = False
-_USE_ONNX = False
-try:
-    from optimum.onnxruntime import ORTModelForSequenceClassification
-    from transformers import AutoTokenizer, pipeline as hf_pipeline
-    _HAS_TRANSFORMERS = True
-    _USE_ONNX = True
-except ImportError:
+# LAZY IMPORT: transformers/torch are NOT loaded at module level.
+# They consume ~3.9GB RAM just from being imported.
+# Only load them when local model fallback is actually needed (LLM API down).
+_HAS_TRANSFORMERS = None  # None = not checked yet, True/False = checked
+
+
+def _check_transformers():
+    """Lazy check: can we use local transformers models?"""
+    global _HAS_TRANSFORMERS
+    if _HAS_TRANSFORMERS is not None:
+        return _HAS_TRANSFORMERS
     try:
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
-        import torch
+        import transformers  # noqa: F401
         _HAS_TRANSFORMERS = True
     except ImportError:
-        logger.warning("[Sentiment] transformers/torch not available. Will use LLM API fallback.")
+        _HAS_TRANSFORMERS = False
+        logger.warning("[Sentiment] transformers not available. Local model fallback disabled.")
+    return _HAS_TRANSFORMERS
 
 
 def load_sentiment_pipeline(model_name):
-    """Load a local sentiment model. Returns None if not available."""
-    if not _HAS_TRANSFORMERS:
+    """Load a local sentiment model. Returns None if not available.
+    LAZY: Only imports torch/transformers when actually called."""
+    if not _check_transformers():
         return None
 
     onnx_path = os.path.join(ONNX_DIR, model_name)
     pt_path = os.path.join(PT_DIR, model_name)
 
     try:
-        if _USE_ONNX and os.path.exists(onnx_path):
-            model_path = onnx_path
-            logger.info(f"Loading ONNX model for {model_name} from {model_path}")
-            model = ORTModelForSequenceClassification.from_pretrained(model_path)
-        elif os.path.exists(pt_path):
-            model_path = pt_path
-            logger.info(f"Loading PyTorch model for {model_name} from {model_path}")
-            model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        else:
-            logger.warning(f"Model {model_name} not found locally at {onnx_path} or {pt_path}")
-            return None
+        if os.path.exists(onnx_path):
+            try:
+                from optimum.onnxruntime import ORTModelForSequenceClassification
+                from transformers import AutoTokenizer, pipeline as hf_pipeline
+                logger.info(f"Loading ONNX model for {model_name} from {onnx_path}")
+                model = ORTModelForSequenceClassification.from_pretrained(onnx_path)
+                tokenizer = AutoTokenizer.from_pretrained(onnx_path)
+                return hf_pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
+            except ImportError:
+                logger.warning(f"optimum.onnxruntime not available, trying PyTorch for {model_name}")
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        return hf_pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
+        if os.path.exists(pt_path):
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
+            logger.info(f"Loading PyTorch model for {model_name} from {pt_path}")
+            model = AutoModelForSequenceClassification.from_pretrained(pt_path)
+            tokenizer = AutoTokenizer.from_pretrained(pt_path)
+            return hf_pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
+
+        logger.warning(f"Model {model_name} not found locally at {onnx_path} or {pt_path}")
+        return None
     except Exception as e:
         logger.error(f"[Sentiment] Failed to load {model_name}: {e}")
         return None
@@ -66,18 +76,29 @@ def clean_text(text: str) -> str:
     return text
 
 
+# Module-level singleton: reuse LLMRouter across calls (shared circuit breaker + key rotation)
+_sentiment_router = None
+
+
+def _get_sentiment_router():
+    global _sentiment_router
+    if _sentiment_router is None:
+        from llm_router import LLMRouter
+        _sentiment_router = LLMRouter(temperature=0.1, request_timeout=30)
+    return _sentiment_router
+
+
 def _llm_sentiment_batch(articles: list) -> list:
     """
     Fallback: Use LLM Router to score sentiment when local models are unavailable.
     Processes articles in batches for cost efficiency.
     """
     try:
-        from llm_router import LLMRouter
         from langchain_core.messages import SystemMessage, HumanMessage
         import json
 
         from json_utils import extract_json_array
-        router = LLMRouter(temperature=0.0, request_timeout=30)
+        router = _get_sentiment_router()
 
         SYSTEM = """IDENTITY: You are a crypto market sentiment classifier with expertise in financial NLP.
 

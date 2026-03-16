@@ -2,14 +2,14 @@
   <div class="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700">
     <h3 class="text-sm font-bold mb-3 flex items-center justify-between">
       <span>Market Sentiment</span>
-      <span class="text-xs font-normal text-gray-500">{{ pair }}</span>
+      <span class="text-xs font-normal text-gray-600 dark:text-gray-400">{{ pair }}</span>
     </h3>
     
     <div v-if="sentiment" class="space-y-4">
       <!-- Fear & Greed -->
       <div>
         <div class="flex justify-between text-xs mb-1">
-          <span class="text-gray-500">Fear & Greed Index</span>
+          <span class="text-gray-600 dark:text-gray-400">Fear & Greed Index</span>
           <span class="font-bold" :class="getFgColor(sentiment.fear_greed)">{{ sentiment.fear_greed }}/100</span>
         </div>
         <ProgressBar :value="sentiment.fear_greed" :showValue="false" style="height: 6px;" :class="getFgBgColor(sentiment.fear_greed)" />
@@ -19,15 +19,15 @@
       <!-- Multi-Timeframe -->
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t dark:border-gray-700">
         <div class="text-center">
-          <div class="text-xs text-gray-500">1H</div>
+          <div class="text-xs text-gray-600 dark:text-gray-400">1H</div>
           <div class="font-bold text-sm" :class="getSentimentColor(sentiment.sentiment_1h)">{{ formatScore(sentiment.sentiment_1h) }}</div>
         </div>
         <div class="text-center">
-          <div class="text-xs text-gray-500">4H</div>
+          <div class="text-xs text-gray-600 dark:text-gray-400">4H</div>
           <div class="font-bold text-sm" :class="getSentimentColor(sentiment.sentiment_4h)">{{ formatScore(sentiment.sentiment_4h) }}</div>
         </div>
         <div class="text-center">
-          <div class="text-xs text-gray-500">24H</div>
+          <div class="text-xs text-gray-600 dark:text-gray-400">24H</div>
           <div class="font-bold text-sm" :class="getSentimentColor(sentiment.sentiment_24h)">{{ formatScore(sentiment.sentiment_24h) }}</div>
         </div>
       </div>

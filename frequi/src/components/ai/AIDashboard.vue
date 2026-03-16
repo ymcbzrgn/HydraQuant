@@ -2,11 +2,11 @@
   <div class="p-3 sm:p-4 md:p-6 max-w-[1600px] mx-auto space-y-4">
     <!-- Header -->
     <div class="flex items-center justify-between">
-      <h1 class="text-2xl font-bold flex items-center gap-2">
+      <h1 class="text-xl sm:text-2xl font-bold flex items-center gap-2">
         <i class="pi pi-bolt text-primary"></i> AI Trading
       </h1>
       <div class="flex items-center gap-3">
-        <span v-if="aiStore.lastFetchTime" class="text-xs text-gray-400 hidden md:inline">
+        <span v-if="aiStore.lastFetchTime" class="text-xs text-gray-500 dark:text-gray-400 hidden md:inline">
           {{ aiStore.lastFetchTime?.toLocaleTimeString() }}
         </span>
         <Tag :severity="aiStore.isAiOnline ? 'success' : 'danger'"
@@ -16,7 +16,7 @@
       </div>
     </div>
 
-    <!-- Phase 2: Error / Offline / Stale banners -->
+    <!-- Error / Offline / Stale banners -->
     <Message v-if="aiStore.error" severity="error" :closable="false" class="text-sm">
       <strong>{{ aiStore.error }}</strong>
       <Button label="Retry" icon="pi pi-refresh" @click="refresh" :loading="aiStore.loading"
@@ -37,13 +37,13 @@
     </div>
     <div v-else class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
 
-      <!-- Daily P&L (most important) -->
+      <!-- Daily P&L -->
       <div class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div class="text-xs text-gray-500 mb-1">Today's P&L</div>
-        <div class="text-xl font-bold" :class="dailyPnlColor">
+        <div class="text-xs text-gray-600 dark:text-gray-400 mb-1">Today's P&L</div>
+        <div class="text-lg sm:text-xl font-bold" :class="dailyPnlColor">
           {{ dailyPnlFormatted }}
         </div>
-        <div class="text-xs text-gray-400 mt-1">
+        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
           {{ aiStore.dailyStats?.wins || 0 }}W / {{ aiStore.dailyStats?.losses || 0 }}L
           ({{ aiStore.dailyStats?.closed_today || 0 }} trades)
         </div>
@@ -51,28 +51,28 @@
 
       <!-- Portfolio -->
       <div class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div class="text-xs text-gray-500 mb-1">Portfolio</div>
-        <div class="text-xl font-bold">{{ aiStore.portfolioValueFormatted }}</div>
-        <div class="text-xs text-gray-400 mt-1">
+        <div class="text-xs text-gray-600 dark:text-gray-400 mb-1">Portfolio</div>
+        <div class="text-lg sm:text-xl font-bold">{{ aiStore.portfolioValueFormatted }}</div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
           {{ aiStore.portfolio?.stake_currency || 'USDT' }} |
           {{ Object.keys(aiStore.portfolio?.assets || {}).length }} asset
         </div>
       </div>
 
-      <!-- Win Rate -->
+      <!-- Signal Accuracy (was: Win Rate) -->
       <div class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div class="text-xs text-gray-500 mb-1">Win Rate</div>
-        <div class="text-xl font-bold" :class="winRateColor">
+        <div class="text-xs text-gray-600 dark:text-gray-400 mb-1">Signal Accuracy</div>
+        <div class="text-lg sm:text-xl font-bold" :class="winRateColor">
           {{ aiStore.winRate.toFixed(0) }}%
         </div>
         <ProgressBar :value="aiStore.winRate" :showValue="false"
                      style="height: 4px;" class="mt-2" />
       </div>
 
-      <!-- Risk Budget -->
+      <!-- Daily Loss Limit (was: Risk Budget) -->
       <div class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div class="text-xs text-gray-500 mb-1">Risk Budget</div>
-        <div class="text-xl font-bold" :class="riskColor">
+        <div class="text-xs text-gray-600 dark:text-gray-400 mb-1">Daily Loss Limit</div>
+        <div class="text-lg sm:text-xl font-bold" :class="riskColor">
           {{ aiStore.risk?.utilization_pct?.toFixed(1) || '0' }}%
         </div>
         <ProgressBar :value="aiStore.risk?.utilization_pct || 0" :showValue="false"
@@ -81,43 +81,55 @@
 
       <!-- Fear & Greed -->
       <div class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div class="text-xs text-gray-500 mb-1">Fear & Greed</div>
-        <div class="text-xl font-bold" :class="fgColor">
+        <div class="text-xs text-gray-600 dark:text-gray-400 mb-1">Fear & Greed</div>
+        <div class="text-lg sm:text-xl font-bold" :class="fgColor">
           {{ aiStore.fearGreedIndex }}
         </div>
         <div class="text-xs mt-1" :class="fgColor">{{ fgLabel }}</div>
       </div>
     </div>
 
-    <!-- $100 Hypothetical Portfolio -->
-    <div v-if="aiStore.hypothetical && aiStore.hypothetical.total_trades > 0"
-         class="p-3 rounded-lg border dark:border-gray-700 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20">
-      <div class="flex items-center justify-between">
-        <div class="text-xs text-gray-500 font-semibold">$100 Simulation</div>
-        <Tag severity="info" :value="`${aiStore.hypothetical.total_trades} trades`" class="text-xs" />
+    <!-- $100 Hypothetical + Overall Confidence -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div v-if="aiStore.hypothetical && aiStore.hypothetical.total_trades > 0"
+           class="p-3 rounded-lg border dark:border-gray-700 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30">
+        <div class="flex items-center justify-between">
+          <div class="text-xs text-gray-600 dark:text-gray-400 font-semibold">$100 Simulation</div>
+          <Tag severity="info" :value="`${aiStore.hypothetical.total_trades} trades`" class="text-xs" />
+        </div>
+        <div class="flex flex-col sm:flex-row items-baseline gap-2 mt-1">
+          <span class="text-lg font-bold">${{ aiStore.hypothetical.current_balance.toFixed(2) }}</span>
+          <span class="text-sm font-semibold" :class="aiStore.hypothetical.total_return_pct >= 0 ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
+            {{ aiStore.hypothetical.total_return_pct >= 0 ? '+' : '' }}{{ aiStore.hypothetical.total_return_pct.toFixed(2) }}%
+          </span>
+        </div>
       </div>
-      <div class="flex items-baseline gap-2 mt-1">
-        <span class="text-lg font-bold">${{ aiStore.hypothetical.current_balance.toFixed(2) }}</span>
-        <span class="text-sm font-semibold" :class="aiStore.hypothetical.total_return_pct >= 0 ? 'text-green-500' : 'text-red-500'">
-          {{ aiStore.hypothetical.total_return_pct >= 0 ? '+' : '' }}{{ aiStore.hypothetical.total_return_pct.toFixed(2) }}%
-        </span>
+
+      <!-- Overall AI Confidence (ConfidenceScore integration) -->
+      <div v-if="recentSignals.length > 0"
+           class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 flex items-center gap-4">
+        <ConfidenceScore :confidence="overallConfidence" />
+        <div>
+          <div class="text-xs text-gray-600 dark:text-gray-400">Avg Confidence</div>
+          <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">Last {{ recentSignals.length }} signals</div>
+        </div>
       </div>
     </div>
 
-    <!-- Row 2: Status Bar -->
-    <div class="flex flex-wrap gap-3 text-sm">
+    <!-- Status Bar -->
+    <div class="flex flex-wrap gap-2 text-sm">
       <Tag severity="info" class="font-mono">
         <i class="pi pi-bolt mr-1"></i>
         L{{ aiStore.autonomy?.current_level ?? '?' }} {{ levelName }}
       </Tag>
       <Tag severity="secondary" class="font-mono">
-        Kelly: {{ ((aiStore.autonomy?.kelly_fraction || 0) * 100).toFixed(0) }}%
+        Size: {{ ((aiStore.autonomy?.kelly_fraction || 0) * 100).toFixed(0) }}%
       </Tag>
       <Tag severity="secondary" class="font-mono">
-        {{ aiStore.risk?.active_positions || 0 }} position
+        {{ aiStore.risk?.active_positions || 0 }} positions
       </Tag>
       <Tag severity="secondary" class="font-mono">
-        {{ aiStore.metrics?.total_decisions || 0 }} decisions (24h)
+        {{ aiStore.metrics?.total_decisions || 0 }} inferences (24h)
       </Tag>
       <Tag severity="secondary" class="font-mono">
         Cache: {{ ((aiStore.metrics?.cache_hit_rate || 0) * 100).toFixed(0) }}%
@@ -130,18 +142,34 @@
       </Tag>
     </div>
 
+    <!-- Market Sentiment (SentimentDisplay integration) -->
+    <div v-if="aiStore.marketSentiment && Object.keys(aiStore.marketSentiment.coins || {}).length > 0"
+         class="border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 overflow-hidden">
+      <div class="p-3 border-b dark:border-gray-700">
+        <h2 class="font-bold text-sm flex items-center gap-2">
+          <i class="pi pi-globe"></i> Market Sentiment
+        </h2>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-3">
+        <SentimentDisplay
+          v-for="(data, coin) in topSentimentCoins" :key="coin"
+          :pair="`${coin}/USDT`"
+          :sentiment="{ pair: `${coin}/USDT`, sentiment_1h: data.sentiment_1h, sentiment_4h: data.sentiment_4h, sentiment_24h: data.sentiment_24h, fear_greed: aiStore.fearGreedIndex, source_count: data.news_count, last_update: '' }" />
+      </div>
+    </div>
+
     <!-- Alerts Feed -->
-    <div v-if="aiStore.alerts.length > 0" class="space-y-2">
+    <div v-if="aiStore.alerts && aiStore.alerts.length > 0" class="space-y-2">
       <Message v-for="(alert, idx) in aiStore.alerts.slice(0, 5)" :key="idx"
                :severity="alertSeverity(alert.level)" :closable="true" class="text-sm">
         {{ alert.message }}
-        <span class="text-xs text-gray-400 ml-2">{{ formatTime(alert.timestamp) }}</span>
+        <span class="text-xs text-gray-500 dark:text-gray-400 ml-2">{{ formatTime(alert.timestamp) }}</span>
       </Message>
     </div>
 
-    <!-- Forgone P&L Warning (only if significant) -->
+    <!-- Blocked Signals Impact (was: Forgone P&L) -->
     <Message v-if="forgoneWarning" :severity="forgoneSeverity" :closable="false" class="text-sm">
-      <strong>Forgone P&L: ${{ aiStore.forgonePnl?.total_forgone?.toFixed(2) }}</strong>
+      <strong>Blocked Signals: ${{ aiStore.forgonePnl?.total_forgone?.toFixed(2) }}</strong>
       {{ forgoneMessage }}
       <span class="text-xs ml-2">({{ aiStore.forgonePnl?.recent_signals || 0 }} signals tracked)</span>
     </Message>
@@ -156,20 +184,20 @@
           View all &rarr;
         </router-link>
       </div>
-      <DataTable :value="recentSignals" :rows="10" responsiveLayout="scroll"
+      <DataTable :value="recentSignals" :rows="10" responsiveLayout="stack" breakpoint="640px"
                  class="p-datatable-sm" @row-click="onRowClick" rowHover
                  :loading="aiStore.loading">
-        <Column field="pair" header="Pair" style="width: 15%">
+        <Column field="pair" header="Pair">
           <template #body="{ data }">
             <span class="font-mono font-bold text-sm">{{ data.pair }}</span>
           </template>
         </Column>
-        <Column field="signal" header="Signal" style="width: 12%">
+        <Column field="signal" header="Signal">
           <template #body="{ data }">
             <Tag :severity="signalSeverity(data.signal)" :value="data.signal" />
           </template>
         </Column>
-        <Column field="confidence" header="Confidence" style="width: 18%">
+        <Column field="confidence" header="Confidence">
           <template #body="{ data }">
             <div class="flex items-center gap-2">
               <ProgressBar :value="data.confidence * 100" :showValue="false"
@@ -178,42 +206,43 @@
             </div>
           </template>
         </Column>
-        <Column field="outcome" header="Outcome" style="width: 12%">
+        <Column field="outcome" header="Outcome">
           <template #body="{ data }">
             <span :class="outcomeClass(data.outcome)" class="font-mono text-sm">
               {{ data.outcome || 'Pending' }}
             </span>
           </template>
         </Column>
-        <Column field="timestamp" header="Time" style="width: 18%">
+        <Column field="timestamp" header="Time">
           <template #body="{ data }">
-            <span class="text-xs text-gray-500">{{ formatTime(data.timestamp) }}</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">{{ formatTime(data.timestamp) }}</span>
           </template>
         </Column>
       </DataTable>
       <div v-if="!recentSignals.length && !aiStore.loading"
-           class="p-6 text-center text-gray-400 text-sm">
+           class="p-6 text-center text-gray-500 dark:text-gray-400 text-sm">
         No signals yet. AI pipeline is warming up...
       </div>
     </div>
 
     <!-- Signal Reasoning Modal -->
-    <Dialog v-model:visible="showModal" header="AI Reasoning" :style="{width: '95vw', maxWidth: '800px'}" modal closable>
+    <Dialog v-model:visible="showModal" header="AI Reasoning"
+            :style="{width: '95vw', maxWidth: '800px'}" modal closable>
       <TradeReasoning v-if="selectedSignal" :signal="selectedSignal" />
     </Dialog>
 
     <!-- Quick Links -->
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
       <router-link to="/ai/analytics"
-        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
+        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
         <i class="pi pi-chart-bar mr-1"></i> Analytics
       </router-link>
       <router-link to="/ai/risk"
-        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
+        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
         <i class="pi pi-shield mr-1"></i> Risk
       </router-link>
       <router-link to="/ai/settings"
-        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
+        class="p-3 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-center text-sm font-medium transition-colors">
         <i class="pi pi-cog mr-1"></i> Settings
       </router-link>
     </div>
@@ -234,6 +263,8 @@ import Message from 'primevue/message';
 import Dialog from 'primevue/dialog';
 import Skeleton from 'primevue/skeleton';
 import TradeReasoning from './TradeReasoning.vue';
+import ConfidenceScore from './ConfidenceScore.vue';
+import SentimentDisplay from './SentimentDisplay.vue';
 
 const aiStore = useAiStore();
 
@@ -254,6 +285,19 @@ const refresh = async () => {
 
 const recentSignals = computed(() => (aiStore.signals || []).slice(0, 15));
 
+const overallConfidence = computed(() => {
+  const sigs = aiStore.signals || [];
+  if (sigs.length === 0) return 0;
+  const recent = sigs.slice(0, 10);
+  return recent.reduce((sum, s) => sum + s.confidence, 0) / recent.length;
+});
+
+const topSentimentCoins = computed(() => {
+  const coins = aiStore.marketSentiment?.coins || {};
+  const entries = Object.entries(coins).slice(0, 3);
+  return Object.fromEntries(entries);
+});
+
 const levelName = computed(() => {
   const names = ['Nano-live', 'Micro-live', 'Small-live', 'Cautious-live', 'Standard-live', 'Full-auto'];
   return names[aiStore.autonomy?.current_level ?? 0] || '';
@@ -268,33 +312,33 @@ const dailyPnlFormatted = computed(() => {
 
 const dailyPnlColor = computed(() => {
   const pnl = aiStore.dailyStats?.daily_pnl ?? 0;
-  if (pnl > 0) return 'text-green-500';
-  if (pnl < 0) return 'text-red-500';
-  return 'text-gray-400';
+  if (pnl > 0) return 'text-green-500 dark:text-green-400';
+  if (pnl < 0) return 'text-red-500 dark:text-red-400';
+  return 'text-gray-500 dark:text-gray-400';
 });
 
 const winRateColor = computed(() => {
   const wr = aiStore.winRate;
-  if (wr >= 60) return 'text-green-500';
-  if (wr >= 45) return 'text-yellow-500';
-  return 'text-red-500';
+  if (wr >= 60) return 'text-green-500 dark:text-green-400';
+  if (wr >= 45) return 'text-yellow-500 dark:text-yellow-400';
+  return 'text-red-500 dark:text-red-400';
 });
 
 const riskColor = computed(() => {
   const pct = aiStore.risk?.utilization_pct || 0;
-  if (pct >= 100) return 'text-red-500';
-  if (pct >= 75) return 'text-orange-500';
-  if (pct >= 50) return 'text-yellow-500';
-  return 'text-green-500';
+  if (pct >= 100) return 'text-red-500 dark:text-red-400';
+  if (pct >= 75) return 'text-orange-500 dark:text-orange-400';
+  if (pct >= 50) return 'text-yellow-500 dark:text-yellow-400';
+  return 'text-green-500 dark:text-green-400';
 });
 
 const fgColor = computed(() => {
   const fg = aiStore.fearGreedIndex;
-  if (fg >= 75) return 'text-green-500';
-  if (fg >= 55) return 'text-green-400';
-  if (fg >= 45) return 'text-yellow-500';
-  if (fg >= 25) return 'text-orange-500';
-  return 'text-red-500';
+  if (fg >= 75) return 'text-green-500 dark:text-green-400';
+  if (fg >= 55) return 'text-green-400 dark:text-green-300';
+  if (fg >= 45) return 'text-yellow-500 dark:text-yellow-400';
+  if (fg >= 25) return 'text-orange-500 dark:text-orange-400';
+  return 'text-red-500 dark:text-red-400';
 });
 
 const fgLabel = computed(() => {
@@ -344,11 +388,11 @@ function signalSeverity(signal: string) {
 }
 
 function outcomeClass(outcome?: string) {
-  if (!outcome || outcome === 'Pending') return 'text-gray-400';
+  if (!outcome || outcome === 'Pending') return 'text-gray-400 dark:text-gray-500';
   const val = parseFloat(outcome.replace('%', ''));
-  if (val > 0) return 'text-green-500 font-bold';
-  if (val < 0) return 'text-red-500 font-bold';
-  return 'text-gray-500';
+  if (val > 0) return 'text-green-500 dark:text-green-400 font-bold';
+  if (val < 0) return 'text-red-500 dark:text-red-400 font-bold';
+  return 'text-gray-500 dark:text-gray-400';
 }
 
 function formatTime(ts: string) {
