@@ -3,7 +3,7 @@
     <div class="flex items-center gap-4 mb-4 flex-wrap break-words">
       <div class="text-2xl font-bold">{{ signal.pair }}</div>
       <Tag :severity="getDirectionSeverity(signal.signal)" :value="signal.signal" class="text-lg"></Tag>
-      <div class="ml-auto text-sm text-gray-500">{{ formatDate(signal.timestamp) }}</div>
+      <div class="ml-auto text-sm text-gray-600 dark:text-gray-400">{{ formatDate(signal.timestamp) }}</div>
     </div>
 
     <TabView>
@@ -16,11 +16,11 @@
       <TabPanel header="Parameters">
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="p-3 border rounded-lg dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col items-center">
-            <div class="text-sm text-gray-500 mb-2">Confidence Score</div>
+            <div class="text-sm text-gray-600 dark:text-gray-400 mb-2">Confidence Score</div>
             <ConfidenceScore :confidence="signal.confidence" />
           </div>
           <div class="p-3 border rounded-lg dark:border-gray-700 bg-white dark:bg-gray-900">
-            <div class="text-sm text-gray-500 mb-1">Trade Outcome</div>
+            <div class="text-sm text-gray-600 dark:text-gray-400 mb-1">Trade Outcome</div>
             <div class="text-lg font-semibold"
                  :class="{'text-green-500': parseOutcome(signal.outcome) > 0,
                           'text-red-500': parseOutcome(signal.outcome) < 0}">

@@ -291,7 +291,9 @@ class HybridRetriever:
                 # Coin pairs like "0G/USDT:USDT" contain / and : which are FTS5 operators.
                 # Also prevents ( ) * + - AND OR NOT from breaking MATCH queries.
                 sanitized = "".join(c if c.isalnum() else " " for c in original_query)
-                terms = [t for t in sanitized.split() if len(t) > 1]
+                # FTS5 reserved keywords — must be excluded from query terms
+                _fts5_reserved = {"AND", "OR", "NOT", "NEAR"}
+                terms = [t for t in sanitized.split() if len(t) > 1 and t.upper() not in _fts5_reserved]
                 if terms:
                     fts_query = " OR ".join(terms)
                 else:
@@ -308,9 +310,11 @@ class HybridRetriever:
                 
                 # 2. Pre-filter BM25 results with Binary Quantization (BGE Hamming Distance)
                 # Instead of hitting Chroma with float BGE, we do an ultra-fast local binary filter
-                if bm25_top_ids and query_embs and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
+                bge_emb = query_embs.get('bge') if query_embs else None
+                has_bge = bge_emb is not None and hasattr(bge_emb, '__len__') and len(bge_emb) > 0
+                if bm25_top_ids and has_bge and hasattr(self, 'binary_quantizer') and self.binary_quantizer:
                     import numpy as np
-                    q_bin = self.binary_quantizer.binarize_and_pack(np.array(query_embs['bge']))
+                    q_bin = self.binary_quantizer.binarize_and_pack(np.array(bge_emb))
                     placeholders = ",".join(["?"] * len(bm25_top_ids))
                     cursor.execute(f"SELECT doc_id, packed_bge FROM binary_embeddings WHERE doc_id IN ({placeholders})", bm25_top_ids)
                     bin_rows = cursor.fetchall()

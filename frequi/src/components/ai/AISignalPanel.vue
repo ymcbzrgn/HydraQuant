@@ -1,18 +1,18 @@
 <template>
   <div class="card p-4">
-    <div class="flex justify-between items-center mb-4">
-      <h2 class="text-xl font-bold">AI Trade Signals</h2>
-      <div class="flex gap-2">
-        <InputText v-model="filters.pair" placeholder="Search Pair..." class="p-inputtext-sm" />
-        <Dropdown v-model="filters.direction" :options="['ALL', 'BULLISH', 'BEARISH', 'NEUTRAL']" class="p-dropdown-sm w-32" />
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+      <h2 class="text-lg sm:text-xl font-bold">AI Trade Signals</h2>
+      <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+        <InputText v-model="filters.pair" placeholder="Search Pair..." class="p-inputtext-sm w-full sm:w-32" />
+        <Dropdown v-model="filters.direction" :options="['ALL', 'BULLISH', 'BEARISH', 'NEUTRAL']" class="p-dropdown-sm w-full sm:w-32" />
         <Button icon="pi pi-refresh" @click="refreshData" :loading="aiStore.loading" class="p-button-sm p-button-outlined" />
       </div>
     </div>
     
     <Message v-if="aiStore.error" severity="error" :closable="false">{{ aiStore.error }}</Message>
 
-    <DataTable :value="filteredSignals" :paginator="true" :rows="10" 
-               responsiveLayout="scroll" class="p-datatable-sm w-full mt-2" 
+    <DataTable :value="filteredSignals" :paginator="true" :rows="10"
+               responsiveLayout="stack" breakpoint="640px" class="p-datatable-sm w-full mt-2" 
                :loading="aiStore.loading" @row-click="onRowClick" rowHover>
       
       <Column field="pair" header="Pair" :sortable="true"></Column>
@@ -50,7 +50,7 @@
     </DataTable>
 
     <!-- Modal for Reasoning -->
-    <Dialog v-model:visible="showModal" header="AI Reasoning" :style="{width: '60vw'}" modal closable>
+    <Dialog v-model:visible="showModal" header="AI Reasoning" :style="{width: '95vw', maxWidth: '800px'}" modal closable>
       <TradeReasoning v-if="selectedSignal" :signal="selectedSignal" />
     </Dialog>
   </div>

@@ -37,6 +37,7 @@ class AIFreqtradeSizer(IStrategy):
     ignore_roi_if_entry_signal = False
     can_short = True  # Futures: enable both LONG and SHORT
     startup_candle_count = 400  # EMA 200 + daily RSI warmup + multi-timeframe resampling
+    position_adjustment_enable = True  # Phase 22: DCA + partial exit via adjust_trade_position
 
     # Minimal ROI (handled mostly by AI and custom stoploss)
     minimal_roi = {
@@ -52,16 +53,24 @@ class AIFreqtradeSizer(IStrategy):
 
     # Trailing stop
     trailing_stop = False
-    
+
     timeframe = '1h'
+
+    # ── Hyperopt Parameters (Phase 22) ──────────────────────────────────
+    # These make ALL key thresholds tunable via: freqtrade hyperopt --spaces entry exit stake protection
+    confidence_threshold = DecimalParameter(0.30, 0.80, decimals=2, default=0.50, space='buy', optimize=True, load=True)
+    atr_stoploss_mult = DecimalParameter(1.5, 5.0, decimals=1, default=3.0, space='protection', optimize=True, load=True)
+    fg_extreme_threshold = IntParameter(15, 30, default=20, space='buy', optimize=True, load=True)
+    stale_trade_hours = IntParameter(4, 24, default=8, space='sell', optimize=True, load=True)
+    leverage_max = DecimalParameter(1.0, 5.0, decimals=1, default=2.0, space='buy', optimize=True, load=True)
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self.db_path = os.path.join(self.config['user_data_dir'], "db", "ai_data.sqlite")
         self.rag_script_path = os.path.join(self.config['user_data_dir'], "scripts", "rag_graph.py")
         self.ai_signal_cache = {} # Memory cache: { "BTC/USDT": {"signal": "BULLISH", "confidence": 0.8, "timestamp": datetime} }
-        self.cache_ttl_hours = 4 # Non-NEUTRAL signals valid for 4 hours
-        self._neutral_ttl_hours = 0.9  # NEUTRAL signals expire before next 1h candle
+        self.cache_ttl_hours = 6 # Non-NEUTRAL signals valid for 6 hours (Phase 22: increased from 4h)
+        self._neutral_ttl_hours = 1.5  # NEUTRAL signals retried after 1.5h (Phase 22: increased from 0.9h)
 
         # Phase 3.5: Forgone P&L Engine — tracks every missed signal
         self.forgone_engine = ForgonePnLEngine(db_path=self.db_path)
@@ -793,18 +802,34 @@ class AIFreqtradeSizer(IStrategy):
         """
         Dynamic ATR-based stoploss. Sizing manages risk, so we allow wide breathing room
         but cut if trend drastically reverses (e.g. 3x ATR).
+        Handles both LONG and SHORT positions correctly.
         """
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
-        
-        if 'atr' in last_candle:
+
+        if 'atr' in last_candle and current_rate > 0:
             atr = last_candle['atr']
-            # Allow 3 ATRs of breathing room relative to current rate
-            new_stop = (current_rate - (3 * atr)) / current_rate
-            result = new_stop - 1
+
+            mult = self.atr_stoploss_mult.value
+
+            if trade.is_short:
+                # SHORT: stoploss is ABOVE current price
+                stop_price = current_rate + (mult * atr)
+                result = -((stop_price / current_rate) - 1)
+            else:
+                # LONG: stoploss is BELOW current price
+                stop_price = current_rate - (mult * atr)
+                result = (stop_price / current_rate) - 1
+
+            # Sanity: result must be negative (a loss). If ATR is stale/huge, fall back.
+            if result >= 0:
+                logger.warning(f"[Stoploss] {pair} ATR-based SL would be >= current price "
+                               f"(atr={atr:.4f}, rate={current_rate:.4f}). Using hard stoploss.")
+                return self.stoploss
+
             # Never exceed hard stop of -0.20
             return max(result, self.stoploss)
-            
+
         return self.stoploss
 
     def _sync_portfolio_to_ai(self):
@@ -833,8 +858,8 @@ class AIFreqtradeSizer(IStrategy):
                     else:
                         usd = 0.0
                         try:
-                            pair = f"{currency}/{stake}"
-                            ticker = self.wallets._exchange.fetch_ticker(pair)
+                            tpair = f"{currency}/{stake}"
+                            ticker = self.dp.ticker(tpair) if self.dp else {}
                             price = ticker.get('last', 0) or 0
                             usd = round(amount * price, 2)
                             total_portfolio_usd += usd
@@ -938,6 +963,17 @@ class AIFreqtradeSizer(IStrategy):
             if autonomy_cap is not None:
                 final_stake = min(final_stake, autonomy_cap)
 
+            # Phase 22: Funding rate check — extreme funding = reduce position
+            try:
+                funding = self.dp.funding_rate(pair)
+                if funding and isinstance(funding, dict):
+                    fr = funding.get('fundingRate', 0)
+                    if fr and abs(fr) > 0.0005:  # >0.05% funding = extreme
+                        final_stake *= 0.5  # Halve position on extreme funding
+                        logger.info(f"[FundingRate] {pair} extreme funding {fr:.4%}, halving stake")
+            except Exception:
+                pass
+
             # Consume budget for this trade
             atr_volatility = last_candle.get('atr', 0.02) / current_rate if current_rate > 0 else 0.02
             self.risk_budget.consume_budget(final_stake, atr_volatility, confidence)
@@ -951,7 +987,7 @@ class AIFreqtradeSizer(IStrategy):
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime, entry_tag: str,
                             side: str, **kwargs) -> bool:
-        """Mark the forgone P&L entry as ACTUALLY executed (trade opened)."""
+        """Mark the forgone P&L entry as ACTUALLY executed. Store AI metadata in Trade.custom_data."""
         logger.warning(
             f"[TRADE-ATTEMPT] confirm_trade_entry CALLED: {pair} side={side} "
             f"rate={rate:.6f} stake=${amount*rate:.2f}"
@@ -961,10 +997,35 @@ class AIFreqtradeSizer(IStrategy):
         signal_type = "BULL" if side == "long" else "BEAR"
         reasoning = ai_decision.get('reasoning', "Technical entry with AI confirmation")
 
+        # Phase 22: Store AI metadata in Trade.custom_data (persists across restarts)
+        trade = kwargs.get('trade')
+        if trade:
+            try:
+                trade.set_custom_data("ai_confidence", round(confidence, 4))
+                trade.set_custom_data("ai_signal", signal_type)
+                trade.set_custom_data("ai_reasoning", reasoning[:500] if reasoning else "")
+                # Snapshot market state at entry for exit comparison
+                dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                if dataframe is not None and len(dataframe) > 0:
+                    last = dataframe.iloc[-1]
+                    trade.set_custom_data("entry_fng", int(last.get('%-fng_index', 50)))
+                    trade.set_custom_data("entry_rsi", round(float(last.get('rsi', 50)), 1))
+                    trade.set_custom_data("entry_sentiment_24h", round(float(last.get('%-sentiment_24h', 0)), 3))
+            except Exception as e:
+                logger.debug(f"[custom_data] Failed to store: {e}")
+
         # Update the existing forgone entry (logged in populate_entry_trend) to was_executed=True
         fid = self._forgone_ids.pop(pair, None)
         if fid:
             self.forgone_engine.mark_executed(fid)
+
+        # Phase 22: Notify via strategy message
+        try:
+            self.dp.send_msg(
+                f"AI Entry: {pair} {signal_type} conf={confidence:.0%} stake=${amount*rate:.2f}"
+            )
+        except Exception:
+            pass
 
         logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} stake=${amount*rate:.2f} — {reasoning}")
         return True
@@ -984,7 +1045,6 @@ class AIFreqtradeSizer(IStrategy):
         try:
             pnl_pct = trade.calc_profit_ratio(rate) if hasattr(trade, 'calc_profit_ratio') else 0.0
             won = pnl_pct > 0
-            # Eagerly initialized in __init__
             self._bayesian_kelly.update(won=won, pnl_pct=pnl_pct)
             logger.info(f"[BayesianKelly] Updated: {'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → win_p={self._bayesian_kelly.win_probability():.3f} kelly_f={self._bayesian_kelly.kelly_fraction():.4f}")
         except Exception as e:
@@ -993,7 +1053,6 @@ class AIFreqtradeSizer(IStrategy):
         # Hypothetical $100 Portfolio: compound every closed trade (position-size weighted)
         try:
             trade_pnl_pct = (trade.calc_profit_ratio(rate) * 100) if hasattr(trade, 'calc_profit_ratio') else 0.0
-            # Weight by position size fraction so $100 sim mirrors real sizing
             portfolio_value = self.risk_budget.portfolio_value
             stake_fraction = (trade.stake_amount / portfolio_value) if portfolio_value > 0 else 0.01
             portfolio_pnl_pct = trade_pnl_pct * stake_fraction
@@ -1001,4 +1060,346 @@ class AIFreqtradeSizer(IStrategy):
         except Exception as e:
             logger.warning(f"[Portfolio] Update failed: {e}")
 
+        # Phase 22: Notify exit via strategy message
+        try:
+            self.dp.send_msg(
+                f"AI Exit: {pair} reason={exit_reason} profit={trade.calc_profit_ratio(rate):.1%}"
+            )
+        except Exception:
+            pass
+
         return True
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase 22: ALL NEW STRATEGY CALLBACKS
+    # ══════════════════════════════════════════════════════════════════════
+
+    def bot_start(self, **kwargs) -> None:
+        """One-time initialization after all configs loaded (Phase 22 #3)."""
+        logger.info("[bot_start] AI Trading System initializing...")
+        try:
+            from semantic_cache import SemanticCache
+            self._semantic_cache = SemanticCache(db_path=self.db_path)
+            logger.info("[bot_start] Semantic cache ready.")
+        except Exception as e:
+            logger.warning(f"[bot_start] Semantic cache init failed: {e}")
+        # Ensure protection_logs table exists for testnet data collection
+        conn = self._get_sqlite_connection()
+        if conn:
+            try:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS protection_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        pair TEXT,
+                        details TEXT,
+                        profit_at_event REAL,
+                        trade_count INTEGER
+                    )
+                ''')
+                conn.commit()
+            except Exception:
+                pass
+            conn.close()
+        logger.info("[bot_start] AI Trading System ready.")
+
+    @property
+    def protections(self):
+        """Built-in protections — TESTNET MODE: Very loose, log everything.
+        Trade-First: NEVER block trades aggressively. Just brief cooldowns.
+        All trade data logged to DB for analysis when switching to real money."""
+        return [
+            {
+                "method": "CooldownPeriod",
+                "stop_duration_candles": 1,  # Just 1 candle cooldown (not 2)
+            },
+            {
+                # Only trigger after 6 consecutive stoplosses on same pair (very loose)
+                "method": "StoplossGuard",
+                "lookback_period_candles": 48,
+                "trade_limit": 6,  # 6 stoplosses before lock (was 4)
+                "stop_duration_candles": 2,  # Lock only 2 candles (was 4)
+                "only_per_pair": True,
+            },
+            {
+                # Nuclear option: only if account drawdown >25% (very loose)
+                "method": "MaxDrawdown",
+                "lookback_period_candles": 72,  # 3 days window
+                "trade_limit": 20,
+                "stop_duration_candles": 4,  # Brief pause, not long lock
+                "max_allowed_drawdown": 0.25,  # 25% (was 15%) — testnet, let it breathe
+            },
+        ]
+
+    def informative_pairs(self):
+        """Multi-timeframe + cross-pair data (Phase 22 #4)."""
+        stake = self.config.get('stake_currency', 'USDT')
+        return [
+            (f"BTC/{stake}", "1h"),
+            (f"BTC/{stake}", "4h"),
+            (f"ETH/{stake}", "4h"),
+        ]
+
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: str,
+                 side: str, **kwargs) -> float:
+        """Dynamic leverage by AI confidence (Phase 22 #14)."""
+        ai = self.ai_signal_cache.get(pair, {})
+        confidence = ai.get('confidence', 0.0)
+
+        if confidence >= 0.85:
+            lev = min(self.leverage_max.value, max_leverage)
+        elif confidence >= 0.70:
+            lev = min(self.leverage_max.value * 0.7, max_leverage)
+        elif confidence >= 0.50:
+            lev = min(self.leverage_max.value * 0.5, max_leverage)
+        else:
+            lev = 1.0
+
+        return max(1.0, round(lev, 1))
+
+    def custom_exit(self, pair: str, trade: 'Trade', current_time: datetime,
+                    current_rate: float, current_profit: float, **kwargs) -> str | bool | None:
+        """AI-driven exit logic (Phase 22 #13)."""
+        if self.dp.runmode.value not in ('dry_run', 'live'):
+            return None
+
+        hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
+
+        # 1. STALE TRADE
+        if hours_held > self.stale_trade_hours.value and abs(current_profit) < 0.005:
+            return f"stale_{hours_held:.0f}h_flat"
+
+        # 2. SIGNAL REVERSAL
+        cached = self.ai_signal_cache.get(pair, {})
+        signal = cached.get('signal', 'NEUTRAL')
+        confidence = cached.get('confidence', 0.0)
+
+        if not trade.is_short and signal == 'BEARISH' and confidence >= 0.75:
+            return f"ai_flip_bearish_{confidence:.0%}"
+        if trade.is_short and signal == 'BULLISH' and confidence >= 0.75:
+            return f"ai_flip_bullish_{confidence:.0%}"
+
+        # 3. CONFIDENCE DEGRADATION
+        entry_conf = trade.get_custom_data("ai_confidence", 0.5)
+        if isinstance(entry_conf, (int, float)) and entry_conf > 0.7 and confidence < 0.3:
+            return f"confidence_drop_{entry_conf:.0%}_to_{confidence:.0%}"
+
+        # 4. FEAR & GREED CRASH
+        try:
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if dataframe is not None and len(dataframe) > 0:
+                fng = dataframe.iloc[-1].get('%-fng_index', 50)
+                entry_fng = trade.get_custom_data("entry_fng", 50)
+                if isinstance(entry_fng, (int, float)) and isinstance(fng, (int, float)):
+                    if fng < self.fg_extreme_threshold.value and entry_fng > 40:
+                        return f"extreme_fear_fng_{int(fng)}"
+        except Exception:
+            pass
+
+        # 5. FIRST-HOUR CRASH
+        if hours_held <= 1.0 and current_profit <= -0.07:
+            return "first_hour_7pct_loss"
+
+        # 6. LOG EVERYTHING for testnet analysis (even when NOT exiting)
+        # This data is gold when we switch to real money
+        if hours_held > 0 and int(hours_held) % 4 == 0:  # Every 4 hours
+            try:
+                conn = self._get_sqlite_connection()
+                if conn:
+                    conn.execute(
+                        "INSERT INTO protection_logs (timestamp, event_type, pair, details, profit_at_event) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (current_time.isoformat(), "trade_check", pair,
+                         f"signal={signal} conf={confidence:.2f} entry_conf={entry_conf} hours={hours_held:.1f}",
+                         round(current_profit, 6))
+                    )
+                    conn.commit()
+                    conn.close()
+            except Exception:
+                pass
+
+        return None
+
+    def custom_roi(self, pair: str, trade: 'Trade', current_time: datetime,
+                   trade_duration: int, entry_tag: str | None, side: str,
+                   **kwargs) -> float | None:
+        """Dynamic ROI based on AI trend confidence (Phase 22 #15)."""
+        cached = self.ai_signal_cache.get(pair, {})
+        confidence = cached.get('confidence', 0.0)
+
+        if confidence >= 0.80:
+            if trade_duration < 120:
+                return 0.20
+            if trade_duration < 360:
+                return 0.08
+            return 0.02
+
+        if confidence < 0.40:
+            if trade_duration < 60:
+                return 0.05
+            return 0.01
+
+        return None
+
+    def check_entry_timeout(self, pair: str, trade: 'Trade', order: 'Order',
+                            current_time: datetime, **kwargs) -> bool:
+        """Cancel entry if AI signal changed (Phase 22 #9)."""
+        cached = self.ai_signal_cache.get(pair, {})
+        signal = cached.get('signal', 'NEUTRAL')
+
+        if not trade.is_short and signal == 'BEARISH':
+            logger.info(f"[Timeout] Cancelling LONG entry for {pair}: AI flipped to BEARISH")
+            return True
+        if trade.is_short and signal == 'BULLISH':
+            logger.info(f"[Timeout] Cancelling SHORT entry for {pair}: AI flipped to BULLISH")
+            return True
+        return False
+
+    def check_exit_timeout(self, pair: str, trade: 'Trade', order: 'Order',
+                           current_time: datetime, **kwargs) -> bool:
+        """Cancel stale exit order for retry (Phase 22 #10)."""
+        if order.order_date_utc:
+            minutes_open = (current_time - order.order_date_utc).total_seconds() / 60
+            if minutes_open > 5:
+                logger.info(f"[Timeout] Exit order for {pair} open {minutes_open:.0f}m, cancelling for retry")
+                return True
+        return False
+
+    def order_filled(self, pair: str, trade: 'Trade', order: 'Order',
+                     current_time: datetime, **kwargs) -> None:
+        """Called immediately after ANY order fills (Phase 22 #12)."""
+        fill_side = "ENTRY" if order.ft_order_side == trade.entry_side else "EXIT"
+        logger.info(f"[OrderFilled] {pair} {fill_side} @ {order.safe_price:.6f}")
+        try:
+            if fill_side == "ENTRY":
+                trade.set_custom_data("fill_price", round(float(order.safe_price), 6))
+                trade.set_custom_data("fill_time", current_time.isoformat())
+        except Exception:
+            pass
+
+    def custom_entry_price(self, pair: str, trade: 'Trade | None', current_time: datetime,
+                           proposed_rate: float, entry_tag: str | None, side: str,
+                           **kwargs) -> float:
+        """Orderbook-aware entry pricing (Phase 22 #11)."""
+        try:
+            ob = self.dp.orderbook(pair, 5)
+            if ob and side == 'long' and ob.get('bids'):
+                best_bid = ob['bids'][0][0]
+                return min(proposed_rate, best_bid * 1.001)
+            elif ob and side == 'short' and ob.get('asks'):
+                best_ask = ob['asks'][0][0]
+                return max(proposed_rate, best_ask * 0.999)
+        except Exception:
+            pass
+        return proposed_rate
+
+    def custom_exit_price(self, pair: str, trade: 'Trade', current_time: datetime,
+                          proposed_rate: float, current_profit: float,
+                          exit_tag: str | None, **kwargs) -> float:
+        """Orderbook-aware exit pricing (Phase 22 #12)."""
+        try:
+            ob = self.dp.orderbook(pair, 5)
+            if ob:
+                if not trade.is_short and ob.get('asks'):
+                    best_ask = ob['asks'][0][0]
+                    return max(proposed_rate, best_ask * 0.999)
+                elif trade.is_short and ob.get('bids'):
+                    best_bid = ob['bids'][0][0]
+                    return min(proposed_rate, best_bid * 1.001)
+        except Exception:
+            pass
+        return proposed_rate
+
+    def adjust_trade_position(self, trade: 'Trade', current_time: datetime,
+                              current_rate: float, current_profit: float,
+                              min_stake: float | None, max_stake: float,
+                              current_entry_rate: float, current_exit_rate: float,
+                              current_entry_profit: float, current_exit_profit: float,
+                              **kwargs) -> float | None:
+        """DCA + partial exit based on AI confidence changes (Phase 22 #16)."""
+        if self.dp.runmode.value not in ('dry_run', 'live'):
+            return None
+        if trade.nr_of_successful_entries >= 4:
+            return None
+
+        cached = self.ai_signal_cache.get(trade.pair, {})
+        confidence = cached.get('confidence', 0.0)
+        signal = cached.get('signal', 'NEUTRAL')
+        entry_conf = trade.get_custom_data("ai_confidence", 0.5)
+        if not isinstance(entry_conf, (int, float)):
+            entry_conf = 0.5
+
+        hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
+        if hours_held < 1.0:
+            return None
+
+        # PYRAMID: Confidence up + profitable
+        if confidence > 0.80 and current_profit > 0.01 and confidence > entry_conf + 0.1:
+            add_stake = max_stake * 0.3
+            if min_stake and add_stake >= min_stake:
+                logger.info(f"[DCA] {trade.pair} PYRAMID: conf {confidence:.0%}")
+                return add_stake
+
+        # REDUCE: Confidence dropped + losing
+        if confidence < 0.30 and entry_conf > 0.60 and current_profit < -0.02:
+            logger.info(f"[DCA] {trade.pair} REDUCE 30%: conf {entry_conf:.0%}→{confidence:.0%}")
+            return -(trade.stake_amount * 0.30)
+
+        # HALF-EXIT: Signal reversed
+        if not trade.is_short and signal == 'BEARISH' and confidence > 0.60:
+            logger.info(f"[DCA] {trade.pair} HALF-EXIT: BEARISH conf={confidence:.0%}")
+            return -(trade.stake_amount * 0.50)
+        if trade.is_short and signal == 'BULLISH' and confidence > 0.60:
+            logger.info(f"[DCA] {trade.pair} HALF-EXIT: BULLISH conf={confidence:.0%}")
+            return -(trade.stake_amount * 0.50)
+
+        return None
+
+    # ── Remaining Gems: adjust_entry/exit_price + funding rate ────────
+
+    def adjust_entry_price(self, trade: 'Trade', order: 'Order', pair: str,
+                           current_time: datetime, proposed_rate: float,
+                           current_order_rate: float, entry_tag: str | None,
+                           side: str, **kwargs) -> float:
+        """Re-adjust unfilled entry orders each candle to improve fill rate (Phase 22 #remaining).
+        If order hasn't filled, chase the price slightly."""
+        try:
+            ob = self.dp.orderbook(pair, 3)
+            if ob and side == 'long' and ob.get('bids'):
+                best_bid = ob['bids'][0][0]
+                # Chase: move order to best bid + 0.1% (improve fill probability)
+                new_price = best_bid * 1.001
+                if abs(new_price - current_order_rate) / current_order_rate > 0.002:
+                    logger.debug(f"[AdjustEntry] {pair} {current_order_rate:.6f} → {new_price:.6f}")
+                    return new_price
+            elif ob and side == 'short' and ob.get('asks'):
+                best_ask = ob['asks'][0][0]
+                new_price = best_ask * 0.999
+                if abs(new_price - current_order_rate) / current_order_rate > 0.002:
+                    return new_price
+        except Exception:
+            pass
+        return current_order_rate  # Keep current price
+
+    def adjust_exit_price(self, trade: 'Trade', order: 'Order', pair: str,
+                          current_time: datetime, proposed_rate: float,
+                          current_order_rate: float, entry_tag: str | None,
+                          side: str, **kwargs) -> float:
+        """Re-adjust unfilled exit orders to lock in profits faster (Phase 22 #remaining)."""
+        try:
+            ob = self.dp.orderbook(pair, 3)
+            if ob and not trade.is_short and ob.get('asks'):
+                best_ask = ob['asks'][0][0]
+                new_price = best_ask * 0.999
+                if abs(new_price - current_order_rate) / current_order_rate > 0.002:
+                    return new_price
+            elif ob and trade.is_short and ob.get('bids'):
+                best_bid = ob['bids'][0][0]
+                new_price = best_bid * 1.001
+                if abs(new_price - current_order_rate) / current_order_rate > 0.002:
+                    return new_price
+        except Exception:
+            pass
+        return current_order_rate

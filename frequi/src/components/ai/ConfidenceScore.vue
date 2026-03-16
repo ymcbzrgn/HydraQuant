@@ -1,6 +1,6 @@
 <template>
   <div class="p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border dark:border-gray-700 flex flex-col items-center justify-center">
-    <h3 class="text-sm text-gray-500 font-semibold mb-2">MADAM Confidence</h3>
+    <h3 class="text-sm text-gray-600 dark:text-gray-400 font-semibold mb-2">MADAM Confidence</h3>
     <Knob v-model="displayValue" readonly :size="100" :valueColor="currentColor" valueTemplate="{value}%" />
     <div class="mt-2 text-xs text-center font-medium" :style="{ color: currentColor }">
       {{ confidenceLabel }}

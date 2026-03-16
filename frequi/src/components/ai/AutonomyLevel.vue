@@ -13,13 +13,13 @@
         <div class="text-4xl font-black text-primary">L{{ aiStore.autonomy.current_level }}</div>
         <div>
           <div class="font-bold text-lg">{{ getLevelName(aiStore.autonomy.current_level) }}</div>
-          <div class="text-sm text-gray-500">Max Kelly Fraction: {{ (aiStore.autonomy.kelly_fraction * 100).toFixed(1) }}%</div>
+          <div class="text-sm text-gray-600 dark:text-gray-400">Position Size Multiplier: {{ (aiStore.autonomy.kelly_fraction * 100).toFixed(1) }}%</div>
         </div>
       </div>
 
       <!-- Level Tracker -->
       <div>
-        <h3 class="text-sm font-semibold mb-3 text-gray-500">Capability Stages</h3>
+        <h3 class="text-sm font-semibold mb-3 text-gray-600 dark:text-gray-400">Capability Stages</h3>
         <Steps :model="levelSteps" :activeIndex="aiStore.autonomy.current_level" class="text-xs" />
       </div>
 
@@ -30,25 +30,25 @@
         </h3>
         <div class="grid grid-cols-2 gap-4 text-sm mt-2">
           <div>
-            <div class="text-gray-500">Min Trades</div>
+            <div class="text-gray-600 dark:text-gray-400">Min Trades</div>
             <div class="font-medium font-mono text-blue-600 dark:text-blue-400">
               {{ aiStore.autonomy.criteria.min_trades ?? '-' }}
             </div>
           </div>
           <div>
-            <div class="text-gray-500">Min Sharpe</div>
+            <div class="text-gray-600 dark:text-gray-400">Min Sharpe</div>
             <div class="font-medium font-mono text-purple-600 dark:text-purple-400">
               {{ aiStore.autonomy.criteria.min_sharpe?.toFixed(2) ?? '-' }}
             </div>
           </div>
           <div>
-            <div class="text-gray-500">Max Drawdown</div>
+            <div class="text-gray-600 dark:text-gray-400">Max Drawdown</div>
             <div class="font-medium font-mono text-red-600 dark:text-red-400">
               {{ aiStore.autonomy.criteria.max_drawdown != null ? (aiStore.autonomy.criteria.max_drawdown * 100).toFixed(1) + '%' : '-' }}
             </div>
           </div>
           <div>
-            <div class="text-gray-500">Min Days</div>
+            <div class="text-gray-600 dark:text-gray-400">Min Days</div>
             <div class="font-medium font-mono text-green-600 dark:text-green-400">
               {{ aiStore.autonomy.criteria.min_days ?? '-' }}
             </div>
@@ -58,7 +58,7 @@
 
       <!-- History Timeline -->
       <div v-if="aiStore.autonomy.history && aiStore.autonomy.history.length > 0">
-        <h3 class="text-sm font-semibold mb-3 text-gray-500">Recent Transitions</h3>
+        <h3 class="text-sm font-semibold mb-3 text-gray-600 dark:text-gray-400">Recent Transitions</h3>
         <Timeline :value="recentHistory" layout="vertical" class="text-sm">
           <template #opposite="slotProps">
             <small class="text-gray-500">{{ formatDate(slotProps.item.timestamp) }}</small>
@@ -71,11 +71,11 @@
           </template>
           <template #content="slotProps">
             <div class="font-bold">L{{ slotProps.item.old_level }} <i class="pi pi-arrow-right text-xs mx-1"></i> L{{ slotProps.item.new_level }}</div>
-            <div class="text-gray-500 text-xs mt-1">{{ slotProps.item.reason }}</div>
+            <div class="text-gray-600 dark:text-gray-400 text-xs mt-1">{{ slotProps.item.reason }}</div>
           </template>
         </Timeline>
       </div>
-      <div v-else class="text-sm text-gray-400 italic text-center py-4">
+      <div v-else class="text-sm text-gray-500 dark:text-gray-400 italic text-center py-4">
         No level transitions recorded yet.
       </div>
 

@@ -153,16 +153,16 @@ class LLMRouter:
         self.fallback_1 = None  # Keep for backward compat checks
         if self.groq_key:
             groq_model_names = [
-                # Tier A: Smartest (finance benchmark leaders)
-                "openai/gpt-oss-120b",              # AIME 96.6%, reasoning mode, 260-500 t/s
+                # Tier A: Reliable (higher RPM/RPD on free tier)
                 "llama-3.3-70b-versatile",          # 30 RPM, 1K RPD, solid workhorse
+                "llama-3.1-8b-instant",            # 14.4K RPD, most free usage (fast failover)
                 # Tier B: Mid-range
                 "qwen/qwen3-32b",                   # 60 RPM, dual-mode, 535 t/s
-                "moonshotai/kimi-k2-instruct",      # 1T MoE, 256K context
-                # Tier C: Fast/cheap
                 "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, multimodal
-                "openai/gpt-oss-20b",              # 900-1000 t/s, fastest
-                "llama-3.1-8b-instant",            # 14.4K RPD, most free usage
+                "moonshotai/kimi-k2-instruct",      # 1T MoE, 256K context
+                # Tier C: gpt-oss (smart but VERY low RPM on free tier — last resort)
+                "openai/gpt-oss-20b",              # Low RPM, penalized often — keep as backup
+                "openai/gpt-oss-120b",              # Same issue — keep as last resort only
             ]
             for m_name in groq_model_names:
                 m = ChatGroq(
@@ -435,24 +435,25 @@ class LLMRouter:
     # Provider ordering per priority level — ALL models always included, only ORDER changes
     _PROVIDER_ORDER = {
         "critical": [
-            # Finance reasoning accuracy: Cerebras Qwen3-235B (PRBench 39.14) → GPT-OSS-120B (AIME 96.6)
-            # → DeepSeek V3.2 (live +4.9%) → Groq reasoning → rest
+            # Finance reasoning accuracy: reliable models first, gpt-oss last (low RPM)
             ("cerebras", None),
-            ("groq", ["openai/gpt-oss-120b", "llama-3.3-70b-versatile",
-                      "qwen/qwen3-32b", "moonshotai/kimi-k2-instruct",
+            ("groq", ["llama-3.3-70b-versatile", "qwen/qwen3-32b",
+                      "moonshotai/kimi-k2-instruct",
                       "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "openai/gpt-oss-20b", "llama-3.1-8b-instant"]),
+                      "llama-3.1-8b-instant",
+                      "openai/gpt-oss-120b", "openai/gpt-oss-20b"]),
             ("deepseek", None),
             ("mistral", None),
             ("sambanova", None),
             ("openrouter", None),
         ],
         "high": [
-            # Gemini already at front (added by caller), then smart models
-            ("groq", ["openai/gpt-oss-120b", "llama-3.3-70b-versatile",
-                      "qwen/qwen3-32b", "moonshotai/kimi-k2-instruct",
+            # Gemini already at front (added by caller), then reliable Groq models
+            ("groq", ["llama-3.3-70b-versatile", "qwen/qwen3-32b",
+                      "moonshotai/kimi-k2-instruct",
                       "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "openai/gpt-oss-20b", "llama-3.1-8b-instant"]),
+                      "llama-3.1-8b-instant",
+                      "openai/gpt-oss-120b", "openai/gpt-oss-20b"]),
             ("cerebras", None),
             ("deepseek", None),
             ("mistral", None),
@@ -460,11 +461,12 @@ class LLMRouter:
             ("openrouter", None),
         ],
         "medium": [
-            # Speed + quality balance: fast models first
-            ("groq", ["openai/gpt-oss-20b", "qwen/qwen3-32b", "llama-3.1-8b-instant",
-                      "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+            # Speed + quality balance: reliable fast models first
+            ("groq", ["llama-3.1-8b-instant", "qwen/qwen3-32b",
+                      "llama-3.3-70b-versatile",
+                      "meta-llama/llama-4-scout-17b-16e-instruct",
                       "moonshotai/kimi-k2-instruct",
-                      "meta-llama/llama-4-scout-17b-16e-instruct"]),
+                      "openai/gpt-oss-20b", "openai/gpt-oss-120b"]),
             ("cerebras", None),
             ("deepseek", None),
             ("sambanova", None),
@@ -472,11 +474,11 @@ class LLMRouter:
             ("openrouter", None),
         ],
         "low": [
-            # Cheapest/fastest first: throughput kings
-            ("groq", ["llama-3.1-8b-instant", "openai/gpt-oss-20b",
-                      "qwen/qwen3-32b", "meta-llama/llama-4-scout-17b-16e-instruct",
+            # Cheapest/fastest first: high-RPD models, gpt-oss absolute last
+            ("groq", ["llama-3.1-8b-instant", "qwen/qwen3-32b",
+                      "meta-llama/llama-4-scout-17b-16e-instruct",
                       "llama-3.3-70b-versatile", "moonshotai/kimi-k2-instruct",
-                      "openai/gpt-oss-120b"]),
+                      "openai/gpt-oss-20b", "openai/gpt-oss-120b"]),
             ("cerebras", ["llama3.1-8b", "qwen-3-235b-a22b-instruct-2507"]),
             ("sambanova", ["Meta-Llama-3.1-8B-Instruct", "Meta-Llama-3.3-70B-Instruct"]),
             ("deepseek", None),
