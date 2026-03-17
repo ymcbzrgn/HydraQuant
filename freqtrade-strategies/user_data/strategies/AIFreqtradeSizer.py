@@ -70,7 +70,7 @@ class AIFreqtradeSizer(IStrategy):
         self.rag_script_path = os.path.join(self.config['user_data_dir'], "scripts", "rag_graph.py")
         self.ai_signal_cache = {} # Memory cache: { "BTC/USDT": {"signal": "BULLISH", "confidence": 0.8, "timestamp": datetime} }
         self.cache_ttl_hours = 6 # Non-NEUTRAL signals valid for 6 hours (Phase 22: increased from 4h)
-        self._neutral_ttl_hours = 1.5  # NEUTRAL signals retried after 1.5h (Phase 22: increased from 0.9h)
+        self._neutral_ttl_hours = 8.0  # NEUTRAL signals retried after 8h (reduced LLM calls for free tier)
 
         # Phase 3.5: Forgone P&L Engine — tracks every missed signal
         self.forgone_engine = ForgonePnLEngine(db_path=self.db_path)
