@@ -1563,7 +1563,7 @@ if __name__ == "__main__":
                 "status": "online",
                 "models_loaded": True,
                 "colbert": "active" if retriever.colbert_reranker else "disabled",
-                "flashrank": "active" if retriever.reranker else "disabled",
+                "flashrank": "active" if retriever._flashrank_available else "disabled",
             }
 
         @serve_app.get("/signal-health")
@@ -1600,7 +1600,7 @@ if __name__ == "__main__":
 
         logger.info(f"RAG Signal Service starting on port {args.port}")
         logger.info(f"Models loaded: ColBERT={'active' if retriever.colbert_reranker else 'disabled'}, "
-                     f"FlashRank={'active' if retriever.reranker else 'disabled'}")
+                     f"FlashRank={'active' if retriever._flashrank_available else 'disabled'}")
         uvicorn.run(serve_app, host="0.0.0.0", port=args.port)
     else:
         result = get_trading_signal(args.pair)
