@@ -125,3 +125,11 @@ target/
 docker-compose-*.yml
 !docker-compose.ai.yml
 config_bybit_testnet_futures.json
+# Temp/diagnostic files
+full_logs_*.txt
+raw_logs_*.txt
+user_data/scripts/ai_data.db
+freqtrade-strategies/db
+freqtrade-strategies/scripts
+freqtrade-strategies/vectordb
+freqtrade-strategies/user_data/scripts
