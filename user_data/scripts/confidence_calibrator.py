@@ -40,16 +40,18 @@ class ConfidenceCalibrator:
 
     def _get_history(self, min_trades: int = 20) -> List[Tuple[float, float]]:
         """
-        Fetch historical (confidence, actual_outcome) pairs from ai_decisions + trade results.
-        Returns list of (confidence, 1.0_if_won_else_0.0).
+        Fetch historical (confidence, actual_outcome) pairs from ai_decisions with REAL trade results.
+        Returns list of (confidence, 1.0_if_profitable_else_0.0).
+        Only uses trades that have resolved outcomes (outcome_pnl IS NOT NULL).
         """
         try:
             with self._get_conn() as conn:
                 rows = conn.execute("""
-                    SELECT d.confidence, 
-                           CASE WHEN d.signal_type IN ('BULLISH', 'BEARISH') THEN 1.0 ELSE 0.0 END as outcome
+                    SELECT d.confidence,
+                           CASE WHEN d.outcome_pnl > 0 THEN 1.0 ELSE 0.0 END as outcome
                     FROM ai_decisions d
                     WHERE d.confidence IS NOT NULL AND d.confidence > 0
+                      AND d.outcome_pnl IS NOT NULL
                     ORDER BY d.timestamp DESC
                     LIMIT 500
                 """).fetchall()

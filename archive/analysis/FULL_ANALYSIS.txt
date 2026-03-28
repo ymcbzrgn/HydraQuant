@@ -1,0 +1,1903 @@
+╔══════════════════════════════════════════════════════════════════╗
+║  FREQTRADE PHASE 20 — FULL LOG ANALYSIS v2                     ║
+╚══════════════════════════════════════════════════════════════════╝
+Tarih: 2026-03-22 15:02:15 +03
+Host:  vm433344.ovadns.com
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1. SERVİS DURUMLARI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  freqtrade                    [active]     Restarts: 0    Mem: 1297MB     Since: Thu 2026-03-19 20:17:44 +03
+  freqtrade-rag                [active]     Restarts: 0    Mem: 1239MB     Since: Thu 2026-03-19 20:17:31 +03
+  freqtrade-scheduler          [active]     Restarts: 0    Mem: 3638MB     Since: Thu 2026-03-19 18:51:35 +03
+  freqtrade-models             [active]     Restarts: 38   Mem: 4462MB     Since: Sun 2026-03-22 08:15:00 +03
+
+  System Uptime: up 1 week, 3 days, 13 hours, 41 minutes
+  Load Average:  15.05 15.08 14.82 1/366 235046
+  Disk Usage:    20% used (29G/155G)
+  RAM:           11Gi / 31Gi
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  2. PORT & ENDPOINT KONTROL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Port 8080   → LISTEN 0      2048         0.0.0.0:8080      0.0.0.0:*    users:(("freqtrade",pid=219958,fd=30))                                                                                                  
+  Port 8890   → LISTEN 0      2048       127.0.0.1:8890      0.0.0.0:*    users:(("uvicorn",pid=218260,fd=13))                                                                                                    
+  Port 8891   → LISTEN 0      2048         0.0.0.0:8891      0.0.0.0:*    users:(("python",pid=219944,fd=23))                                                                                                     
+  Port 8895   → LISTEN 506    2048       127.0.0.1:8895      0.0.0.0:*    users:(("python",pid=232929,fd=14))                                                                                                     
+
+  API Health Checks:
+  RAG Health                → HTTP 200
+  Signal Health             → HTTP 200
+  Agent Stats               → HTTP 200
+  Cross-Pair Intel          → HTTP 200
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  3. LOG TOPLAMA (son 50.000 satır / servis)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  freqtrade bot log:       50000 satır
+  freqtrade-rag:             50000 satır
+  freqtrade-scheduler:       50000 satır
+  freqtrade-models:          50000 satır
+  Bot log aralığı: ? → 2026-03-22 15:02:07
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  4. HATA & EXCEPTION ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── bot ──
+     Toplam ERROR/EXCEPTION/CRITICAL: 3502
+     Toplam WARNING:                  3272
+
+     En sık hatalar (top 20):
+         506 ValueError: Invalid file descriptor: -1
+         506     raise ValueError("Invalid file descriptor: {}".format(fd))
+         143 ccxt.base.errors.RequestTimeout: Connection to wss://stream-testnet.bybit.com/v5/public/linear timed out due to a ping-pong keepalive missing on time
+         119 ccxt.base.errors.NetworkError: Connector is closed.
+          98 ccxt.base.errors.NetworkError: Connection closed by remote server, closing code 1006
+          39 ccxt.base.errors.RequestTimeout: Connection timeout
+          31 \u003e= current[HASH]??LastPrice","result":{},"retExtInfo":{},"time":HASH}
+          10 Connection refused"))
+           4 he above exception was the direct cause of the following exception:
+           4 ccxt.base.errors.RequestTimeout: Connection to wss://stream-testnet.bybit.com/v5/public/spot timed out due to a ping-pong keepalive missing on time
+           2   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+           2   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+           2 During handling of the above exception, another exception occurred:
+           2  20:17:33,408 - asyncio - ERROR - Task was destroyed but it is pending!
+           2  20:17:33,401 - asyncio - ERROR - Task was destroyed but it is pending!
+           2  20:11:28,353 - asyncio - ERROR - Task was destroyed but it is pending!
+           1 urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='api-testnet.bybit.com', port=443): Read timed out. (read timeout=N.N)
+           1 \u003e= current[9317000]??LastPrice","result":{},"retExtInfo":{},"time":HASH}
+           1 \u003e= current[9195000]??LastPrice","result":{},"retExtInfo":{},"time":HASH}
+           1 \u003e= current[1892700]??LastPrice","result":{},"retExtInfo":{},"time":HASH}
+
+     Unique Traceback sonu satırları (916 toplam):
+sed: -e expression #1, char 19: Invalid range end
+
+  ── freqtrade_rag ──
+     Toplam ERROR/EXCEPTION/CRITICAL: 109
+     Toplam WARNING:                  9487
+
+     En sık hatalar (top 20):
+           9 models/gemini-N.N-flash-lite → ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}. Next model...
+           8  vm433344.ovadns.com python[219944]: ERROR:llm_cost_tracker:Error logging LLM call: database is locked
+           6  vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-N.N-flash-lite-preview:generateContent "HTTP/N.N 500 Internal Server Error"
+           6 models/gemini-N.N-flash-lite-preview → ServerError: 500 INTERNAL. {'error': {'code': 500, 'message': 'Internal error encountered.', 'status': 'INTERNAL'}}. Next model...
+           3  vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST http://N.N.N.N:8895/rerank/colbert "HTTP/N.N 500 Internal Server Error"
+           3 Server call failed: Server error '500 Internal Server Error' for url 'http://N.N.N.N:8895/rerank/colbert'
+           3 models/gemini-N.N-flash-lite-preview → ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'The service is currently unavailable.', 'status': 'UNAVAILABLE'}}. Next model...
+           2  vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/N.N 500 Internal Server Error"
+           2  vm433344.ovadns.com python[219944]: INFO:ddgs.ddgs:Error in engine grokipedia: DDGSException("ConnectError: ConnectError('error sending request for url (https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=1000PEPE/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction)', 'https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=1000PEPE/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction')")
+           2 moonshotai/kimi-k2-instruct → InternalServerError: Error code: 503 - {'error': {'message': 'moonshotai/kimi-k2-instruct is currently over capacity. Please try again and back off exponentially. Visit https://groqstatus.com to see if there is an active incident.', 'type': 'internal_server_error'}}. Next model...
+           1  vm433344.ovadns.com python[219944]: INFO:ddgs.ddgs:Error in engine grokipedia: DDGSException("ConnectError: ConnectError('error sending request for url (https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=UNI/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction)', 'https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=UNI/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction')")
+           1  vm433344.ovadns.com python[219944]: INFO:ddgs.ddgs:Error in engine grokipedia: DDGSException("ConnectError: ConnectError('error sending request for url (https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=PUMPFUN/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction)', 'https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=PUMPFUN/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction')")
+           1  vm433344.ovadns.com python[219944]: INFO:ddgs.ddgs:Error in engine grokipedia: DDGSException("ConnectError: ConnectError('error sending request for url (https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=HYPE/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction)', 'https://wt.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=HYPE/USDT%3AUSDT%20current%20technical%20analysis%20RSI%20MACD%20support%20resistance%20price%20prediction')")
+           1 qwen/qwen3-32b → InternalServerError: Error code: 500 - {'error': {'message': 'Internal Server Error', 'type': 'internal_server_error'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 8021, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 7985, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 7961, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 7758, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 7742, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+           1 qwen/qwen3-32b → APIStatusError: Error code: 413 - {'error': {'message': 'Request too large for model `qwen/qwen3-32b` in organization `org_01kkfgerp1fat93kyr6ykmjex9` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 7630, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}. Next model...
+/root/freqtrade/analyze.sh: line 141: [: 0
+0: integer expression expected
+
+  ── freqtrade_scheduler ──
+     Toplam ERROR/EXCEPTION/CRITICAL: 142
+     Toplam WARNING:                  6789
+
+     En sık hatalar (top 20):
+          97 Rolling sentiment computation failed: module 'numpy' has no attribute 'matrix'
+          44  vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be delisted")
+           1 HTTP error: 502 Server Error: Bad Gateway for url: https://cryptopanic.com/api/v1/posts/?auth_token=***MASKED***&currencies=BTC%2CETH&public=true
+/root/freqtrade/analyze.sh: line 141: [: 0
+0: integer expression expected
+
+  ── freqtrade_models ──
+     Toplam ERROR/EXCEPTION/CRITICAL: 3787
+     Toplam WARNING:                  286
+
+     En sık hatalar (top 20):
+          20  vm433344.ovadns.com python[181515]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          20  vm433344.ovadns.com python[181515]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          18  vm433344.ovadns.com python[186670]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          18  vm433344.ovadns.com python[186670]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          18  vm433344.ovadns.com python[183574]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          18  vm433344.ovadns.com python[183574]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          18  vm433344.ovadns.com python[179321]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          18  vm433344.ovadns.com python[179321]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          18  vm433344.ovadns.com python[176793]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          18  vm433344.ovadns.com python[176793]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          16  vm433344.ovadns.com python[186434]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          16  vm433344.ovadns.com python[186434]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          16  vm433344.ovadns.com python[178484]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          16  vm433344.ovadns.com python[178484]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          16  vm433344.ovadns.com python[178073]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          16  vm433344.ovadns.com python[178073]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          14  vm433344.ovadns.com python[184240]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          14  vm433344.ovadns.com python[184240]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+          14  vm433344.ovadns.com python[183293]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+          14  vm433344.ovadns.com python[183293]:   File "/root/freqtrade/.venv/lib/pythonN.N/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+
+     Unique Traceback sonu satırları (299 toplam):
+sed: -e expression #1, char 19: Invalid range end
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  5. SİNYAL ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  5a. Sinyal Dağılımı (Bot log):
+     BULLISH    → 144 adet
+     BEARISH    → 122 adet
+     NEUTRAL    → 2561 adet
+
+  5b. Signal Source Dağılımı:
+        2549 EvidenceEngine
+         510 EvidenceFirst
+         261 MADAM
+         255 AgentPool
+
+  5c. Confidence Dağılımı (GENİŞ REGEX):
+     Toplam: 1450 sinyal
+     Ortalama: 0.0651
+     Min: -  Max: -  (awk ile hesaplanmadı)
+     [0.00-0.05): 712
+     [0.05-0.10): 286
+     [0.10-0.15): 330
+     [0.15-0.20): 76
+     [0.20-0.25): 37
+     [0.25-0.30): 9
+     [0.30-0.40): 0
+     [0.40-0.50): 0
+     [0.50+     ): 0
+     (Toplam 'confiden' içeren satır: 1071)
+
+     DEBUG — Confidence içeren ilk 10 satır (format tespiti):
+       2026-03-19 20:11:59,073 - freqtrade.strategy.hyper - INFO - Strategy Parameter(default): confidence_threshold = 0.5
+       2026-03-19 20:18:00,080 - freqtrade.strategy.hyper - INFO - Strategy Parameter(default): confidence_threshold = 0.5
+       2026-03-19 21:00:03,641 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:06,351 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:09,246 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:11,860 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:14,452 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:17,297 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:19,829 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+       2026-03-19 21:00:22,831 - confidence_calibrator - WARNING - [Calibrator] Not enough data for Platt scaling.
+
+  5d. Pair Bazında Sinyal Sayısı (top 25):
+        3203 ALCH/USDT:USDT
+        1797 1000PEPE/USDT:USDT
+        1540 LINK/USDT:USDT
+        1383 MNT/USDT:USDT
+        1129 SUI/USDT:USDT
+        1120 BTC/USDT:USDT
+        1072 DOT/USDT:USDT
+        1004 AAVE/USDT:USDT
+         976 XAUT/USDT:USDT
+         900 ADA/USDT:USDT
+         842 WLFI/USDT:USDT
+         833 0G/USDT:USDT
+         808 ETH/USDT:USDT
+         767 NEAR/USDT:USDT
+         760 FARTCOIN/USDT:USDT
+         705 XRP/USDT:USDT
+         683 VIRTUAL/USDT:USDT
+         670 BNB/USDT:USDT
+         649 LDO/USDT:USDT
+         640 HYPE/USDT:USDT
+         630 TAO/USDT:USDT
+         625 SOL/USDT:USDT
+         618 ZK/USDT:USDT
+         603 ASTER/USDT:USDT
+         597 GIGGLE/USDT:USDT
+
+  5e. Günlük Log Hacmi:
+        3944 2026-03-19
+       11276 2026-03-20
+       11719 2026-03-21
+        7439 2026-03-22
+
+  5f. Saatlik Sinyal Yoğunluğu (son 3 gün):
+        1202 2026-03-19 20
+        1679 2026-03-19 21
+         907 2026-03-19 22
+         156 2026-03-19 23
+         272 2026-03-20 00
+         190 2026-03-20 01
+         221 2026-03-20 02
+         205 2026-03-20 03
+         223 2026-03-20 04
+        2020 2026-03-20 05
+        1706 2026-03-20 06
+         564 2026-03-20 07
+         198 2026-03-20 08
+         225 2026-03-20 09
+         193 2026-03-20 10
+         196 2026-03-20 11
+         233 2026-03-20 12
+         285 2026-03-20 13
+        1864 2026-03-20 14
+         771 2026-03-20 15
+         271 2026-03-20 16
+         184 2026-03-20 17
+         419 2026-03-20 18
+         160 2026-03-20 19
+         201 2026-03-20 20
+         295 2026-03-20 21
+         193 2026-03-20 22
+         187 2026-03-20 23
+         271 2026-03-21 00
+         195 2026-03-21 01
+        1478 2026-03-21 02
+         670 2026-03-21 03
+         839 2026-03-21 04
+         200 2026-03-21 05
+         249 2026-03-21 06
+         179 2026-03-21 07
+         204 2026-03-21 08
+         170 2026-03-21 09
+         196 2026-03-21 10
+        1254 2026-03-21 11
+        1096 2026-03-21 12
+         293 2026-03-21 13
+         189 2026-03-21 14
+         223 2026-03-21 15
+         196 2026-03-21 16
+         176 2026-03-21 17
+         203 2026-03-21 18
+         182 2026-03-21 19
+        1196 2026-03-21 20
+        1193 2026-03-21 21
+         686 2026-03-21 22
+         181 2026-03-21 23
+         310 2026-03-22 00
+         275 2026-03-22 01
+         219 2026-03-22 02
+         209 2026-03-22 03
+         202 2026-03-22 04
+        1351 2026-03-22 05
+        1304 2026-03-22 06
+         391 2026-03-22 07
+         197 2026-03-22 08
+         191 2026-03-22 09
+         209 2026-03-22 10
+         183 2026-03-22 11
+        1180 2026-03-22 12
+         833 2026-03-22 13
+         327 2026-03-22 14
+          58 2026-03-22 15
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  6. EVIDENCE ENGINE ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  6a. Evidence Source Kullanımı:
+
+  6b. Evidence Sub-Question (son 30):
+     2026-03-22T12:19:13+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] BTC/USDT:USDT scores: trend=0.62, mom=0.64, crowd=0.65,
+     2026-03-22T12:19:28+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ETH/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.57,
+     2026-03-22T12:19:44+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] MNT/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T12:20:00+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] AAVE/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65
+     2026-03-22T12:20:15+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] TAO/USDT:USDT scores: trend=0.62, mom=0.71, crowd=0.65,
+     2026-03-22T12:24:39+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] XAUT/USDT:USDT scores: trend=0.38, mom=0.64, crowd=0.65
+     2026-03-22T12:30:24+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] BNB/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T12:36:37+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ICP/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T12:36:53+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] WLFI/USDT:USDT scores: trend=0.62, mom=0.62, crowd=0.65
+     2026-03-22T12:51:24+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ADA/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T12:52:08+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ADA/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T12:56:07+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ADA/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T12:57:29+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] HBAR/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65
+     2026-03-22T13:07:20+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] 0G/USDT:USDT scores: trend=0.15, mom=0.55, crowd=0.65, 
+     2026-03-22T13:24:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] TWT/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T13:25:35+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] TWT/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T13:25:36+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] VIRTUAL/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0
+     2026-03-22T13:30:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] ZK/USDT:USDT scores: trend=0.62, mom=0.50, crowd=0.65, 
+     2026-03-22T13:31:07+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] LDO/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+     2026-03-22T13:31:08+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] TWT/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T13:31:22+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] CRV/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T13:36:59+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] HOOK/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65
+     2026-03-22T14:22:24+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] SOL/USDT:USDT scores: trend=0.38, mom=0.39, crowd=0.57,
+     2026-03-22T14:23:09+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] SOL/USDT:USDT scores: trend=0.38, mom=0.39, crowd=0.57,
+     2026-03-22T14:28:38+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] SOL/USDT:USDT scores: trend=0.38, mom=0.39, crowd=0.57,
+     2026-03-22T14:38:10+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] SUI/USDT:USDT scores: trend=0.30, mom=0.45, crowd=0.65,
+     2026-03-22T14:55:06+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] FARTCOIN/USDT:USDT scores: trend=0.70, mom=0.39, crowd=
+     2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] FARTCOIN/USDT:USDT scores: trend=0.70, mom=0.39, crowd=
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] FARTCOIN/USDT:USDT scores: trend=0.70, mom=0.39, crowd=
+     2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] WIF/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65,
+
+  6c. Evidence Audit Log (DB son 100):
+     QUERY FAILED
+
+  6d. Evidence — Sinyal Dağılımı (tüm kayıtlar):
+     QUERY FAILED
+
+  6e. Evidence — Günlük İstatistikler:
+     QUERY FAILED
+
+  6f. Evidence — Pair bazında ortalama confidence (top 30):
+     QUERY FAILED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  7. LLM PROVIDER ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  7a. HTTP Durum Kodları:
+     HTTP 200  → 11237 adet
+     HTTP 400  → 3 adet
+/root/freqtrade/analyze.sh: line 322: [: 0
+0: integer expression expected
+     HTTP 403  → 4 adet
+     HTTP 413  → 120 adet
+     HTTP 429  → 5393 adet
+     HTTP 500  → 25 adet
+/root/freqtrade/analyze.sh: line 322: [: 0
+0: integer expression expected
+     HTTP 503  → 30 adet
+/root/freqtrade/analyze.sh: line 322: [: 0
+0: integer expression expected
+
+  7b. Rate Limit & Failover Events:
+     Toplam: 16126
+
+  7c. Model Kullanım Dağılımı:
+        9019 gemini-2.5-flash-lite
+        6772 groq.com
+        3578 gemini-3.1-flash-lite-preview
+        3449 gemini-embedding-001
+        2213 llama-3.1-8b-instant
+        1321 qwen/qwen3-32b
+         785 llama-4-scout-17b-16e-instruct
+         688 llama-3.3-70b-versatile
+         270 kimi-k2-instruct
+         113 gemini-2.5-flash
+          18 gemini-3-flash-preview
+           2 groqstatus.com
+           2 gemini-embedding-2-preview
+
+  7d. Penalize edilen modeller (failover):
+        2682 gemini-2.5-flash-lite
+        1081 llama-3.1-8b-instant
+         704 qwen/qwen3-32b
+         373 llama-4-scout-17b-16e-instruct
+         329 llama-3.3-70b-versatile
+         137 kimi-k2-instruct
+          67 gemini-3.1-flash-lite-preview
+          58 groq.com
+          22 gemini-2.5-flash
+           5 gemini-3-flash-preview
+
+  7e. Son 20 LLM Hatası (timestamp ile):
+     2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.3-70b-versatile penalized 15.0s. Other models on this key still active.
+     2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.3-70b-versatile quota exhausted. Other models on same key still OK.
+     2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateCo
+     2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] models/gemini-2.5-flash-lite penalized 60.0s. Other models on this key still active.
+     2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] models/gemini-2.5-flash-lite quota exhausted. Other models on same key still OK.
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+     2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] meta-llama/llama-4-scout-17b-16e-instruct penalized 15.0s. Other models on this key stil
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] meta-llama/llama-4-scout-17b-16e-instruct quota exhausted. Other models on same key still 
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.3-70b-versatile penalized 15.0s. Other models on this key still active.
+     2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.3-70b-versatile quota exhausted. Other models on same key still OK.
+     2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+     2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+     2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  8. TRADE & OPPORTUNITY ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  8a. Açık Trade'ler:
+     YOK veya HATA
+
+  8b. Son 30 Kapanan Trade:
+     YOK veya HATA
+
+  8c. Trade Özet İstatistikleri:
+     HATA
+
+  8d. Günlük PnL:
+     HATA
+
+  8e. Opportunity Scores (son 30):
+     HATA
+
+  8f. Agent Performance:
+     Kayıt sayısı: 0
+
+  8g. Agent Memory (son 20):
+     BOŞ veya HATA
+
+  8h. Cross-Pair Cache (son 10):
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  9. SCHEDULER ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  9a. Job Çalışma Sayıları:
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+     cross_pair_intel          → 351
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+     cleanup                   → 1046
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 450: [: 0
+0: integer expression expected
+
+  9b. Scheduler Hataları (unique):
+sed: -e expression #1, char 19: Invalid range end
+
+  9c. numpy.matrix hatası detay:
+     2026-03-20T19:51:36+03:00 vm433344.ovadns.com python[218120]: ERROR:__main__:[Scheduler:Job] Rolling sentiment computation failed: module 'numpy' has no attribute 'matrix'
+     2026-03-20T19:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^VIX/vix failed: module 'numpy' has no attribute 'matrix'
+     2026-03-20T19:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^GSPC/sp500 failed: module 'numpy' has no attribute 'matrix
+     2026-03-20T19:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] GC=F/gold failed: module 'numpy' has no attribute 'matrix'
+     2026-03-20T19:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^IXIC/nasdaq failed: module 'numpy' has no attribute 'matri
+
+  9d. yfinance DXY hatası detay:
+     2026-03-20T19:51:38+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be
+     2026-03-20T20:51:38+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be
+     2026-03-20T21:51:38+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be
+     2026-03-20T22:51:38+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be
+     2026-03-20T23:51:37+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be
+
+  9e. Event Reanalysis tetiklemeleri:
+     2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ZK/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] LDO/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Event-Driven Re-Analysis (F&G extreme, funding s
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "Event-Driven Re-Analysis (F&G extreme, f
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] NEAR/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] 1000PEPE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] APT/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ZK/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] LDO/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] SUI/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] AAVE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] MNT/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ASTER/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] WIF/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+     2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Event-Driven Re-Analysis (F&G extreme, funding s
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  10. RESOURCE & FD ANALİZİ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  10a. Process FD Sayıları:
+     freqtrade                    PID=219958   FDs=132    Limit=65535
+     freqtrade-rag                PID=219944   FDs=192    Limit=1024
+     freqtrade-scheduler          PID=218120   FDs=317    Limit=1024
+     freqtrade-models             PID=232929   FDs=19     Limit=1024
+
+  10b. 'Too many open files' kontrol:
+/root/freqtrade/analyze.sh: line 505: 0
+0: syntax error in expression (error token is "0")
+     Toplam FD hatası: 0
+
+  10c. Top memory tüketicileri:
+     USER     PID       %CPU%  %MEM% COMMAND
+     root     232929    54.9%  13.8% /root/freqtrade/.venv/bin/python
+     root     218120     0.8%  11.3% /root/freqtrade/.venv/bin/python
+     root     219958     4.7%   3.9% /root/freqtrade/.venv/bin/python3.13
+     root     219944     0.5%   3.7% /root/freqtrade/.venv/bin/python
+     root     218260     0.1%   1.2% /root/freqtrade/.venv/bin/python3.13
+     root     116713     0.0%   0.1% /usr/lib/systemd/systemd-journald
+     root     47335      0.0%   0.0% /sbin/multipathd
+     root     196627     0.0%   0.0% /usr/libexec/fwupd/fwupd
+     root     233847     0.0%   0.0% /usr/lib/systemd/systemd
+     root     234392     0.0%   0.0% sshd:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  11. CANLI SIGNAL-HEALTH SNAPSHOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+    "total_signals_24h": 184,
+    "distribution": {
+        "AI": 33,
+        "EVIDENCE_ENGINE": 151
+    },
+    "ai_ratio_pct": 17.9,
+    "healthy": false,
+    "in_memory_stats": {
+        "ai": 394,
+        "fallback": 78,
+        "voting": 0,
+        "timeout": 0,
+        "total": 472
+    }
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  12. DB TABLO DURUMLARI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DB Boyutu: 742M
+
+     agent_memory                          10 cols         0 rows
+     agent_performance                      8 cols         0 rows
+     ai_decisions                          15 cols      6020 rows
+     ai_lessons                             8 cols       328 rows
+     autonomy_state                         8 cols         1 rows
+     backtest_processed                     6 cols         0 rows
+     bayesian_kelly                         7 cols         1 rows
+     binary_embeddings                      2 cols      1586 rows
+     bm25_index                             2 cols      2865 rows
+     bm25_index_config                      2 cols         1 rows
+     bm25_index_content                     3 cols      2865 rows
+     bm25_index_data                        2 cols       186 rows
+     bm25_index_docsize                     2 cols      2865 rows
+     bm25_index_idx                         3 cols       181 rows
+     coin_sentiment_rolling                 7 cols      3330 rows
+     cross_pair_cache                       3 cols         1 rows
+     defi_data                              5 cols       249 rows
+     derivatives_data                       6 cols      1003 rows
+     embedding_cache                        5 cols     28349 rows
+     evidence_audit_log                    10 cols      7861 rows
+     fear_and_greed                         5 cols         8 rows
+     forgone_profit                        10 cols       883 rows
+     hot_buffer                             5 cols         0 rows
+     hypothetical_portfolio                 6 cols     14627 rows
+     kg_entities                            2 cols       597 rows
+     kg_relationships                       6 cols       798 rows
+     llm_calls                             12 cols    102489 rows
+     macro_data                             6 cols       332 rows
+     magma_edges                            8 cols        67 rows
+     market_news                           11 cols      1395 rows
+     memorag_global                         4 cols         1 rows
+     ohlcv_patterns                        11 cols     83575 rows
+     opportunity_scores                    10 cols     25727 rows
+     pattern_trades                        20 cols         0 rows
+     portfolio_state                        7 cols         1 rows
+     protection_logs                        7 cols     62426 rows
+     raptor_fts                             3 cols      2252 rows
+     raptor_fts_config                      2 cols         1 rows
+     raptor_fts_content                     4 cols      2252 rows
+     raptor_fts_data                        2 cols       203 rows
+     raptor_fts_docsize                     2 cols      2252 rows
+     raptor_fts_idx                         3 cols       201 rows
+     raptor_nodes                           5 cols      1421 rows
+     risk_budget                            6 cols        21 rows
+     search_trends                          4 cols         0 rows
+     semantic_cache                         7 cols         0 rows
+     signal_health                          7 cols       645 rows
+     sqlite_sequence                        2 cols        22 rows
+     system_metrics                         5 cols      2823 rows
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  13. MADAM PİPELİNE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  13a. Tier Kullanımı:
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+     EvidenceFirst        → 510
+/root/freqtrade/analyze.sh: line 552: [: 0
+0: integer expression expected
+
+  13b. Semaphore:
+     Semaphore olayları: 220
+
+  13c. Cache Hit/Miss:
+     Cache HIT:  0
+0
+     Cache MISS: 1
+
+  13d. MADAM ortalama latency (tahmini):
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  14. MODEL SERVER (8895)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     Errors:    3488
+     OOM hints: 215
+
+     Restart timestamps (from traceback):
+       2026-03-16T08:50:02
+       2026-03-16T08:55:00
+       2026-03-16T08:56:06
+       2026-03-16T08:57:28
+       2026-03-16T08:58:37
+       2026-03-16T08:59:41
+       2026-03-16T09:08:19
+       2026-03-16T09:09:26
+       2026-03-16T09:14:38
+       2026-03-16T09:18:52
+       2026-03-16T09:20:02
+       2026-03-16T09:21:17
+       2026-03-16T09:22:19
+       2026-03-16T09:23:44
+       2026-03-16T09:25:01
+       2026-03-16T09:30:22
+       2026-03-16T09:31:33
+       2026-03-16T09:43:07
+       2026-03-16T09:44:22
+       2026-03-16T09:45:24
+       2026-03-16T09:46:34
+       2026-03-16T09:49:24
+       2026-03-16T09:50:31
+       2026-03-16T09:51:31
+       2026-03-16T09:56:08
+       2026-03-16T09:57:11
+       2026-03-16T10:03:23
+       2026-03-16T10:08:50
+       2026-03-16T10:09:50
+       2026-03-16T10:11:04
+       2026-03-16T10:14:53
+       2026-03-16T10:15:58
+       2026-03-16T10:16:59
+       2026-03-16T10:18:31
+       2026-03-16T10:21:12
+       2026-03-16T10:22:12
+       2026-03-16T10:23:14
+       2026-03-16T10:27:16
+       2026-03-16T10:28:18
+       2026-03-16T10:29:25
+       2026-03-16T10:30:50
+       2026-03-16T10:31:50
+       2026-03-16T10:37:21
+       2026-03-16T10:38:42
+       2026-03-16T10:39:43
+       2026-03-16T10:40:48
+       2026-03-16T10:41:53
+       2026-03-16T10:43:26
+       2026-03-16T10:44:28
+       2026-03-16T10:46:06
+       2026-03-16T10:47:09
+       2026-03-16T10:55:26
+       2026-03-16T10:56:38
+       2026-03-16T10:58:08
+       2026-03-16T10:59:18
+       2026-03-16T11:00:29
+       2026-03-16T11:01:37
+       2026-03-16T11:02:36
+       2026-03-16T11:04:41
+       2026-03-16T11:07:58
+       2026-03-16T11:09:01
+       2026-03-16T11:10:48
+       2026-03-16T11:14:05
+       2026-03-16T11:15:05
+       2026-03-16T11:16:11
+       2026-03-16T11:17:17
+       2026-03-16T11:26:21
+       2026-03-16T11:27:22
+       2026-03-16T11:28:26
+       2026-03-16T11:29:27
+       2026-03-16T11:30:38
+       2026-03-16T11:31:41
+       2026-03-16T11:32:42
+       2026-03-16T11:33:43
+       2026-03-16T11:38:32
+       2026-03-16T11:40:04
+       2026-03-16T11:41:10
+       2026-03-16T11:44:44
+       2026-03-16T11:45:44
+       2026-03-16T11:46:46
+       2026-03-16T11:47:48
+       2026-03-16T11:57:11
+       2026-03-16T11:58:18
+       2026-03-16T11:59:39
+       2026-03-16T12:00:49
+       2026-03-16T12:01:55
+       2026-03-16T12:03:09
+       2026-03-16T12:04:13
+       2026-03-16T12:09:27
+       2026-03-16T12:10:30
+       2026-03-16T12:11:33
+       2026-03-16T12:12:50
+       2026-03-16T12:14:01
+       2026-03-16T12:15:45
+       2026-03-16T12:16:46
+       2026-03-16T12:17:57
+       2026-03-16T12:19:07
+       2026-03-16T12:20:36
+       2026-03-16T12:21:49
+       2026-03-16T12:22:54
+       2026-03-16T12:24:01
+       2026-03-16T12:27:46
+       2026-03-16T12:28:53
+       2026-03-16T12:29:56
+       2026-03-16T12:31:05
+       2026-03-16T12:32:06
+       2026-03-16T12:33:06
+       2026-03-16T12:38:55
+       2026-03-16T12:39:56
+       2026-03-16T12:41:05
+       2026-03-16T12:42:08
+       2026-03-16T12:43:13
+       2026-03-16T12:44:19
+       2026-03-16T12:51:22
+       2026-03-16T12:51:56
+       2026-03-16T12:52:13
+       2026-03-16T12:53:14
+       2026-03-16T12:54:36
+       2026-03-16T12:58:23
+       2026-03-16T12:59:28
+       2026-03-16T13:01:16
+       2026-03-16T13:04:31
+       2026-03-16T13:05:34
+       2026-03-16T13:06:34
+       2026-03-16T13:10:36
+       2026-03-16T13:11:41
+       2026-03-16T13:13:03
+       2026-03-16T13:14:09
+       2026-03-16T13:15:09
+       2026-03-16T13:22:55
+       2026-03-16T13:24:00
+       2026-03-16T13:25:20
+       2026-03-16T13:28:59
+       2026-03-16T13:30:18
+       2026-03-16T13:31:55
+       2026-03-16T13:33:00
+       2026-03-16T13:34:22
+       2026-03-16T13:35:26
+       2026-03-16T13:45:32
+       2026-03-16T13:50:04
+       2026-03-16T13:51:10
+       2026-03-16T13:52:31
+       2026-03-16T13:57:40
+       2026-03-16T13:58:42
+       2026-03-16T13:59:47
+       2026-03-16T14:00:48
+       2026-03-16T14:01:58
+       2026-03-16T14:02:58
+       2026-03-16T14:03:59
+       2026-03-16T14:10:00
+       2026-03-16T14:11:19
+       2026-03-16T14:12:36
+       2026-03-16T14:13:37
+       2026-03-16T14:14:49
+       2026-03-16T14:16:19
+       2026-03-16T14:20:18
+       2026-03-16T14:21:46
+       2026-03-16T14:22:52
+       2026-03-16T14:28:36
+       2026-03-16T14:29:37
+       2026-03-16T14:30:40
+       2026-03-16T14:31:48
+       2026-03-16T14:33:02
+       2026-03-16T14:34:49
+       2026-03-16T14:35:52
+       2026-03-16T14:37:06
+       2026-03-16T14:40:47
+       2026-03-16T14:40:49
+       2026-03-16T14:42:00
+       2026-03-16T14:46:56
+       2026-03-16T14:47:57
+       2026-03-16T14:53:01
+       2026-03-16T14:59:15
+       2026-03-16T15:00:52
+       2026-03-16T15:05:22
+       2026-03-16T15:06:27
+       2026-03-16T15:07:40
+       2026-03-16T15:11:29
+       2026-03-16T15:17:48
+       2026-03-16T15:18:54
+       2026-03-16T15:24:01
+       2026-03-16T15:30:10
+       2026-03-16T15:31:25
+       2026-03-16T15:32:27
+       2026-03-16T15:33:30
+       2026-03-16T15:36:16
+       2026-03-16T15:37:17
+       2026-03-16T15:42:17
+       2026-03-16T15:43:18
+       2026-03-16T15:44:18
+       2026-03-16T15:48:18
+       2026-03-16T15:49:20
+       2026-03-16T15:50:22
+       2026-03-16T15:51:25
+       2026-03-16T15:52:25
+       2026-03-16T15:54:25
+       2026-03-16T16:00:46
+       2026-03-16T16:02:12
+       2026-03-16T16:06:58
+       2026-03-16T16:07:59
+       2026-03-16T16:13:10
+       2026-03-16T16:14:12
+       2026-03-16T16:15:26
+       2026-03-16T16:20:29
+       2026-03-16T16:21:31
+       2026-03-16T16:31:27
+       2026-03-16T16:32:30
+       2026-03-16T16:33:33
+       2026-03-16T16:35:02
+       2026-03-16T16:36:16
+       2026-03-16T16:37:25
+       2026-03-16T16:38:33
+       2026-03-16T16:40:54
+       2026-03-16T16:41:30
+       2026-03-16T16:41:45
+       2026-03-16T16:43:00
+       2026-03-16T16:44:03
+       2026-03-16T16:45:15
+       2026-03-16T16:46:25
+       2026-03-16T16:47:25
+       2026-03-16T16:48:27
+       2026-03-16T16:52:10
+       2026-03-16T16:53:20
+       2026-03-16T16:58:23
+       2026-03-16T16:59:46
+       2026-03-16T17:03:09
+       2026-03-16T17:04:09
+       2026-03-16T17:05:34
+       2026-03-16T17:07:08
+       2026-03-16T17:08:18
+       2026-03-16T17:09:20
+       2026-03-16T17:27:26
+       2026-03-16T17:28:26
+       2026-03-16T17:29:26
+       2026-03-16T17:33:16
+       2026-03-16T17:34:28
+       2026-03-16T17:35:49
+       2026-03-16T17:40:28
+       2026-03-16T17:46:29
+       2026-03-16T17:47:45
+       2026-03-16T17:48:48
+       2026-03-16T17:50:05
+       2026-03-16T17:52:37
+       2026-03-16T17:53:50
+       2026-03-16T17:55:02
+       2026-03-16T17:56:05
+       2026-03-16T18:00:29
+       2026-03-16T18:06:37
+       2026-03-16T18:07:46
+       2026-03-16T18:09:08
+       2026-03-16T18:28:17
+       2026-03-16T18:29:42
+       2026-03-16T18:34:28
+       2026-03-16T18:35:53
+       2026-03-16T18:36:55
+       2026-03-16T18:38:13
+       2026-03-16T18:39:15
+       2026-03-16T18:40:17
+       2026-03-16T18:43:37
+       2026-03-16T18:44:42
+       2026-03-16T18:45:43
+       2026-03-16T18:46:48
+       2026-03-16T18:46:58
+       2026-03-16T18:48:02
+       2026-03-16T18:49:45
+       2026-03-16T18:50:51
+       2026-03-16T18:53:09
+       2026-03-16T18:54:01
+       2026-03-16T18:55:11
+       2026-03-16T18:56:13
+       2026-03-17T04:04:32
+       2026-03-17T11:22:50
+       2026-03-18T05:03:04
+       2026-03-18T15:15:58
+       2026-03-19T02:55:43
+       2026-03-19T10:55:46
+       2026-03-19T20:51:24
+       2026-03-20T00:18:23
+       2026-03-20T04:39:48
+       2026-03-20T04:48:01
+       2026-03-20T08:19:38
+       2026-03-20T10:19:50
+       2026-03-20T15:46:16
+       2026-03-20T16:01:20
+       2026-03-20T22:19:29
+
+     Son 30 error satırı:
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T15:46:16+03:00 vm433344.ovadns.com python[224999]: RuntimeError: The size of tensor a (85) must match the size of tensor b (71) at non-singleton dimension 1
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]: ERROR:    Exception in ASGI application
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 186, in __call__
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 164, in __call__
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T16:01:20+03:00 vm433344.ovadns.com python[224999]: RuntimeError: The size of tensor a (100) must match the size of tensor b (71) at non-singleton dimension 1
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]: INFO:     127.0.0.1:47946 - "POST /rerank/colbert HTTP/1.1" 500 Internal Server Error
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]: ERROR:    Exception in ASGI application
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 186, in __call__
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 164, in __call__
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]:   File "/root/freqtrade/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+     2026-03-20T22:19:29+03:00 vm433344.ovadns.com python[226927]: RuntimeError: The size of tensor a (104) must match the size of tensor b (91) at non-singleton dimension 1
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  15. DERIVATIVES & MAGMA & FEAR/GREED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  15a. Derivatives Data:
+total  last_update          unique_pairs
+-----  -------------------  ------------
+1003   2026-03-22 14:51:37  3           
+
+  15b. MAGMA Edges:
+     HATA
+
+  15c. Fear & Greed (son 10):
+     HATA
+
+  15d. Derivatives — son 5 pair güncellemesi:
+pair      last_update          entries
+--------  -------------------  -------
+SOL/USDT  2026-03-22 14:51:37  334    
+BTC/USDT  2026-03-22 14:51:36  335    
+ETH/USDT  2026-03-22 14:51:36  334    
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  16. SIGNAL_HEALTH DB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Şema:
+     0|id|INTEGER|0||1
+     1|timestamp|DATETIME|0|CURRENT_TIMESTAMP|0
+     2|pair|TEXT|1||0
+     3|signal_source|TEXT|1||0
+     4|signal_type|TEXT|0||0
+     5|confidence|REAL|0||0
+     6|latency_ms|REAL|0||0
+
+  Son 30 kayıt:
+id   timestamp            pair                signal_source    signal_type  confidence  latency_ms
+---  -------------------  ------------------  ---------------  -----------  ----------  ----------
+645  2026-03-22 12:01:26  WIF/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+644  2026-03-22 11:55:51  FARTCOIN/USDT:USDT  EVIDENCE_ENGINE  NEUTRAL      0.0531                
+643  2026-03-22 11:55:51  FARTCOIN/USDT:USDT  EVIDENCE_ENGINE  NEUTRAL      0.0531                
+642  2026-03-22 11:43:31  SOL/USDT:USDT       AI               NEUTRAL      0.54                  
+641  2026-03-22 11:38:25  SUI/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0657                
+640  2026-03-22 11:23:09  SOL/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.101                 
+639  2026-03-22 11:23:09  SOL/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.101                 
+638  2026-03-22 10:44:24  TWT/USDT:USDT       AI               NEUTRAL      0.52                  
+637  2026-03-22 10:37:14  HOOK/USDT:USDT      EVIDENCE_ENGINE  BEARISH      0.133                 
+636  2026-03-22 10:31:37  CRV/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0657                
+635  2026-03-22 10:31:22  LDO/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+634  2026-03-22 10:31:06  ZK/USDT:USDT        EVIDENCE_ENGINE  NEUTRAL      0.073                 
+633  2026-03-22 10:25:51  VIRTUAL/USDT:USDT   EVIDENCE_ENGINE  BEARISH      0.133                 
+632  2026-03-22 10:25:35  TWT/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0228                
+631  2026-03-22 10:25:35  TWT/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0228                
+630  2026-03-22 10:09:26  ADA/USDT:USDT       AI               BEARISH      0.58                  
+629  2026-03-22 10:07:35  0G/USDT:USDT        EVIDENCE_ENGINE  NEUTRAL      0.097                 
+628  2026-03-22 09:57:44  HBAR/USDT:USDT      EVIDENCE_ENGINE  NEUTRAL      0.0657                
+627  2026-03-22 09:52:08  ADA/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+626  2026-03-22 09:52:08  ADA/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+625  2026-03-22 09:37:53  XAUT/USDT:USDT      AI               NEUTRAL      0.54                  
+624  2026-03-22 09:37:08  WLFI/USDT:USDT      EVIDENCE_ENGINE  NEUTRAL      0.068                 
+623  2026-03-22 09:36:52  ICP/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+622  2026-03-22 09:30:39  BNB/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0228                
+621  2026-03-22 09:20:30  TAO/USDT:USDT       EVIDENCE_ENGINE  BULLISH      0.157                 
+620  2026-03-22 09:20:15  AAVE/USDT:USDT      EVIDENCE_ENGINE  BEARISH      0.133                 
+619  2026-03-22 09:19:59  MNT/USDT:USDT       EVIDENCE_ENGINE  BEARISH      0.133                 
+618  2026-03-22 09:19:43  ETH/USDT:USDT       EVIDENCE_ENGINE  NEUTRAL      0.0548                
+617  2026-03-22 09:19:28  BTC/USDT:USDT       EVIDENCE_ENGINE  BULLISH      0.124                 
+616  2026-03-22 09:19:12  XAUT/USDT:USDT      EVIDENCE_ENGINE  NEUTRAL      0.033                 
+
+  Signal Type Dağılımı:
+signal_type  cnt  avg_conf  min_conf  max_conf
+-----------  ---  --------  --------  --------
+NEUTRAL      479  0.1139    0.01      0.58    
+BEARISH      92   0.1838    0.101     0.64    
+BULLISH      74   0.1317    0.0692    0.249   
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  17. FORGONE P&L & MISSED TRADES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+     2026-03-22 13:10:09,507 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=693, pair=SOL/USDT:USDT, amount=0.1, is_short=False, leverage=1, ope
+     2026-03-22 13:10:09,931 - forgone_pnl_engine - INFO - [Portfolio] SOL/USDT:USDT PnL=+0.01% → $125.17 → $125.18
+     2026-03-22 13:11:52,687 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=707, pair=DOT/USDT:USDT, amount=0.1, is_short=False, leverage=1, ope
+     2026-03-22 13:11:53,457 - forgone_pnl_engine - INFO - [Portfolio] DOT/USDT:USDT PnL=+0.00% → $125.18 → $125.18
+     2026-03-22 13:11:54,141 - llm_router - INFO - [ModelDiscovery] Skipping deprecated preview: gemini-2.5-flash-lite-preview-09-2025
+     2026-03-22 13:15:17,781 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=697, pair=AAVE/USDT:USDT, amount=0.01, is_short=False, leverage=1, o
+     2026-03-22 13:15:18,200 - forgone_pnl_engine - INFO - [Portfolio] AAVE/USDT:USDT PnL=+0.00% → $125.18 → $125.18
+     2026-03-22 13:17:06,985 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=707, pair=DOT/USDT:USDT, amount=0.1, is_short=False, leverage=1, ope
+     2026-03-22 13:25:51,643 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for SUI/USDT:USDT @ $0.92 (Conf: 0.18) — FORGONE (paper trade) — ID: 875
+     2026-03-22 13:30:10,044 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=697, pair=AAVE/USDT:USDT, amount=0.01, is_short=False, leverage=1, o
+     2026-03-22 13:30:10,479 - forgone_pnl_engine - INFO - [Portfolio] AAVE/USDT:USDT PnL=+0.00% → $125.18 → $125.19
+     2026-03-22 13:30:10,810 - llm_router - INFO - [ModelDiscovery] Skipping deprecated preview: gemini-2.5-flash-lite-preview-09-2025
+     2026-03-22 13:35:23,024 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=697, pair=AAVE/USDT:USDT, amount=0.01, is_short=False, leverage=1, o
+     2026-03-22 14:00:03,608 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for SUI/USDT:USDT @ $0.91 (Conf: 0.18) — FORGONE (paper trade) — ID: 876
+     2026-03-22 14:00:04,062 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for TRUMP/USDT:USDT @ $3.16 (Conf: 0.13) — FORGONE (paper trade) — ID: 877
+     2026-03-22 14:00:04,102 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for SAND/USDT:USDT @ $0.08 (Conf: 0.13) — FORGONE (paper trade) — ID: 878
+     2026-03-22 14:00:04,259 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for HOOK/USDT:USDT @ $0.01 (Conf: 0.13) — FORGONE (paper trade) — ID: 879
+     2026-03-22 14:00:04,340 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for ICP/USDT:USDT @ $2.40 (Conf: 0.13) — FORGONE (paper trade) — ID: 880
+     2026-03-22 14:02:26,097 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=695, pair=XAUT/USDT:USDT, amount=0.001, is_short=False, leverage=1, 
+     2026-03-22 14:02:26,526 - forgone_pnl_engine - INFO - [Portfolio] XAUT/USDT:USDT PnL=+0.00% → $125.19 → $125.19
+     2026-03-22 14:02:27,061 - llm_router - INFO - [ModelDiscovery] Skipping deprecated preview: gemini-2.5-flash-lite-preview-09-2025
+     2026-03-22 14:03:34,583 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=694, pair=BNB/USDT:USDT, amount=0.01, is_short=False, leverage=1, op
+     2026-03-22 14:03:35,015 - forgone_pnl_engine - INFO - [Portfolio] BNB/USDT:USDT PnL=+0.00% → $125.19 → $125.19
+     2026-03-22 14:03:46,916 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=691, pair=ETH/USDT:USDT, amount=0.01, is_short=False, leverage=1, op
+     2026-03-22 14:03:47,350 - forgone_pnl_engine - INFO - [Portfolio] ETH/USDT:USDT PnL=+0.01% → $125.19 → $125.20
+     2026-03-22 14:05:14,575 - freqtrade.freqtradebot - INFO - Skipping cancelling stoploss on exchange for Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, op
+     2026-03-22 14:05:14,994 - forgone_pnl_engine - INFO - [Portfolio] LINK/USDT:USDT PnL=+0.00% → $125.20 → $125.20
+     2026-03-22 15:00:02,299 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for TRUMP/USDT:USDT @ $3.17 (Conf: 0.13) — FORGONE (paper trade) — ID: 881
+     2026-03-22 15:00:02,351 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for SAND/USDT:USDT @ $0.08 (Conf: 0.13) — FORGONE (paper trade) — ID: 882
+     2026-03-22 15:00:02,488 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for ICP/USDT:USDT @ $2.43 (Conf: 0.13) — FORGONE (paper trade) — ID: 883
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  18. ÖZET SKOR KARTI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/root/freqtrade/analyze.sh: line 692: 0
+0: syntax error in expression (error token is "0")
+/root/freqtrade/analyze.sh: line 696: 0
+0: syntax error in expression (error token is "0")
+  ┌──────────────────────────────────────────────┐
+  │  Servisler Ayakta:       4 / 4                 │
+  │  Toplam Error/Exception: 7540                 │
+  │  HTTP 429 (Rate Limit):  36                   │
+  │  HTTP 503 (Unavailable): 32                   │
+  │  FD Hatası (EMFILE):     0                    │
+  │  Model Server Restarts:  38                   │
+  └──────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  19. RAW LOG SAMPLES (debug için)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── bot (son 200 satır) ──
+  2026-03-22 14:05:14,994 - forgone_pnl_engine - INFO - [Portfolio] LINK/USDT:USDT PnL=+0.00% → $125.20 → $125.20
+  2026-03-22 14:05:14,996 - llm_router - INFO - Using cached model list (6 models)
+  2026-03-22 14:05:21,566 - llm_router - INFO - Loaded 10 Gemini keys × 6 models. Models: ['models/gemini-2.5-flash-lite', 'models/gemini-3.1-flash-lite-preview', 'models/gemini-2.5-flash', 'models/gemini-3-flash-preview', 'models/gemini-2.5-pro', 'models/gemini-3.1-pro-preview']
+  2026-03-22 14:05:22,069 - llm_router - INFO - Loaded 7 Groq models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'qwen/qwen3-32b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'moonshotai/kimi-k2-instruct', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b']
+  2026-03-22 14:05:22,070 - llm_router - INFO - Loaded 2 Cerebras models: ['qwen-3-235b-a22b-instruct-2507', 'llama3.1-8b']
+  2026-03-22 14:05:22,072 - llm_router - INFO - Loaded 2 SambaNova models: ['Meta-Llama-3.3-70B-Instruct', 'Meta-Llama-3.1-8B-Instruct']
+  2026-03-22 14:05:22,073 - llm_router - INFO - Loaded 2 Mistral models: ['mistral-large-latest', 'mistral-small-latest']
+  2026-03-22 14:05:22,074 - llm_router - INFO - Using cached OpenRouter free model list (6 models)
+  2026-03-22 14:05:22,076 - llm_router - INFO - Loaded 6 OpenRouter free models: ['meta-llama/llama-3.2-3b-instruct:free', 'meta-llama/llama-3.3-70b-instruct:free', 'nousresearch/hermes-3-llama-3.1-405b:free', 'qwen/qwen3-4b:free', 'qwen/qwen3-coder:free', 'qwen/qwen3-next-80b-a3b-instruct:free']
+  2026-03-22 14:05:22,519 - bidirectional_rag - INFO - Generated Bidirectional RAG lesson for LINK/USDT:USDT (PnL: 2.3427529999999996%).
+  2026-03-22 14:05:22,520 - AIFreqtradeSizer - INFO - [LiveFeedback:BidiRAG] LINK/USDT:USDT lesson generated
+  2026-03-22 14:05:22,523 - AIFreqtradeSizer - INFO - [LiveFeedback:MAGMA] LINK/USDT:USDT causal edge: win via roi
+  2026-03-22 14:05:22,525 - AIFreqtradeSizer - INFO - [LiveFeedback:AgentPool] LINK/USDT:USDT agent outcomes updated: +2.34%
+  2026-03-22 14:05:23,075 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': exit, 'trade_id': 698, 'exchange': 'Bybit', 'pair': 'LINK/USDT:USDT', 'leverage': 1.0, 'direction': 'Long', 'gain': 'profit', 'limit': 9.035, 'order_rate': 9.035, 'order_type': 'limit', 'amount': 0.1, 'open_rate': 8.825, 'close_rate': 9.035, 'current_rate': 9.035, 'profit_amount': 0.02067852, 'profit_ratio': 0.02342753, 'buy_tag': '', 'enter_tag': '', 'exit_reason': 'roi', 'open_date': datetime.datetime(2026, 3, 22, 9, 0, 26, 659641, tzinfo=datetime.timezone.utc), 'close_date': datetime.datetime(2026, 3, 22, 11, 5, 23, 75578, tzinfo=datetime.timezone.utc), 'stake_amount': 0.8825, 'stake_currency': 'USDT', 'base_currency': 'LINK', 'quote_currency': 'USDT', 'fiat_currency': None, 'sub_trade': False, 'cumulative_profit': 0.0, 'final_profit_ratio': None, 'is_final_exit': False}
+  2026-03-22 14:05:23,493 - freqtrade.wallets - INFO - Wallets synced.
+  2026-03-22 14:05:23,910 - freqtrade.rpc.rpc_manager - INFO - Sending rpc strategy_msg: AI Exit: LINK/USDT:USDT reason=roi profit=2.3%
+  2026-03-22 14:05:24,219 - freqtrade.freqtradebot - INFO - Found open order for Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=2026-03-22 09:00:26)
+  2026-03-22 14:05:29,230 - freqtrade.freqtradebot - INFO - Found open order for Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=2026-03-22 09:00:26)
+  2026-03-22 14:05:29,235 - freqtrade.freqtradebot - INFO - Fee for Trade Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=2026-03-22 09:00:26) [sell]: 0.00016263 USDT - rate: 0.00018
+  2026-03-22 14:05:29,236 - freqtrade.persistence.trade_model - INFO - Updating trade (id=698) ...
+  2026-03-22 14:05:29,237 - freqtrade.persistence.trade_model - INFO - LIMIT_SELL has been fulfilled for Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=2026-03-22 09:00:26).
+  2026-03-22 14:05:29,238 - freqtrade.persistence.trade_model - INFO - Marking Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=closed) as closed as the trade is fulfilled and found no open orders for it.
+  2026-03-22 14:05:29,244 - AIFreqtradeSizer - INFO - [OrderFilled] LINK/USDT:USDT EXIT @ 9.035000
+  2026-03-22 14:05:29,245 - freqtrade.freqtradebot - INFO - Cancelling stoploss on exchange for Trade(id=698, pair=LINK/USDT:USDT, amount=0.1, is_short=False, leverage=1, open_rate=8.825, open_since=closed) order: 5062c406-1822-4be0-a98f-e4408b10958a
+  2026-03-22 14:05:30,078 - freqtrade.wallets - INFO - Wallets synced.
+  2026-03-22 14:05:30,083 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': exit_fill, 'trade_id': 698, 'exchange': 'Bybit', 'pair': 'LINK/USDT:USDT', 'leverage': 1.0, 'direction': 'Long', 'gain': 'profit', 'limit': 9.035, 'order_rate': 9.035, 'order_type': 'limit', 'amount': 0.1, 'open_rate': 8.825, 'close_rate': 9.035, 'current_rate': None, 'profit_amount': 0.02067852, 'profit_ratio': 0.02342753, 'buy_tag': '', 'enter_tag': '', 'exit_reason': 'roi', 'open_date': datetime.datetime(2026, 3, 22, 9, 0, 26, 659641, tzinfo=datetime.timezone.utc), 'close_date': datetime.datetime(2026, 3, 22, 11, 5, 26, 918000, tzinfo=datetime.timezone.utc), 'stake_amount': 0.8825, 'stake_currency': 'USDT', 'base_currency': 'LINK', 'quote_currency': 'USDT', 'fiat_currency': None, 'sub_trade': False, 'cumulative_profit': 0.02067852, 'final_profit_ratio': 0.02342753375213991, 'is_final_exit': True}
+  2026-03-22 14:05:30,089 - cooldown_period - INFO - Cooldown for LINK/USDT:USDT for 1 candle.
+  2026-03-22 14:05:58,914 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:06:58,918 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:07:58,923 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:08:18,998 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 40 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), ASTER/USDT:USDT(22.8), WIF/USDT:USDT(22.8), NEAR/USDT:USDT(22.8)
+  2026-03-22 14:08:18,999 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 40 whitelist → 20 top opportunities
+  2026-03-22 14:08:58,926 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:09:58,930 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:10:58,933 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:11:58,937 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:12:58,941 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:13:24,018 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 40 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), ASTER/USDT:USDT(22.8), WIF/USDT:USDT(22.8), NEAR/USDT:USDT(22.8)
+  2026-03-22 14:13:24,020 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 40 whitelist → 20 top opportunities
+  2026-03-22 14:13:58,944 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:14:58,948 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:15:58,951 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:16:58,955 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:17:58,958 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:18:29,038 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 40 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), ASTER/USDT:USDT(22.8), WIF/USDT:USDT(22.8), NEAR/USDT:USDT(22.8)
+  2026-03-22 14:18:29,039 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 40 whitelist → 20 top opportunities
+  2026-03-22 14:18:58,962 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:19:58,966 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:20:58,970 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:21:58,973 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:22:23,993 - AIFreqtradeSizer - INFO - [bot_loop_start] New cycle: 1 pairs in 1 batches (10/batch, 360s interval)
+  2026-03-22 14:22:23,993 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: fetching 1 pairs...
+  2026-03-22 14:22:54,036 - AIFreqtradeSizer - WARNING - [bot_loop_start] Fetch failed for SOL/USDT:USDT: HTTPConnectionPool(host='127.0.0.1', port=8891): Read timed out. (read timeout=30)
+  2026-03-22 14:22:54,038 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: 1 signals in 30.0s | {'NEUTRAL': 1}
+  2026-03-22 14:22:54,039 - AIFreqtradeSizer - INFO - [bot_loop_start] Cycle complete. All 1 pairs processed.
+  2026-03-22 14:22:59,743 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:23:59,747 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:24:59,751 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:25:55,076 - VolumePairList - INFO - Pair COTI/USDT:USDT in your blacklist. Removing it from whitelist...
+  2026-03-22 14:25:55,077 - VolumePairList - INFO - Pair SOON/USDT:USDT in your blacklist. Removing it from whitelist...
+  2026-03-22 14:25:55,077 - VolumePairList - INFO - Pair STORJ/USDT:USDT in your blacklist. Removing it from whitelist...
+  2026-03-22 14:25:55,078 - VolumePairList - INFO - Pair TRUTH/USDT:USDT in your blacklist. Removing it from whitelist...
+  2026-03-22 14:25:55,079 - VolumePairList - INFO - Pair XPL/USDT:USDT in your blacklist. Removing it from whitelist...
+  2026-03-22 14:25:55,096 - SpreadFilter - INFO - Removed SOL/USDT:USDT from whitelist, because spread 1.436% > 1.000%
+  2026-03-22 14:25:55,098 - SpreadFilter - INFO - Removed ASTER/USDT:USDT from whitelist, because spread 39.791% > 1.000%
+  2026-03-22 14:25:55,098 - SpreadFilter - INFO - Removed WIF/USDT:USDT from whitelist, because spread 41.931% > 1.000%
+  2026-03-22 14:25:55,099 - SpreadFilter - INFO - Removed PUMPFUN/USDT:USDT from whitelist, because spread 23.067% > 1.000%
+  2026-03-22 14:25:55,099 - SpreadFilter - INFO - Removed NEAR/USDT:USDT from whitelist, because spread 10.030% > 1.000%
+  2026-03-22 14:25:55,100 - SpreadFilter - INFO - Removed TRUMP/USDT:USDT from whitelist, because spread 55.081% > 1.000%
+  2026-03-22 14:25:55,100 - SpreadFilter - INFO - Removed SAND/USDT:USDT from whitelist, because spread 4.729% > 1.000%
+  2026-03-22 14:25:55,101 - SpreadFilter - INFO - Removed ICP/USDT:USDT from whitelist, because spread 11.866% > 1.000%
+  2026-03-22 14:25:55,112 - freqtrade.plugins.pairlistmanager - INFO - Whitelist with 32 pairs: ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SUI/USDT:USDT', 'BNB/USDT:USDT', 'XAUT/USDT:USDT', 'AAVE/USDT:USDT', 'MNT/USDT:USDT', 'LINK/USDT:USDT', 'HYPE/USDT:USDT', 'TAO/USDT:USDT', 'VIRTUAL/USDT:USDT', 'XRP/USDT:USDT', '1000PEPE/USDT:USDT', 'FARTCOIN/USDT:USDT', 'DOT/USDT:USDT', 'DOGE/USDT:USDT', 'WLFI/USDT:USDT', 'ADA/USDT:USDT', 'ENA/USDT:USDT', '0G/USDT:USDT', 'HBAR/USDT:USDT', 'STRK/USDT:USDT', 'APT/USDT:USDT', 'ZK/USDT:USDT', 'GIGGLE/USDT:USDT', 'TWT/USDT:USDT', 'ALCH/USDT:USDT', 'AERO/USDT:USDT', 'HOOK/USDT:USDT', 'LDO/USDT:USDT', 'UNI/USDT:USDT', 'CRV/USDT:USDT']
+  2026-03-22 14:25:59,754 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:26:59,757 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:27:59,761 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:28:24,827 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 32 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), HBAR/USDT:USDT(22.8), STRK/USDT:USDT(22.8), APT/USDT:USDT(22.8)
+  2026-03-22 14:28:24,828 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 32 whitelist → 20 top opportunities
+  2026-03-22 14:28:59,764 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:29:59,768 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:30:59,771 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:31:06,466 - freqtrade.wallets - INFO - Wallets synced.
+  2026-03-22 14:31:59,775 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:32:59,778 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:33:29,845 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 32 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), HBAR/USDT:USDT(22.8), STRK/USDT:USDT(22.8), APT/USDT:USDT(22.8)
+  2026-03-22 14:33:29,846 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 32 whitelist → 20 top opportunities
+  2026-03-22 14:33:59,782 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:34:59,786 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:35:59,789 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:36:59,793 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:37:59,796 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:38:09,818 - AIFreqtradeSizer - INFO - [bot_loop_start] New cycle: 1 pairs in 1 batches (10/batch, 360s interval)
+  2026-03-22 14:38:09,818 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: fetching 1 pairs...
+  2026-03-22 14:38:25,275 - AIFreqtradeSizer - INFO - [RAG Latency] SUI/USDT:USDT: 15426ms (status=200, POST=Y)
+  2026-03-22 14:38:25,276 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: 1 signals in 15.5s | {'NEUTRAL': 1}
+  2026-03-22 14:38:25,277 - AIFreqtradeSizer - INFO - [bot_loop_start] Cycle complete. All 1 pairs processed.
+  2026-03-22 14:39:00,988 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:40:00,992 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:41:00,996 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:42:01,000 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:43:01,004 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:44:01,008 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:44:11,076 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 32 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), HBAR/USDT:USDT(22.8), STRK/USDT:USDT(22.8), APT/USDT:USDT(22.8)
+  2026-03-22 14:44:11,077 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 32 whitelist → 20 top opportunities
+  2026-03-22 14:45:01,011 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:46:01,015 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:47:01,018 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:48:01,022 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:49:01,026 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:49:16,104 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 32 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), HBAR/USDT:USDT(22.8), STRK/USDT:USDT(22.8), APT/USDT:USDT(22.8)
+  2026-03-22 14:49:16,105 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 32 whitelist → 20 top opportunities
+  2026-03-22 14:50:01,029 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:50:05,897 - uvicorn.error - WARNING - Invalid HTTP request received.
+  2026-03-22 14:50:16,757 - uvicorn.error - WARNING - Invalid HTTP request received.
+  2026-03-22 14:51:01,035 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:51:08,387 - uvicorn.error - WARNING - Invalid HTTP request received.
+  2026-03-22 14:51:09,007 - uvicorn.error - WARNING - Invalid HTTP request received.
+  2026-03-22 14:52:01,039 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:53:01,042 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:54:01,046 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:54:21,112 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 32 pairs → top 20: AAVE/USDT:USDT(22.8), 1000PEPE/USDT:USDT(22.8), HBAR/USDT:USDT(22.8), STRK/USDT:USDT(22.8), APT/USDT:USDT(22.8)
+  2026-03-22 14:54:21,113 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 32 whitelist → 20 top opportunities
+  2026-03-22 14:55:01,050 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:55:06,068 - AIFreqtradeSizer - INFO - [bot_loop_start] New cycle: 1 pairs in 1 batches (10/batch, 360s interval)
+  2026-03-22 14:55:06,069 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: fetching 1 pairs...
+  2026-03-22 14:55:36,150 - AIFreqtradeSizer - WARNING - [bot_loop_start] Fetch failed for FARTCOIN/USDT:USDT: HTTPConnectionPool(host='127.0.0.1', port=8891): Read timed out. (read timeout=30)
+  2026-03-22 14:55:36,152 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: 1 signals in 30.1s | {'NEUTRAL': 1}
+  2026-03-22 14:55:36,153 - AIFreqtradeSizer - INFO - [bot_loop_start] Cycle complete. All 1 pairs processed.
+  2026-03-22 14:55:57,208 - SpreadFilter - INFO - Removed 1000PEPE/USDT:USDT from whitelist, because spread 1.612% > 1.000%
+  2026-03-22 14:55:57,209 - SpreadFilter - INFO - Removed DOT/USDT:USDT from whitelist, because spread 8.108% > 1.000%
+  2026-03-22 14:55:57,210 - SpreadFilter - INFO - Removed NEAR/USDT:USDT from whitelist, because spread 13.447% > 1.000%
+  2026-03-22 14:55:57,210 - SpreadFilter - INFO - Removed APT/USDT:USDT from whitelist, because spread 14.139% > 1.000%
+  2026-03-22 14:55:57,211 - SpreadFilter - INFO - Removed ZK/USDT:USDT from whitelist, because spread 87.287% > 1.000%
+  2026-03-22 14:55:57,212 - SpreadFilter - INFO - Removed GIGGLE/USDT:USDT from whitelist, because spread 4.077% > 1.000%
+  2026-03-22 14:55:57,213 - SpreadFilter - INFO - Removed TWT/USDT:USDT from whitelist, because spread 56.667% > 1.000%
+  2026-03-22 14:55:57,214 - SpreadFilter - INFO - Removed AERO/USDT:USDT from whitelist, because spread 62.868% > 1.000%
+  2026-03-22 14:55:57,214 - SpreadFilter - INFO - Removed HOOK/USDT:USDT from whitelist, because spread 51.939% > 1.000%
+  2026-03-22 14:55:57,215 - SpreadFilter - INFO - Removed LDO/USDT:USDT from whitelist, because spread 6.578% > 1.000%
+  2026-03-22 14:55:57,226 - freqtrade.plugins.pairlistmanager - INFO - Whitelist with 30 pairs: ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SUI/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 'XAUT/USDT:USDT', 'AAVE/USDT:USDT', 'MNT/USDT:USDT', 'LINK/USDT:USDT', 'HYPE/USDT:USDT', 'TAO/USDT:USDT', 'VIRTUAL/USDT:USDT', 'XRP/USDT:USDT', 'FARTCOIN/USDT:USDT', 'ASTER/USDT:USDT', 'WIF/USDT:USDT', 'PUMPFUN/USDT:USDT', 'DOGE/USDT:USDT', 'WLFI/USDT:USDT', 'ADA/USDT:USDT', 'ENA/USDT:USDT', '0G/USDT:USDT', 'TRUMP/USDT:USDT', 'HBAR/USDT:USDT', 'SAND/USDT:USDT', 'STRK/USDT:USDT', 'ALCH/USDT:USDT', 'UNI/USDT:USDT', 'CRV/USDT:USDT', 'ICP/USDT:USDT']
+  2026-03-22 14:56:01,886 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:57:01,889 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:58:01,892 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 14:59:01,896 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 15:00:01,790 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for BTC/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:01,792 - semantic_cache - INFO - Invalidated semantic cache (pair: BTC/USDT:USDT)
+  2026-03-22 15:00:01,793 - AIFreqtradeSizer - INFO - [Signal] BTC/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,813 - AIFreqtradeSizer - INFO - [Signal] ETH/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,833 - AIFreqtradeSizer - INFO - [Signal] SUI/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,857 - AIFreqtradeSizer - INFO - [Signal] SOL/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,878 - AIFreqtradeSizer - INFO - [Signal] BNB/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,901 - AIFreqtradeSizer - INFO - [Signal] XAUT/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,924 - AIFreqtradeSizer - INFO - [Signal] AAVE/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,946 - AIFreqtradeSizer - INFO - [Signal] MNT/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,966 - AIFreqtradeSizer - INFO - [Signal] LINK/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:01,984 - AIFreqtradeSizer - INFO - [Signal] HYPE/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,003 - AIFreqtradeSizer - INFO - [Signal] TAO/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,024 - AIFreqtradeSizer - INFO - [Signal] VIRTUAL/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,055 - AIFreqtradeSizer - INFO - [Signal] XRP/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,086 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for FARTCOIN/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,088 - semantic_cache - INFO - Invalidated semantic cache (pair: FARTCOIN/USDT:USDT)
+  2026-03-22 15:00:02,089 - AIFreqtradeSizer - INFO - [Signal] FARTCOIN/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,108 - AIFreqtradeSizer - INFO - [Signal] ASTER/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,128 - AIFreqtradeSizer - INFO - [Signal] WIF/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,153 - AIFreqtradeSizer - INFO - [Signal] PUMPFUN/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,184 - AIFreqtradeSizer - INFO - [Signal] DOGE/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,205 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for WLFI/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,208 - semantic_cache - INFO - Invalidated semantic cache (pair: WLFI/USDT:USDT)
+  2026-03-22 15:00:02,209 - AIFreqtradeSizer - INFO - [Signal] WLFI/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,232 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for ADA/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,234 - semantic_cache - INFO - Invalidated semantic cache (pair: ADA/USDT:USDT)
+  2026-03-22 15:00:02,236 - AIFreqtradeSizer - INFO - [Signal] ADA/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,254 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for ENA/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,256 - semantic_cache - INFO - Invalidated semantic cache (pair: ENA/USDT:USDT)
+  2026-03-22 15:00:02,257 - AIFreqtradeSizer - INFO - [Signal] ENA/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,276 - AIFreqtradeSizer - INFO - [Signal] 0G/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,299 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for TRUMP/USDT:USDT @ $3.17 (Conf: 0.13) — FORGONE (paper trade) — ID: 881
+  2026-03-22 15:00:02,301 - AIFreqtradeSizer - INFO - [Signal] TRUMP/USDT:USDT → enter_short=1 (BEARISH conf=0.13)
+  2026-03-22 15:00:02,325 - AIFreqtradeSizer - INFO - [Signal] HBAR/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,351 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for SAND/USDT:USDT @ $0.08 (Conf: 0.13) — FORGONE (paper trade) — ID: 882
+  2026-03-22 15:00:02,353 - AIFreqtradeSizer - INFO - [Signal] SAND/USDT:USDT → enter_short=1 (BEARISH conf=0.13)
+  2026-03-22 15:00:02,375 - AIFreqtradeSizer - INFO - [Signal] STRK/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,396 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for ALCH/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,398 - semantic_cache - INFO - Invalidated semantic cache (pair: ALCH/USDT:USDT)
+  2026-03-22 15:00:02,399 - AIFreqtradeSizer - INFO - [Signal] ALCH/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,427 - AIFreqtradeSizer - INFO - [Signal] UNI/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,455 - AIFreqtradeSizer - INFO - Significant price movement >3% detected for CRV/USDT:USDT. Invalidating semantic cache.
+  2026-03-22 15:00:02,458 - semantic_cache - INFO - Invalidated semantic cache (pair: CRV/USDT:USDT)
+  2026-03-22 15:00:02,460 - AIFreqtradeSizer - INFO - [Signal] CRV/USDT:USDT → enter_long=1 (NEUTRAL default, min_stake sizing)
+  2026-03-22 15:00:02,488 - forgone_pnl_engine - INFO - [Forgone P&L] Logged BEAR signal for ICP/USDT:USDT @ $2.43 (Conf: 0.13) — FORGONE (paper trade) — ID: 883
+  2026-03-22 15:00:02,489 - AIFreqtradeSizer - INFO - [Signal] ICP/USDT:USDT → enter_short=1 (BEARISH conf=0.13)
+  2026-03-22 15:00:06,000 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 15:01:06,003 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+  2026-03-22 15:01:07,721 - freqtrade.wallets - INFO - Wallets synced.
+  2026-03-22 15:01:11,065 - opportunity_scanner - INFO - [OpportunityScanner] Scanned 30 pairs → top 20: SUI/USDT:USDT(22.8), AAVE/USDT:USDT(22.8), MNT/USDT:USDT(22.8), ASTER/USDT:USDT(22.8), WIF/USDT:USDT(22.8)
+  2026-03-22 15:01:11,066 - AIFreqtradeSizer - INFO - [Phase20:Scanner] 30 whitelist → 20 top opportunities
+  2026-03-22 15:01:11,067 - AIFreqtradeSizer - INFO - [bot_loop_start] New cycle: 1 pairs in 1 batches (10/batch, 360s interval)
+  2026-03-22 15:01:11,067 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: fetching 1 pairs...
+  2026-03-22 15:01:26,534 - AIFreqtradeSizer - INFO - [RAG Latency] WIF/USDT:USDT: 15429ms (status=200, POST=Y)
+  2026-03-22 15:01:26,536 - AIFreqtradeSizer - WARNING - [bot_loop_start] Batch 1/1: 1 signals in 15.5s | {'BEARISH': 1}
+  2026-03-22 15:01:26,536 - AIFreqtradeSizer - INFO - [bot_loop_start] Cycle complete. All 1 pairs processed.
+  2026-03-22 15:02:07,247 - freqtrade.worker - INFO - Bot heartbeat. PID=219958, version='2026.3-dev-bb2aa1d72', state='RUNNING'
+
+  ── freqtrade_rag (son 200 satır) ──
+  2026-03-22T14:55:08+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:55:08+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:55:09+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:55:10+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:55:37+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:55:37+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...OpOxDQ model=gemini-embedding-001
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...AKB_0g model=gemini-embedding-001
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:55:38+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:55:39+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:55:39+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...LXKnig model=gemini-embedding-001
+  2026-03-22T14:55:39+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:55:39+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MAGMA added 5 high-weight memory nodes to passages.
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: WARNING:__main__:[TIMEOUT] Pipeline for FARTCOIN/USDT:USDT exceeded 45s. Using Evidence Engine fallback...
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:regime_classifier:[RegimeClassifier] TRANSITIONAL: ADX=23.8
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Regime] FARTCOIN/USDT:USDT → transitional
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] FARTCOIN/USDT:USDT scores: trend=0.70, mom=0.39, crowd=0.65, evid=0.50, macro=0.40, risk=0.35
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Synthesis] FARTCOIN/USDT:USDT: NEUTRAL conf=0.05 (raw=0.529, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[EvidenceEngine] FARTCOIN/USDT:USDT: NEUTRAL conf=0.05
+  2026-03-22T14:55:51+03:00 vm433344.ovadns.com python[219944]: INFO:     127.0.0.1:57742 - "POST /signal/FARTCOIN/USDT%3AUSDT HTTP/1.1" 200 OK
+  2026-03-22T14:56:08+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:56:08+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:56:09+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:56:38+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T14:56:39+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:56:39+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:56:39+03:00 vm433344.ovadns.com python[219944]: INFO:crag_evaluator:[CRAG] Query: 'FARTCOIN/USDT:USDT macro fundamentals exact news E...' → INCORRECT (score=0.00)
+  2026-03-22T14:56:39+03:00 vm433344.ovadns.com python[219944]: INFO:hyde_generator:[HyDE] Low confidence (0.00). Generating hypothetical document...
+  2026-03-22T14:56:40+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:56:40+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:56:40+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:56:40+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:hyde_generator:[HyDE] Generated hypothetical (2729 chars) for: 'FARTCOIN/USDT:USDT macro fundamentals exact news E'
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:56:42+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:57:10+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:57:10+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:57:10+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:57:10+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...0890r4 model=gemini-embedding-001
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MAGMA added 5 high-weight memory nodes to passages.
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...fcgChY model=gemini-embedding-001
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:57:11+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MAGMA added 2 high-weight memory nodes to passages.
+  2026-03-22T14:57:12+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:57:13+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:57:13+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...JdSvT8 model=gemini-embedding-001
+  2026-03-22T14:57:13+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:57:13+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MAGMA added 3 high-weight memory nodes to passages.
+  2026-03-22T14:57:26+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[GC] Collected 834 objects
+  2026-03-22T14:57:41+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:57:42+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:57:43+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:11+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:12+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:58:13+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:58:13+03:00 vm433344.ovadns.com python[219944]: INFO:hyde_generator:[HyDE] Merged 20 unique docs (normal=10, hyde=10)
+  2026-03-22T14:58:13+03:00 vm433344.ovadns.com python[219944]: INFO:adaptive_router:[AdaptiveRAG] COMPLEX: Retrieved 20 docs (CRAG + HyDE).
+  2026-03-22T14:58:13+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:58:14+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:14+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] models/gemini-2.5-flash-lite penalized 60.0s. Other models on this key still active.
+  2026-03-22T14:58:14+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] models/gemini-2.5-flash-lite quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:14+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:58:17+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:58:42+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:58:42+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T14:58:42+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:58:42+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...TJlCP8 model=gemini-embedding-001
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...IdBjfQ model=gemini-embedding-001
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:rag_fusion:[RAG-Fusion] Fused 19 unique docs from 4 sub-queries.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] meta-llama/llama-4-scout-17b-16e-instruct penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] meta-llama/llama-4-scout-17b-16e-instruct quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] models/gemini-2.5-flash-lite penalized 60.0s. Other models on this key still active.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] models/gemini-2.5-flash-lite quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:43+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...iJ6vGA model=gemini-embedding-001
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.3-70b-versatile penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:58:44+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.3-70b-versatile quota exhausted. Other models on same key still OK.
+  2026-03-22T14:58:45+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:58:48+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:59:15+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:rag_fusion:[RAG-Fusion] Fused 20 unique docs from 4 sub-queries.
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] models/gemini-2.5-flash-lite penalized 60.0s. Other models on this key still active.
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] models/gemini-2.5-flash-lite quota exhausted. Other models on same key still OK.
+  2026-03-22T14:59:45+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:---[NODE] MASTER COORDINATOR DEBATE (MADAM-RAG)---
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:regime_classifier:[RegimeClassifier] TRANSITIONAL: ADX=23.8
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[Phase19:Regime] FARTCOIN/USDT:USDT classified as transitional
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[Phase19:MarketData] FARTCOIN/USDT:USDT live market data injected into coordinator
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:regime_classifier:[RegimeClassifier] TRANSITIONAL: ADX=23.8
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Regime] FARTCOIN/USDT:USDT → transitional
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] FARTCOIN/USDT:USDT scores: trend=0.70, mom=0.39, crowd=0.65, evid=0.50, macro=0.40, risk=0.35
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Synthesis] FARTCOIN/USDT:USDT: NEUTRAL conf=0.05 (raw=0.529, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[Phase20:EvidenceEngine] FARTCOIN/USDT:USDT FactSheet injected into coordinator (NEUTRAL conf=0.05)
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:cot_rag:[CoT-RAG] Initiating structured reasoning for FARTCOIN/USDT:USDT...
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] qwen/qwen3-32b penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:59:50+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] qwen/qwen3-32b quota exhausted. Other models on same key still OK.
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] meta-llama/llama-4-scout-17b-16e-instruct penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] meta-llama/llama-4-scout-17b-16e-instruct quota exhausted. Other models on same key still OK.
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.3-70b-versatile penalized 15.0s. Other models on this key still active.
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.3-70b-versatile quota exhausted. Other models on same key still OK.
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T14:59:51+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T15:00:22+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T15:00:27+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T15:00:27+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...6S0Jig model=gemini-embedding-001
+  2026-03-22T15:00:28+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T15:00:58+03:00 vm433344.ovadns.com python[219944]: WARNING:hybrid_retriever:[HybridRetriever] FlashRank server call failed: timed out
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:regime_classifier:[RegimeClassifier] TRENDING_BEAR: ADX=25.8, price<0
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Regime] WIF/USDT:USDT → trending_bear
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:SubQ] WIF/USDT:USDT scores: trend=0.15, mom=0.45, crowd=0.65, evid=0.50, macro=0.40, risk=0.35
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:evidence_engine:[EvidenceEngine:Synthesis] WIF/USDT:USDT: BEARISH conf=0.13 (raw=0.433, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:11+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[Phase20:EvidenceFirst] WIF/USDT:USDT: BEARISH conf=0.13
+  2026-03-22T15:01:26+03:00 vm433344.ovadns.com python[219944]: INFO:__main__:[Phase20:EvidenceFirst] WIF/USDT:USDT semaphore busy → using Evidence Engine (0.13)
+  2026-03-22T15:01:26+03:00 vm433344.ovadns.com python[219944]: INFO:     127.0.0.1:57468 - "POST /signal/WIF/USDT%3AUSDT HTTP/1.1" 200 OK
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: WARNING:colbert_reranker:[ColBERT] Server call failed: timed out. Returning original order.
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:cot_rag:[CoT-RAG] Step 'Market Regime' retrieved 3 evidence blocks.
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: WARNING:llm_router:[Penalize] llama-3.1-8b-instant penalized 15.0s. Other models on this key still active.
+  2026-03-22T15:01:28+03:00 vm433344.ovadns.com python[219944]: INFO:llm_router:[RateLimit] llama-3.1-8b-instant quota exhausted. Other models on same key still OK.
+  2026-03-22T15:01:29+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T15:01:29+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MemoRAG injected global draft into search query.
+  2026-03-22T15:01:59+03:00 vm433344.ovadns.com python[219944]: WARNING:rag_embedding:[Embedding] BGE server call failed: timed out
+  2026-03-22T15:02:00+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+  2026-03-22T15:02:00+03:00 vm433344.ovadns.com python[219944]: INFO:rag_embedding:[Embedding] Gemini OK via key ...OpOxDQ model=gemini-embedding-001
+  2026-03-22T15:02:00+03:00 vm433344.ovadns.com python[219944]: INFO:httpx:HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+  2026-03-22T15:02:00+03:00 vm433344.ovadns.com python[219944]: INFO:hybrid_retriever:MAGMA added 5 high-weight memory nodes to passages.
+  2026-03-22T15:02:16+03:00 vm433344.ovadns.com python[219944]: INFO:     127.0.0.1:34032 - "GET /health HTTP/1.1" 200 OK
+  2026-03-22T15:02:16+03:00 vm433344.ovadns.com python[219944]: INFO:     127.0.0.1:34042 - "GET /signal-health HTTP/1.1" 200 OK
+
+  ── freqtrade_scheduler (son 200 satır) ──
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: WARNING:alphavantage_fetcher:AlphaVantage daily rate limit exceeded.
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:coin_sentiment_aggregator:No scored news found in the last 24h to aggregate.
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Rolling Sentiment Aggregator (trigger: interval[0:15:00], next run at: 2026-03-22 12:06:35 UTC)" executed successfully
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=BTCUSDT&period=1h&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Deriv] BTC/USDT: OI=$50,578, FR=-0.000060, L/S=1.411
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://stablecoins.llama.fi/stablecoins?includePrices=false "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:DeFi] Stablecoin market cap: $314.91B
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/open-interest?category=linear&symbol=ETHUSDT&intervalTime=1h&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.llama.fi/v2/historicalChainTvl/Ethereum "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:DeFi] Ethereum TVL: $55.30B (-1.86%)
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:semantic_cache:[SemanticCache] Initialized 10 Gemini clients for embedding
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/funding/history?category=linear&symbol=ETHUSDT&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Semantic Cache Cleanup (trigger: interval[0:05:00], next run at: 2026-03-22 11:56:35 UTC)" executed successfully
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=ETHUSDT&period=1h&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:36+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Deriv] ETH/USDT: OI=$823,257, FR=-0.000003, L/S=2.112
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/open-interest?category=linear&symbol=SOLUSDT&intervalTime=1h&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.stlouisfed.org/fred/series/observations?series_id=DTWEXBGS&api_key=aadf1e35f58b55dc607a754c859aa206&file_type=json&sort_order=desc&limit=2 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Macro] dxy_broad: 120.5518 (+0.609%)
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/funding/history?category=linear&symbol=SOLUSDT&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key=aadf1e35f58b55dc607a754c859aa206&file_type=json&sort_order=desc&limit=2 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Macro] us_10y_yield: 4.2500 (-0.235%)
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=SOLUSDT&period=1h&limit=1 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Deriv] SOL/USDT: OI=$6,572,367, FR=-0.000101, L/S=2.396
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] Derivatives: 3 pair(s) fetched.
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Market Data: Derivatives (Bybit) (trigger: interval[0:15:00], next run at: 2026-03-22 12:06:35 UTC)" executed successfully
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.stlouisfed.org/fred/series/observations?series_id=DGS2&api_key=aadf1e35f58b55dc607a754c859aa206&file_type=json&sort_order=desc&limit=2 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:37+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Macro] us_2y_yield: 3.7900 (+0.798%)
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: INFO:httpx:HTTP Request: GET https://api.stlouisfed.org/fred/series/observations?series_id=VIXCLS&api_key=aadf1e35f58b55dc607a754c859aa206&file_type=json&sort_order=desc&limit=2 "HTTP/1.1 200 OK"
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: INFO:market_data_fetcher:[MarketDataFetcher:Macro] vix: 24.0600 (-4.105%)
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: ERROR:yfinance:$DX=F: possibly delisted; no price data found  (period=5d) (Yahoo error = "No data found, symbol may be delisted")
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^VIX/vix failed: module 'numpy' has no attribute 'matrix'
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^GSPC/sp500 failed: module 'numpy' has no attribute 'matrix'
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] GC=F/gold failed: module 'numpy' has no attribute 'matrix'
+  2026-03-22T14:51:38+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:CrossAsset] ^IXIC/nasdaq failed: module 'numpy' has no attribute 'matrix'
+  2026-03-22T14:51:40+03:00 vm433344.ovadns.com python[218120]: WARNING:market_data_fetcher:[MarketDataFetcher:Trends] Google Trends fetch failed: module 'numpy' has no attribute 'matrix'
+  2026-03-22T14:51:40+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] DeFi: 3, Macro: 4, CrossAsset: 0, Trends: 0 metrics.
+  2026-03-22T14:51:40+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Market Data: DeFi + Macro (trigger: interval[1:00:00], next run at: 2026-03-22 12:51:35 UTC)" executed successfully
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:apscheduler.scheduler:Execution of job "RSS + FNG + Sentiment (trigger: interval[0:05:00], next run at: 2026-03-22 11:56:35 UTC)" skipped: maximum number of running instances reached (1)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "Semantic Cache Cleanup (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" (scheduled at 2026-03-22 11:56:35.461167+00:00)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] Cleaning up expired semantic cache...
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "System Health Check (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" (scheduled at 2026-03-22 11:56:35.461317+00:00)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] Running health check...
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "Event-Driven Re-Analysis (F&G extreme, funding spike) (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" (scheduled at 2026-03-22 11:56:35.466006+00:00)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:__main__:[Phase20:EventTrigger] F&G extreme: 11 → forcing Evidence Engine re-analysis
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] ASTER/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] ASTER/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] ASTER/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ASTER/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "System Health Check (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" executed successfully
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] WIF/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] WIF/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] WIF/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] WIF/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] NEAR/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] NEAR/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] NEAR/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] NEAR/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] AAVE/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] AAVE/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] AAVE/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] AAVE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] 1000PEPE/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] 1000PEPE/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] 1000PEPE/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] 1000PEPE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] HBAR/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] HBAR/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] HBAR/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] HBAR/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] STRK/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] STRK/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] STRK/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] STRK/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] APT/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] APT/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] APT/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] APT/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] ZK/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] ZK/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] ZK/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ZK/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] LDO/USDT:USDT → transitional
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] LDO/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] LDO/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] LDO/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T14:56:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Event-Driven Re-Analysis (F&G extreme, funding spike) (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" executed successfully
+  2026-03-22T14:56:36+03:00 vm433344.ovadns.com python[218120]: INFO:semantic_cache:[SemanticCache] Initialized 10 Gemini clients for embedding
+  2026-03-22T14:56:36+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Semantic Cache Cleanup (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" executed successfully
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:apscheduler.scheduler:Execution of job "RSS + FNG + Sentiment (trigger: interval[0:05:00], next run at: 2026-03-22 12:01:35 UTC)" skipped: maximum number of running instances reached (1)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "System Health Check (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" (scheduled at 2026-03-22 12:01:35.461317+00:00)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "Semantic Cache Cleanup (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" (scheduled at 2026-03-22 12:01:35.461167+00:00)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] Cleaning up expired semantic cache...
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Scheduler:Job] Running health check...
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Running job "Event-Driven Re-Analysis (F&G extreme, funding spike) (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" (scheduled at 2026-03-22 12:01:35.466006+00:00)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:__main__:[Phase20:EventTrigger] F&G extreme: 11 → forcing Evidence Engine re-analysis
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] NEAR/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] NEAR/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] NEAR/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] NEAR/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] 1000PEPE/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] 1000PEPE/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "System Health Check (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" executed successfully
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] 1000PEPE/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] 1000PEPE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] APT/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] APT/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] APT/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] APT/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] ZK/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] ZK/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] ZK/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ZK/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] LDO/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] LDO/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] LDO/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] LDO/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] SUI/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] SUI/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] SUI/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] SUI/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] AAVE/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] AAVE/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] AAVE/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] AAVE/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] MNT/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] MNT/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] MNT/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] MNT/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] ASTER/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] ASTER/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] ASTER/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] ASTER/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] F&G Index: 11
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Gather] Macro data loaded: 4 metrics
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Regime] WIF/USDT:USDT → transitional
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:SubQ] WIF/USDT:USDT scores: trend=0.50, mom=0.50, crowd=0.65, evid=0.50, macro=0.40, risk=0.50
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: WARNING:confidence_calibrator:[Calibrator] Not enough data for Platt scaling.
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:evidence_engine:[EvidenceEngine:Synthesis] WIF/USDT:USDT: NEUTRAL conf=0.04 (raw=0.520, cap=0.38, contradictions=0, evidence=2)
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:__main__:[Phase20:EventTrigger] WIF/USDT:USDT re-analyzed: NEUTRAL conf=0.04
+  2026-03-22T15:01:35+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Event-Driven Re-Analysis (F&G extreme, funding spike) (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" executed successfully
+  2026-03-22T15:01:36+03:00 vm433344.ovadns.com python[218120]: INFO:semantic_cache:[SemanticCache] Initialized 10 Gemini clients for embedding
+  2026-03-22T15:01:36+03:00 vm433344.ovadns.com python[218120]: INFO:apscheduler.executors.default:Job "Semantic Cache Cleanup (trigger: interval[0:05:00], next run at: 2026-03-22 12:06:35 UTC)" executed successfully
+
+  ── freqtrade_models (son 200 satır) ──
+  2026-03-21T00:57:18+03:00 vm433344.ovadns.com python[227969]: `torch_dtype` is deprecated! Use `dtype` instead!
+  2026-03-21T00:57:24+03:00 vm433344.ovadns.com python[227969]: INFO:__main__:ColBERT loaded in 17.3s
+  2026-03-21T00:57:24+03:00 vm433344.ovadns.com python[227969]: INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
+  2026-03-21T00:57:24+03:00 vm433344.ovadns.com python[227969]: INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: philschmid/bge-base-financial-matryoshka
+  2026-03-21T00:57:27+03:00 vm433344.ovadns.com python[227969]: INFO:__main__:BGE loaded in 2.4s
+  2026-03-21T00:57:27+03:00 vm433344.ovadns.com python[227969]: INFO:__main__:FlashRank loaded in 0.1s
+  2026-03-21T00:57:27+03:00 vm433344.ovadns.com python[227969]: INFO:     Application startup complete.
+  2026-03-21T00:57:27+03:00 vm433344.ovadns.com python[227969]: INFO:     Uvicorn running on http://127.0.0.1:8895 (Press CTRL+C to quit)
+  2026-03-21T02:19:50+03:00 vm433344.ovadns.com python[227969]: [47B blob data]
+  2026-03-21T02:19:50+03:00 vm433344.ovadns.com python[227969]: [50B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: [203B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: [78B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: [136B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: [81B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: INFO:     127.0.0.1:58500 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: [75B blob data]
+  2026-03-21T02:19:51+03:00 vm433344.ovadns.com python[227969]: INFO:     127.0.0.1:58492 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T02:19:52+03:00 vm433344.ovadns.com python[227969]: INFO:     127.0.0.1:58516 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T02:19:52+03:00 vm433344.ovadns.com python[227969]: [197B blob data]
+  2026-03-21T02:19:53+03:00 vm433344.ovadns.com python[227969]: [115B blob data]
+  2026-03-21T02:19:53+03:00 vm433344.ovadns.com python[227969]: [118B blob data]
+  2026-03-21T02:19:55+03:00 vm433344.ovadns.com python[227969]: [53B blob data]
+  2026-03-21T02:19:55+03:00 vm433344.ovadns.com python[227969]: [153B blob data]
+  2026-03-21T02:19:56+03:00 vm433344.ovadns.com python[227969]: [50B blob data]
+  2026-03-21T02:19:56+03:00 vm433344.ovadns.com python[227969]: [156B blob data]
+  2026-03-21T02:20:40+03:00 vm433344.ovadns.com python[227969]: [53B blob data]
+  2026-03-21T02:20:40+03:00 vm433344.ovadns.com python[227969]: [56B blob data]
+  2026-03-21T02:20:40+03:00 vm433344.ovadns.com python[227969]: [59B blob data]
+  2026-03-21T11:15:30+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: A process of this unit has been killed by the OOM killer.
+  2026-03-21T11:15:31+03:00 vm433344.ovadns.com python[227969]: [62B blob data]
+  2026-03-21T11:15:31+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Main process exited, code=killed, status=9/KILL
+  2026-03-21T11:15:31+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Failed with result 'oom-kill'.
+  2026-03-21T11:15:31+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Consumed 18h 51min 13.322s CPU time.
+  2026-03-21T11:15:46+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Scheduled restart job, restart counter is at 37.
+  2026-03-21T11:15:46+03:00 vm433344.ovadns.com systemd[1]: Started freqtrade-models.service - Freqtrade Local Model Server (ColBERT + BGE + FlashRank).
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]: /root/freqtrade/user_data/scripts/model_server.py:126: DeprecationWarning:
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]:         on_event is deprecated, use lifespan event handlers instead.
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]:         Read more about it in the
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]:         [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]:         
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]:   @app.on_event("startup")
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]: INFO:     Started server process [229518]
+  2026-03-21T11:15:48+03:00 vm433344.ovadns.com python[229518]: INFO:     Waiting for application startup.
+  2026-03-21T11:15:59+03:00 vm433344.ovadns.com python[229518]: INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
+  2026-03-21T11:15:59+03:00 vm433344.ovadns.com python[229518]: INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: jinaai/jina-colbert-v2
+  2026-03-21T11:15:59+03:00 vm433344.ovadns.com python[229518]: WARNING:sentence_transformers.SentenceTransformer:No sentence-transformers model found with name jinaai/jina-colbert-v2. Creating a new one with mean pooling.
+  2026-03-21T11:16:00+03:00 vm433344.ovadns.com python[229518]: `torch_dtype` is deprecated! Use `dtype` instead!
+  2026-03-21T11:16:00+03:00 vm433344.ovadns.com python[229518]: `torch_dtype` is deprecated! Use `dtype` instead!
+  2026-03-21T11:16:09+03:00 vm433344.ovadns.com python[229518]: INFO:__main__:ColBERT loaded in 21.2s
+  2026-03-21T11:16:09+03:00 vm433344.ovadns.com python[229518]: INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
+  2026-03-21T11:16:09+03:00 vm433344.ovadns.com python[229518]: INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: philschmid/bge-base-financial-matryoshka
+  2026-03-21T11:16:11+03:00 vm433344.ovadns.com python[229518]: INFO:__main__:BGE loaded in 2.4s
+  2026-03-21T11:16:11+03:00 vm433344.ovadns.com python[229518]: INFO:__main__:FlashRank loaded in 0.1s
+  2026-03-21T11:16:11+03:00 vm433344.ovadns.com python[229518]: INFO:     Application startup complete.
+  2026-03-21T11:16:11+03:00 vm433344.ovadns.com python[229518]: INFO:     Uvicorn running on http://127.0.0.1:8895 (Press CTRL+C to quit)
+  2026-03-21T11:16:36+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:16:36+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:47394 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:16:37+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:47408 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:16:38+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:00+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:00+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:47422 - "POST /rerank/colbert HTTP/1.1" 200 OK
+  2026-03-21T11:17:08+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:08+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:55174 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:17:09+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:55190 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:17:10+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:27+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:27+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:55204 - "POST /rerank/colbert HTTP/1.1" 200 OK
+  2026-03-21T11:17:31+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:31+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:36310 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:17:32+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:36326 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:17:32+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:50+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:17:50+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:55204 - "POST /rerank/colbert HTTP/1.1" 200 OK
+  2026-03-21T11:22:36+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:22:36+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:50076 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:22:36+03:00 vm433344.ovadns.com python[229518]: [197B blob data]
+  2026-03-21T11:22:36+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:50076 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:22:36+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:50092 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:22:37+03:00 vm433344.ovadns.com python[229518]: [115B blob data]
+  2026-03-21T11:22:37+03:00 vm433344.ovadns.com python[229518]: [200B blob data]
+  2026-03-21T11:22:37+03:00 vm433344.ovadns.com python[229518]: [115B blob data]
+  2026-03-21T11:22:39+03:00 vm433344.ovadns.com python[229518]: [53B blob data]
+  2026-03-21T11:22:39+03:00 vm433344.ovadns.com python[229518]: [153B blob data]
+  2026-03-21T11:23:07+03:00 vm433344.ovadns.com python[229518]: [50B blob data]
+  2026-03-21T11:23:08+03:00 vm433344.ovadns.com python[229518]: [124B blob data]
+  2026-03-21T11:23:08+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-21T11:23:08+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48910 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:09+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48912 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:09+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48912 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: [124B blob data]
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48912 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: [59B blob data]
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: [62B blob data]
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-21T11:23:10+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48910 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:11+03:00 vm433344.ovadns.com python[229518]: [165B blob data]
+  2026-03-21T11:23:11+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48004 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:11+03:00 vm433344.ovadns.com python[229518]: [162B blob data]
+  2026-03-21T11:23:11+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:47992 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:12+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48912 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:12+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48922 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:12+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48014 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:13+03:00 vm433344.ovadns.com python[229518]: [56B blob data]
+  2026-03-21T11:23:13+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-21T11:23:13+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48910 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:15+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48912 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:21+03:00 vm433344.ovadns.com python[229518]: [56B blob data]
+  2026-03-21T11:23:21+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-21T11:23:21+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:48024 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:23+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:57754 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:28+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:57754 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:31+03:00 vm433344.ovadns.com python[229518]: [56B blob data]
+  2026-03-21T11:23:31+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-21T11:23:31+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:41152 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-21T11:23:32+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:57754 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:35+03:00 vm433344.ovadns.com python[229518]: INFO:     127.0.0.1:57754 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-21T11:23:43+03:00 vm433344.ovadns.com python[229518]: [56B blob data]
+  2026-03-21T11:23:43+03:00 vm433344.ovadns.com python[229518]: [156B blob data]
+  2026-03-21T11:24:20+03:00 vm433344.ovadns.com python[229518]: [121B blob data]
+  2026-03-21T11:24:30+03:00 vm433344.ovadns.com python[229518]: [59B blob data]
+  2026-03-21T11:24:30+03:00 vm433344.ovadns.com python[229518]: [159B blob data]
+  2026-03-22T08:14:43+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: A process of this unit has been killed by the OOM killer.
+  2026-03-22T08:14:45+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Main process exited, code=killed, status=9/KILL
+  2026-03-22T08:14:45+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Failed with result 'oom-kill'.
+  2026-03-22T08:14:45+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Consumed 9h 7min 15.390s CPU time.
+  2026-03-22T08:15:00+03:00 vm433344.ovadns.com systemd[1]: freqtrade-models.service: Scheduled restart job, restart counter is at 38.
+  2026-03-22T08:15:00+03:00 vm433344.ovadns.com systemd[1]: Started freqtrade-models.service - Freqtrade Local Model Server (ColBERT + BGE + FlashRank).
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]: /root/freqtrade/user_data/scripts/model_server.py:126: DeprecationWarning:
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]:         on_event is deprecated, use lifespan event handlers instead.
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]:         Read more about it in the
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]:         [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]:         
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]:   @app.on_event("startup")
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]: INFO:     Started server process [232929]
+  2026-03-22T08:15:01+03:00 vm433344.ovadns.com python[232929]: INFO:     Waiting for application startup.
+  2026-03-22T08:15:12+03:00 vm433344.ovadns.com python[232929]: INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
+  2026-03-22T08:15:12+03:00 vm433344.ovadns.com python[232929]: INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: jinaai/jina-colbert-v2
+  2026-03-22T08:15:13+03:00 vm433344.ovadns.com python[232929]: WARNING:sentence_transformers.SentenceTransformer:No sentence-transformers model found with name jinaai/jina-colbert-v2. Creating a new one with mean pooling.
+  2026-03-22T08:15:13+03:00 vm433344.ovadns.com python[232929]: `torch_dtype` is deprecated! Use `dtype` instead!
+  2026-03-22T08:15:14+03:00 vm433344.ovadns.com python[232929]: `torch_dtype` is deprecated! Use `dtype` instead!
+  2026-03-22T08:15:22+03:00 vm433344.ovadns.com python[232929]: INFO:__main__:ColBERT loaded in 20.7s
+  2026-03-22T08:15:22+03:00 vm433344.ovadns.com python[232929]: INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cpu
+  2026-03-22T08:15:22+03:00 vm433344.ovadns.com python[232929]: INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: philschmid/bge-base-financial-matryoshka
+  2026-03-22T08:15:25+03:00 vm433344.ovadns.com python[232929]: INFO:__main__:BGE loaded in 2.7s
+  2026-03-22T08:15:25+03:00 vm433344.ovadns.com python[232929]: INFO:__main__:FlashRank loaded in 0.2s
+  2026-03-22T08:15:25+03:00 vm433344.ovadns.com python[232929]: INFO:     Application startup complete.
+  2026-03-22T08:15:25+03:00 vm433344.ovadns.com python[232929]: INFO:     Uvicorn running on http://127.0.0.1:8895 (Press CTRL+C to quit)
+  2026-03-22T08:15:38+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:43722 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:15:47+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:16:04+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:16:04+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:43732 - "POST /rerank/colbert HTTP/1.1" 200 OK
+  2026-03-22T08:16:14+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:16:14+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:50468 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:16:14+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:50476 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:16:15+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:16:31+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:16:31+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:50480 - "POST /rerank/colbert HTTP/1.1" 200 OK
+  2026-03-22T08:19:49+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:19:49+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:53028 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:19:50+03:00 vm433344.ovadns.com python[232929]: [197B blob data]
+  2026-03-22T08:19:50+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:53028 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:19:50+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:58622 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:19:50+03:00 vm433344.ovadns.com python[232929]: [115B blob data]
+  2026-03-22T08:19:51+03:00 vm433344.ovadns.com python[232929]: [200B blob data]
+  2026-03-22T08:19:51+03:00 vm433344.ovadns.com python[232929]: [115B blob data]
+  2026-03-22T08:19:52+03:00 vm433344.ovadns.com python[232929]: [53B blob data]
+  2026-03-22T08:19:52+03:00 vm433344.ovadns.com python[232929]: [153B blob data]
+  2026-03-22T08:19:56+03:00 vm433344.ovadns.com python[232929]: [50B blob data]
+  2026-03-22T08:19:56+03:00 vm433344.ovadns.com python[232929]: [156B blob data]
+  2026-03-22T08:20:21+03:00 vm433344.ovadns.com python[232929]: [53B blob data]
+  2026-03-22T08:20:22+03:00 vm433344.ovadns.com python[232929]: [56B blob data]
+  2026-03-22T08:20:22+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:22+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45688 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:23+03:00 vm433344.ovadns.com python[232929]: [56B blob data]
+  2026-03-22T08:20:23+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:23+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45688 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:24+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45702 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:26+03:00 vm433344.ovadns.com python[232929]: [124B blob data]
+  2026-03-22T08:20:26+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:26+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45688 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:27+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45702 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:28+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45702 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:29+03:00 vm433344.ovadns.com python[232929]: [124B blob data]
+  2026-03-22T08:20:30+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:30+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45688 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:31+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:45702 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:31+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:42814 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:37+03:00 vm433344.ovadns.com python[232929]: [56B blob data]
+  2026-03-22T08:20:37+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:37+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:42816 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:38+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:42824 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:42+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:42824 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:45+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:42824 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:20:48+03:00 vm433344.ovadns.com python[232929]: [56B blob data]
+  2026-03-22T08:20:48+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+  2026-03-22T08:20:48+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:52288 - "POST /embed/bge HTTP/1.1" 200 OK
+  2026-03-22T08:20:50+03:00 vm433344.ovadns.com python[232929]: INFO:     127.0.0.1:33654 - "POST /rerank/flashrank HTTP/1.1" 200 OK
+  2026-03-22T08:21:37+03:00 vm433344.ovadns.com python[232929]: [124B blob data]
+  2026-03-22T08:21:43+03:00 vm433344.ovadns.com python[232929]: [59B blob data]
+  2026-03-22T08:21:43+03:00 vm433344.ovadns.com python[232929]: [159B blob data]
+
+╔══════════════════════════════════════════════════════════════════╗
+║  ANALİZ TAMAMLANDI — 2026-03-22 15:02:30                      ║
+║  Dosya: /root/freqtrade/FULL_ANALYSIS.txt                                                    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Dosya boyutu: 188K

@@ -104,6 +104,46 @@ except Exception as e:
     logger.error(f"[INIT] SpeculativeRAG failed to initialize: {e}. Speculative RAG disabled.")
     _spec_rag = None
 
+# Phase 19: PatternStatStore — queryable backtest statistics (singleton)
+try:
+    from pattern_stat_store import PatternStatStore
+    _pattern_store = PatternStatStore()
+    _pattern_store_ready = _pattern_store.get_total_trades() >= 10
+    logger.info(f"[INIT] PatternStatStore: {_pattern_store.get_total_trades()} trades loaded, ready={_pattern_store_ready}")
+except Exception as e:
+    logger.warning(f"[INIT] PatternStatStore unavailable: {e}. Backtest evidence disabled.")
+    _pattern_store = None
+    _pattern_store_ready = False
+
+# Phase 19 Level 3: MarketDataFetcher — derivatives, DeFi, macro data (singleton)
+try:
+    from market_data_fetcher import MarketDataFetcher
+    _market_data = MarketDataFetcher()
+    logger.info("[INIT] MarketDataFetcher loaded successfully.")
+except Exception as e:
+    logger.warning(f"[INIT] MarketDataFetcher unavailable: {e}. Market data injection disabled.")
+    _market_data = None
+
+# OHLCV Pattern Matcher — real candle-sequence similarity search
+try:
+    from ohlcv_pattern_matcher import OHLCVPatternMatcher
+    _ohlcv_matcher = OHLCVPatternMatcher()
+    _ohlcv_ready = _ohlcv_matcher.get_total_patterns() >= 20
+    logger.info(f"[INIT] OHLCVPatternMatcher: {_ohlcv_matcher.get_total_patterns()} patterns, ready={_ohlcv_ready}")
+except Exception as e:
+    logger.warning(f"[INIT] OHLCVPatternMatcher unavailable: {e}")
+    _ohlcv_matcher = None
+    _ohlcv_ready = False
+
+# Phase 19: RegimeClassifier — rule-based market regime detection
+try:
+    from regime_classifier import RegimeClassifier
+    _regime_classifier = RegimeClassifier()
+    logger.info("[INIT] RegimeClassifier loaded successfully.")
+except Exception as e:
+    logger.warning(f"[INIT] RegimeClassifier unavailable: {e}")
+    _regime_classifier = None
+
 # --- Graph State Definition ---
 class GraphState(TypedDict):
     """
@@ -359,14 +399,41 @@ def _format_tech_for_coordinator(td: dict) -> str:
 
 # --- Phase 18: Fallback Functions (when LLM is exhausted) ---
 
-def _technical_fallback(tech_data: dict) -> dict:
+def _technical_fallback(tech_data: dict, pair: str = "UNKNOWN") -> dict:
     """
-    Rule-based technical scoring using Phase 17 indicators.
-    Used when ALL LLMs are exhausted. Max confidence cap: 0.35.
+    Phase 20: Evidence Engine replaces the simple rule-based fallback.
+    Falls back to legacy scoring if Evidence Engine fails.
+    """
+    # Try Evidence Engine first (LLM-free, 30+ data sources, 0.35-0.55 cap)
+    try:
+        from evidence_engine import EvidenceEngine
+        engine = EvidenceEngine(
+            pattern_store=_pattern_store,
+            ohlcv_matcher=_ohlcv_matcher,
+            market_data=_market_data,
+            regime_classifier=_regime_classifier,
+        )
+        result = engine.generate_signal(pair=pair, tech_data=tech_data)
+        if result and result.get("confidence", 0) > 0:
+            _record_signal_health(pair, "EVIDENCE_ENGINE", result["signal"], result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1  # Evidence Engine = data-driven AI
+            logger.info(f"[EvidenceEngine] {pair}: {result['signal']} conf={result['confidence']:.2f}")
+            return result
+    except Exception as e:
+        logger.warning(f"[EvidenceEngine] {pair} failed, using legacy fallback: {e}")
+
+    return _legacy_technical_fallback(tech_data)
+
+
+def _legacy_technical_fallback(tech_data: dict) -> dict:
+    """
+    Legacy rule-based technical scoring (Phase 18 original).
+    Used ONLY when Evidence Engine also fails. Max confidence cap: 0.35.
     """
     if not tech_data or not tech_data.get("current_price"):
         return {"signal": "NEUTRAL", "confidence": 0.01,
-                "reasoning": "[Technical Fallback] No indicator data available", "source": "FALLBACK"}
+                "reasoning": "[Legacy Fallback] No indicator data available", "source": "FALLBACK"}
 
     score = 0.0
     reasons = []
@@ -730,6 +797,27 @@ def analyze_sentiment(state: GraphState):
         if conn:
             conn.close()
     
+    # Phase 19 Level 3: Add derivatives data to sentiment context
+    if _market_data:
+        try:
+            deriv = _market_data.get_latest_derivatives(pair)
+            if deriv:
+                fr = deriv.get("funding_rate")
+                ls = deriv.get("long_short_ratio")
+                oi = deriv.get("open_interest_usd")
+                if fr is not None:
+                    fr_pct = fr * 100
+                    extreme = " ⚠️ EXTREME" if abs(fr) > 0.0005 else ""
+                    db_context_parts.append(f"Funding Rate: {fr_pct:+.4f}%{extreme}.")
+                if ls is not None:
+                    bias = "longs dominate (crowded long)" if ls > 1.2 else "shorts dominate (crowded short)" if ls < 0.8 else "balanced"
+                    db_context_parts.append(f"Long/Short Ratio: {ls:.2f} ({bias}).")
+                if oi:
+                    db_context_parts.append(f"Open Interest: ${oi:,.0f}.")
+                logger.info(f"[Phase19:MarketData] {pair} derivatives injected into sentiment analyst")
+        except Exception as e:
+            logger.debug(f"[Phase19:MarketData] Derivatives injection into sentiment failed: {e}")
+
     db_context = " ".join(db_context_parts)
     # ===== END LIVE DATA =====
     
@@ -896,6 +984,35 @@ def research_bullish(state: GraphState):
     )
     bull_context = "\n".join([r.get("text", str(r)) for r in bull_results[:5]])
 
+    # Phase 19: Inject backtest statistics as empirical evidence for bull case
+    if _pattern_store_ready and _pattern_store:
+        try:
+            rsi_val = tech_data.get("rsi_14") or tech_data.get("rsi")
+            rsi_bucket = PatternStatStore.classify_rsi(float(rsi_val)) if rsi_val else None
+            adx_val = tech_data.get("adx")
+            _price = tech_data.get("current_price") or tech_data.get("price") or tech_data.get("close")
+            _ema200 = tech_data.get("ema200") or tech_data.get("ema_200")
+            regime = PatternStatStore.classify_regime(
+                float(adx_val),
+                price=float(_price) if _price else None,
+                ema200=float(_ema200) if _ema200 else None
+            ) if adx_val else None
+            bull_stats = _pattern_store.query(pair=pair, regime=regime, rsi_bucket=rsi_bucket, direction="long", min_trades=3)
+            if not bull_stats.get("insufficient_data"):
+                n = bull_stats["matching_trades"]
+                wr = bull_stats["win_rate"]
+                avg = bull_stats["avg_profit_pct"]
+                pf = bull_stats.get("profit_factor", 0)
+                evidence = (f"BACKTEST EVIDENCE: {pair} LONG in similar conditions (n={n}): "
+                            f"win rate {wr:.0%}, avg profit {avg:+.2f}%, profit factor {pf:.2f}")
+                bull_results.append({"text": evidence})
+                bull_context += f"\n\n{evidence}"
+                logger.info(f"[Phase19:Bull] {pair} backtest injected: n={n}, wr={wr:.0%}, avg={avg:+.2f}%")
+            else:
+                logger.info(f"[Phase19:Bull] {pair} insufficient backtest data for long ({bull_stats.get('matching_trades', 0)} trades)")
+        except Exception as e:
+            logger.warning(f"[Phase19:Bull] {pair} PatternStatStore query failed: {e}")
+
     # Phase 17: Add real technical data for data-backed arguments
     tech_summary = _format_tech_summary_compact(tech_data)
     tech_block = f"\n\nREAL-TIME INDICATORS:\n{tech_summary}" if tech_summary else ""
@@ -972,6 +1089,35 @@ def research_bearish(state: GraphState):
         retriever, n_queries=3, top_k_per_query=5
     )
     bear_context = "\n".join([r.get("text", str(r)) for r in bear_results[:5]])
+
+    # Phase 19: Inject backtest statistics as empirical evidence for bear case
+    if _pattern_store_ready and _pattern_store:
+        try:
+            rsi_val = tech_data.get("rsi_14") or tech_data.get("rsi")
+            rsi_bucket = PatternStatStore.classify_rsi(float(rsi_val)) if rsi_val else None
+            adx_val = tech_data.get("adx")
+            _price = tech_data.get("current_price") or tech_data.get("price") or tech_data.get("close")
+            _ema200 = tech_data.get("ema200") or tech_data.get("ema_200")
+            regime = PatternStatStore.classify_regime(
+                float(adx_val),
+                price=float(_price) if _price else None,
+                ema200=float(_ema200) if _ema200 else None
+            ) if adx_val else None
+            bear_stats = _pattern_store.query(pair=pair, regime=regime, rsi_bucket=rsi_bucket, direction="short", min_trades=3)
+            if not bear_stats.get("insufficient_data"):
+                n = bear_stats["matching_trades"]
+                wr = bear_stats["win_rate"]
+                avg = bear_stats["avg_profit_pct"]
+                pf = bear_stats.get("profit_factor", 0)
+                evidence = (f"BACKTEST EVIDENCE: {pair} SHORT in similar conditions (n={n}): "
+                            f"win rate {wr:.0%}, avg profit {avg:+.2f}%, profit factor {pf:.2f}")
+                bear_results.append({"text": evidence})
+                bear_context += f"\n\n{evidence}"
+                logger.info(f"[Phase19:Bear] {pair} backtest injected: n={n}, wr={wr:.0%}, avg={avg:+.2f}%")
+            else:
+                logger.info(f"[Phase19:Bear] {pair} insufficient backtest data for short ({bear_stats.get('matching_trades', 0)} trades)")
+        except Exception as e:
+            logger.warning(f"[Phase19:Bear] {pair} PatternStatStore query failed: {e}")
 
     # Phase 17: Add real technical data for data-backed arguments
     tech_summary = _format_tech_summary_compact(tech_data)
@@ -1054,6 +1200,138 @@ def coordinator_debate(state: GraphState):
     raw_indicators = _format_tech_for_coordinator(tech_data)
     raw_block = f"\n\n{raw_indicators}" if raw_indicators else ""
 
+    # Phase 19: Regime classification with detailed description
+    if _regime_classifier and tech_data:
+        try:
+            current_regime = RegimeClassifier.classify(tech_data)
+            regime_desc = RegimeClassifier.get_regime_description(current_regime)
+            regime_block = f"\n\n=== REGIME CLASSIFIER (Phase 19) ===\nDetected: {current_regime}\n{regime_desc}"
+            raw_block += regime_block
+            logger.info(f"[Phase19:Regime] {pair} classified as {current_regime}")
+        except Exception as e:
+            logger.debug(f"[Phase19:Regime] Classification failed: {e}")
+
+    # Phase 19: Backtest baseline block for coordinator prior probabilities
+    backtest_block = ""
+    if _pattern_store_ready and _pattern_store:
+        try:
+            rsi_val = tech_data.get("rsi_14") or tech_data.get("rsi")
+            rsi_bucket = PatternStatStore.classify_rsi(float(rsi_val)) if rsi_val else None
+            adx_val = tech_data.get("adx")
+            _price = tech_data.get("current_price") or tech_data.get("price") or tech_data.get("close")
+            _ema200 = tech_data.get("ema200") or tech_data.get("ema_200")
+            regime = PatternStatStore.classify_regime(
+                float(adx_val),
+                price=float(_price) if _price else None,
+                ema200=float(_ema200) if _ema200 else None
+            ) if adx_val else None
+            backtest_block = _pattern_store.format_for_prompt(pair=pair, regime=regime, rsi_bucket=rsi_bucket)
+            if backtest_block:
+                raw_block += f"\n\n{backtest_block}"
+                logger.info(f"[Phase19:Coordinator] {pair} backtest baseline injected (regime={regime}, rsi={rsi_bucket})")
+            else:
+                logger.info(f"[Phase19:Coordinator] {pair} no matching backtest data for conditions")
+        except Exception as e:
+            logger.warning(f"[Phase19:Coordinator] {pair} PatternStatStore query failed: {e}")
+
+    # Level 4: Temporal k-NN + Multi-Strategy Ensemble
+    if _pattern_store_ready and _pattern_store:
+        try:
+            rsi_val = tech_data.get("rsi_14") or tech_data.get("rsi")
+            adx_val = tech_data.get("adx")
+            _knn_price = tech_data.get("current_price") or tech_data.get("price") or tech_data.get("close")
+            _knn_ema200 = tech_data.get("ema200") or tech_data.get("ema_200")
+            macd_hist_val = tech_data.get("macd_hist") or tech_data.get("macdhist")
+
+            current_features = {}
+            if rsi_val:
+                current_features["rsi_bucket"] = PatternStatStore.classify_rsi(float(rsi_val))
+            if adx_val:
+                current_features["regime"] = PatternStatStore.classify_regime(
+                    float(adx_val), price=float(_knn_price) if _knn_price else None,
+                    ema200=float(_knn_ema200) if _knn_ema200 else None)
+            if macd_hist_val:
+                current_features["macd_signal"] = PatternStatStore.classify_macd(float(macd_hist_val))
+
+            if len(current_features) >= 2:
+                # k-NN: most similar historical states
+                knn_block = _pattern_store.format_knn_for_prompt(current_features, k=10, pair=pair)
+                if knn_block:
+                    raw_block += f"\n\n{knn_block}"
+                    logger.info(f"[Level4:kNN] {pair} temporal k-NN injected into coordinator")
+
+                # Multi-strategy ensemble voting
+                ensemble = _pattern_store.ensemble_vote(
+                    pair=pair, regime=current_features.get("regime"),
+                    rsi_bucket=current_features.get("rsi_bucket"))
+                if ensemble.get("total_strategies", 0) >= 2:
+                    consensus = ensemble["consensus"]
+                    strength = ensemble["consensus_strength"]
+                    n_strats = ensemble["total_strategies"]
+                    ens_block = f"\n\n=== MULTI-STRATEGY ENSEMBLE ({n_strats} strategies) ===\nConsensus: {consensus} (strength: {strength:.0%})"
+                    for sname, sdata in ensemble.get("strategies", {}).items():
+                        ens_block += f"\n  {sname}: {sdata['win_rate']:.0%} win rate (n={sdata['n']})"
+                    raw_block += ens_block
+                    logger.info(f"[Level4:Ensemble] {pair} consensus={consensus} ({n_strats} strategies, strength={strength:.0%})")
+        except Exception as e:
+            logger.debug(f"[Level4:kNN/Ensemble] {pair} injection failed: {e}")
+
+    # OHLCV Pattern Matcher: candle-sequence similarity search
+    if _ohlcv_ready and _ohlcv_matcher:
+        try:
+            # Build fingerprint from tech_data (need close prices from recent candles)
+            closes = tech_data.get("recent_closes", [])
+            if closes and len(closes) >= 21:
+                rsi_val = float(tech_data.get("rsi_14") or tech_data.get("rsi") or 50)
+                macd_val = float(tech_data.get("macd_hist") or tech_data.get("macdhist") or 0)
+                adx_val = float(tech_data.get("adx") or 25)
+                vol_ratio = float(tech_data.get("volume_ratio") or 1.0)
+                atr_ratio = float(tech_data.get("atr_ratio") or 1.0)
+                fng_val = float(tech_data.get("fng") or 50)
+
+                fp = OHLCVPatternMatcher.compute_fingerprint(
+                    closes, indicators={
+                        "rsi": rsi_val, "macd_hist": macd_val, "adx": adx_val,
+                        "volume_ratio": vol_ratio, "atr_ratio": atr_ratio, "fng": fng_val,
+                    })
+                if fp:
+                    ohlcv_block = _ohlcv_matcher.format_for_prompt(fp, k=10, pair=pair)
+                    if ohlcv_block:
+                        raw_block += f"\n\n{ohlcv_block}"
+                        logger.info(f"[Level4:OHLCVMatch] {pair} candle pattern match injected")
+        except Exception as e:
+            logger.debug(f"[Level4:OHLCVMatch] {pair} pattern matching failed: {e}")
+
+    # Phase 19 Level 3: Inject live market data (derivatives, DeFi, macro)
+    if _market_data:
+        try:
+            market_block = _market_data.format_for_prompt(pair=pair)
+            if market_block:
+                raw_block += f"\n\n{market_block}"
+                logger.info(f"[Phase19:MarketData] {pair} live market data injected into coordinator")
+        except Exception as e:
+            logger.debug(f"[Phase19:MarketData] {pair} market data injection failed: {e}")
+
+    # Phase 20: Evidence Engine FactSheet — LLM agents MUST reference this as prior anchor
+    # Result is cached in _ee_cache for reuse in Tier 3.5 fallback (avoids duplicate computation)
+    _ee_cached_result = None
+    try:
+        from evidence_engine import EvidenceEngine
+        _ee = EvidenceEngine(
+            pattern_store=_pattern_store,
+            ohlcv_matcher=_ohlcv_matcher,
+            market_data=_market_data,
+            regime_classifier=_regime_classifier,
+        )
+        _ee_cached_result = _ee.generate_signal(pair=pair, tech_data=tech_data)
+        _ee_factsheet = _ee.format_factsheet(_ee_cached_result)
+        if _ee_factsheet:
+            raw_block += f"\n\n{_ee_factsheet}"
+            logger.info(f"[Phase20:EvidenceEngine] {pair} FactSheet injected into coordinator "
+                       f"({_ee_cached_result['signal']} conf={_ee_cached_result['confidence']:.2f})")
+    except Exception as e:
+        logger.debug(f"[Phase20:EvidenceEngine] {pair} FactSheet injection failed: {e}")
+
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
 
 === AGENT REPORTS ===
@@ -1109,10 +1387,13 @@ If the steelmanned counter-argument is strong (would change a reasonable person'
 
 STEP 5 — CONFIDENCE DECOMPOSITION:
 Rate each 0.0 to 1.0:
-- data_quality: How fresh/complete is the data? (weight: 0.25)
-- signal_strength: How many independent indicators agree? (weight: 0.35)
-- regime_confidence: How clear is the market regime? (weight: 0.25)
+- data_quality: How fresh/complete is the data? (weight: 0.20)
+- signal_strength: How many independent indicators agree? (weight: 0.30)
+- regime_confidence: How clear is the market regime? (weight: 0.20)
 - analyst_agreement: How much do 5 agents agree? (weight: 0.15)
+- backtest_alignment: Does the BACKTEST HISTORICAL BASELINE support this signal? (weight: 0.15)
+  If no backtest data available, distribute this weight equally to other components.
+  If backtest win rate > 60% for this setup → boost. If < 40% → penalize.
 FINAL_CONFIDENCE = weighted average, then apply regime/pre-mortem/steelman adjustments.
 
 === CONFIDENCE CALIBRATION SCALE ===
@@ -1287,16 +1568,73 @@ RULES:
         signal, conf, reason = parsed
         return {"signal": signal, "confidence": conf, "reasoning": reason, "source": "AI"}
 
+    # Tier 2.5: AgentPool Debate (Phase 20 — adaptive agents with memory + track record)
+    # Uses Evidence Engine FactSheet (already computed above) as mandatory input
+    # 4 regime-adaptive agents with 2-round cross-examination debate
+    try:
+        from agent_pool import AgentPool
+        _pool = AgentPool(llm_router=llm)
+        _pool_factsheet = ""
+        if _ee_cached_result:
+            try:
+                from evidence_engine import EvidenceEngine
+                _pool_factsheet = EvidenceEngine().format_factsheet(_ee_cached_result)
+            except Exception:
+                _pool_factsheet = f"Evidence: {_ee_cached_result.get('signal', 'NEUTRAL')} conf={_ee_cached_result.get('confidence', 0):.2f}"
+
+        _pool_regime = "transitional"
+        if _regime_classifier and tech_data:
+            try:
+                _pool_regime = RegimeClassifier.classify(tech_data)
+            except Exception:
+                pass
+
+        pool_result = _pool.run_debate(
+            pair=pair, evidence_factsheet=_pool_factsheet,
+            regime=_pool_regime, tech_data=tech_data, llm=llm)
+
+        if pool_result and pool_result.get("confidence", 0) > 0.20:
+            _record_signal_health(pair, "AGENT_POOL", pool_result["signal"], pool_result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1
+            logger.info(f"[Phase20:AgentPool] {pair} debate: {pool_result['signal']} "
+                       f"conf={pool_result['confidence']:.2f}")
+            return {"signal": pool_result["signal"], "confidence": pool_result["confidence"],
+                    "reasoning": pool_result.get("reasoning", ""), "source": "AGENT_POOL"}
+    except Exception as e:
+        logger.warning(f"[Phase20:AgentPool] {pair} debate failed: {e}")
+
     # Tier 3: 3-Agent Voting Fallback (tech, sent, news — unbiased agents only)
-    logger.warning("[NODE] Coordinator: Both LLM calls failed. Using VOTING FALLBACK.")
+    logger.warning("[NODE] Coordinator: Both LLM + AgentPool failed. Using VOTING FALLBACK.")
     vote_result = _voting_fallback(tech, sent, news)
     if vote_result["confidence"] > 0:
         return vote_result
 
-    # Tier 4: Technical Fallback (pure indicator scoring)
-    # Always called — even with empty tech_data, returns minimum 0.01 confidence
-    logger.warning("[NODE] Coordinator: Voting inconclusive. Using TECHNICAL FALLBACK.")
-    return _technical_fallback(tech_data)
+    # Tier 3.5: Evidence Engine (LLM-free, comprehensive — Phase 20)
+    # Reuse cached result from coordinator FactSheet generation (avoids duplicate computation)
+    logger.warning("[NODE] Coordinator: Voting inconclusive. Trying EVIDENCE ENGINE.")
+    try:
+        ee_result = _ee_cached_result  # Cached from coordinator FactSheet (line ~1317)
+        if ee_result is None:
+            # Fallback: compute fresh if coordinator didn't cache (shouldn't happen normally)
+            from evidence_engine import EvidenceEngine
+            _ee_fallback = EvidenceEngine(
+                pattern_store=_pattern_store, ohlcv_matcher=_ohlcv_matcher,
+                market_data=_market_data, regime_classifier=_regime_classifier,
+            )
+            ee_result = _ee_fallback.generate_signal(pair=pair, tech_data=tech_data)
+        if ee_result and ee_result.get("confidence", 0) > 0.20:
+            _record_signal_health(pair, "EVIDENCE_ENGINE", ee_result["signal"], ee_result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1
+            logger.info(f"[Phase20:Tier3.5] {pair} Evidence Engine: {ee_result['signal']} conf={ee_result['confidence']:.2f}")
+            return ee_result
+    except Exception as e:
+        logger.warning(f"[Phase20:Tier3.5] Evidence Engine failed: {e}")
+
+    # Tier 4: Legacy Technical Fallback (pure indicator scoring, 0.35 cap)
+    logger.warning("[NODE] Coordinator: Using LEGACY TECHNICAL FALLBACK.")
+    return _legacy_technical_fallback(tech_data)
 
 
 
@@ -1330,13 +1668,102 @@ workflow.add_edge("coordinator_debate", END)
 rag_bot = workflow.compile()
 
 def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
-    """Entry point for Freqtrade to request a trading decision from the Analyst Team."""
-    # Concurrency gate: only 2 coins may run the full 5-agent graph simultaneously.
-    # This prevents 20+ concurrent LLM calls from exhausting all free-tier quotas.
-    acquired = _signal_semaphore.acquire(timeout=50)
+    """
+    Phase 20: Evidence-First signal generation.
+
+    New paradigm: Evidence Engine runs FIRST (50ms, always succeeds), then MADAM
+    only runs if the signal is ambiguous and semaphore is available.
+
+    Flow:
+      1. Semantic cache check (instant)
+      2. Evidence Engine (50ms, LLM-free, with tech_data)
+      3. IF confidence >= 0.40 → return immediately (strong evidence, skip LLM)
+      4. IF confidence < 0.40 → try semaphore for MADAM (short 15s timeout)
+         IF acquired: MADAM pipeline (may improve signal)
+         IF timeout: return Evidence Engine result (already good enough)
+    """
+    # Phase 9: Semantic Cache check FIRST (before any computation)
+    query_str = f"trading signal analysis for {pair}"
+    cached_response_str = _semantic_cache.get(query=query_str, pair=pair)
+    if cached_response_str:
+        try:
+            cached_result = json.loads(cached_response_str)
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1
+            _record_signal_health(pair, "CACHE", cached_result.get("signal", "NEUTRAL"), cached_result.get("confidence", 0.0))
+            logger.info(f"[Semantic Cache] {pair} reusing cached: {cached_result.get('signal')} conf={cached_result.get('confidence', 0):.2f}")
+            return cached_result
+        except Exception:
+            pass
+
+    # Phase 20: Evidence Engine ALWAYS runs first (50ms, LLM-free)
+    ee_result = None
+    try:
+        from evidence_engine import EvidenceEngine
+        ee = EvidenceEngine(
+            pattern_store=_pattern_store,
+            ohlcv_matcher=_ohlcv_matcher,
+            market_data=_market_data,
+            regime_classifier=_regime_classifier,
+        )
+        ee_result = ee.generate_signal(pair=pair, tech_data=technical_data or {})
+        logger.info(f"[Phase20:EvidenceFirst] {pair}: {ee_result['signal']} conf={ee_result['confidence']:.2f}")
+    except Exception as e:
+        logger.warning(f"[Phase20:EvidenceFirst] {pair} Evidence Engine failed: {e}")
+
+    # Decision: Is evidence strong enough to skip LLM?
+    ee_confidence = ee_result.get("confidence", 0) if ee_result else 0
+
+    if ee_confidence >= 0.40:
+        # Strong evidence — return Evidence Engine immediately,
+        # but ALSO queue MADAM in background to enrich cache for next query
+        logger.info(f"[Phase20:EvidenceFirst] {pair} HIGH confidence ({ee_confidence:.2f}) → returning EE, queuing MADAM background")
+        _record_signal_health(pair, "EVIDENCE_ENGINE", ee_result["signal"], ee_result["confidence"])
+        _signal_stats["total"] += 1
+        _signal_stats["ai"] += 1
+
+        # Cache Evidence Engine result NOW (immediate response)
+        if ee_confidence >= 0.30:
+            _semantic_cache.put(query=query_str, response=json.dumps(ee_result), pair=pair)
+
+        # Queue MADAM in background — when it finishes, it will overwrite cache
+        # with a richer LLM-enhanced signal for the NEXT query cycle
+        def _background_madam(p, td):
+            try:
+                acq = _signal_semaphore.acquire(timeout=30)  # Background MADAM can wait longer
+                if acq:
+                    try:
+                        result = _get_trading_signal_inner(p, td)
+                        if result and result.get("confidence", 0) > ee_confidence:
+                            logger.info(f"[Phase20:BackgroundMADAM] {p} improved: "
+                                       f"{result['signal']} conf={result['confidence']:.2f} "
+                                       f"(was EE {ee_confidence:.2f})")
+                    finally:
+                        _signal_semaphore.release()
+            except Exception:
+                pass
+
+        try:
+            import threading
+            threading.Thread(target=_background_madam, args=(pair, technical_data),
+                           daemon=True, name=f"bg-madam-{pair}").start()
+        except Exception:
+            pass
+
+        return ee_result
+
+    # Ambiguous signal (EE conf < 0.40) — try MADAM with short timeout
+    # Evidence Engine is our safety net, so shorter wait is fine
+    acquired = _signal_semaphore.acquire(timeout=90)  # 90s — quality over speed, let MADAM complete
     if not acquired:
-        logger.warning(f"[Concurrency] Semaphore timeout for {pair}. Returning technical fallback.")
-        return _technical_fallback(technical_data or {})
+        # Semaphore busy — return Evidence Engine result (not NEUTRAL 0.01!)
+        logger.info(f"[Phase20:EvidenceFirst] {pair} semaphore busy → using Evidence Engine ({ee_confidence:.2f})")
+        if ee_result and ee_confidence > 0.01:
+            _record_signal_health(pair, "EVIDENCE_ENGINE", ee_result["signal"], ee_result["confidence"])
+            _signal_stats["total"] += 1
+            _signal_stats["ai"] += 1
+            return ee_result
+        return _legacy_technical_fallback(technical_data or {})
 
     try:
         return _get_trading_signal_inner(pair, technical_data)
@@ -1426,6 +1853,38 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
 
         logger.warning(f"[Self-RAG] Output failed critique. Retrying pipeline. Attempt {attempt+1}/{max_retries}")
 
+    # Phase 19: System health degradation — reduce confidence if system is unhealthy
+    try:
+        from system_monitor import SystemMonitor
+        _monitor = SystemMonitor()
+        health = _monitor.check_health()
+        health_status = health.get("status", "ok")
+        if health_status == "critical" and confidence > 0.35:
+            original_conf = confidence
+            confidence = max(confidence * 0.7, 0.35)  # 30% penalty, floor at fallback level
+            reasoning += f" [DEGRADED: system health critical, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
+            logger.warning(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (system critical)")
+        elif health_status == "degraded" and confidence > 0.50:
+            original_conf = confidence
+            confidence = max(confidence * 0.85, 0.50)  # 15% penalty
+            reasoning += f" [DEGRADED: system health degraded, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
+            logger.info(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (system degraded)")
+    except Exception as e:
+        logger.debug(f"[Phase19:Health] Health check skipped: {e}")
+
+    # Phase 20: Cross-Pair Intelligence overlay — adjust confidence based on market-wide patterns
+    try:
+        from cross_pair_intel import CrossPairIntel
+        _cpi = CrossPairIntel()
+        cpi_adjustment = _cpi.get_confidence_overlay(pair)
+        if abs(cpi_adjustment) > 0.001:
+            original_conf = confidence
+            confidence = max(0.01, min(0.85, confidence + cpi_adjustment))
+            logger.info(f"[Phase20:CrossPair] {pair} confidence adjusted {original_conf:.2f}→{confidence:.2f} "
+                       f"(overlay={cpi_adjustment:+.3f})")
+    except Exception as e:
+        logger.debug(f"[Phase20:CrossPair] {pair} overlay skipped: {e}")
+
     # Log the decision persistently in Phase 3.5.1 Logger
     decision_logger.log_decision(
         pair=pair,
@@ -1434,7 +1893,7 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
         reasoning_summary=reasoning,
         regime="MULTI_AGENT_PHASE_5"
     )
-    
+
     result_dict = {
         "signal": signal,
         "confidence": confidence,
@@ -1481,26 +1940,31 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 # Concurrency limiter: max 2 coins processing the full 5-agent graph in parallel.
 # Each coin spawns 5 LLM calls (LangGraph parallel nodes). Without this,
 # 4 coins × 5 agents = 20 concurrent LLM calls exhausting all provider quotas.
-_signal_semaphore = _threading.Semaphore(2)
+_signal_semaphore = _threading.Semaphore(1)  # 1 concurrent pair — 2 caused CPU timeout + rate limit cascade
 
 _signal_executor = ThreadPoolExecutor(max_workers=4)
 
 def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, technical_data: dict = None) -> dict:
-    """Wraps get_trading_signal with a thread-based timeout (uvicorn-safe)."""
+    """
+    Wraps get_trading_signal with a thread-based timeout (uvicorn-safe).
+    Phase 20: Even on timeout, Evidence Engine already ran inside get_trading_signal,
+    so the fallback here is a last resort (Evidence Engine + MADAM both failed).
+    """
     try:
         future = _signal_executor.submit(get_trading_signal, pair, technical_data)
         return future.result(timeout=timeout_seconds)
     except FuturesTimeoutError:
-        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Using technical fallback...")
-        result = _technical_fallback(technical_data or {})
-        _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
+        logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Using Evidence Engine fallback...")
+        # Evidence Engine with full tech_data (not empty!)
+        result = _technical_fallback(technical_data or {}, pair=pair)
+        _record_signal_health(pair, result.get("source", "FALLBACK"), result["signal"], result["confidence"])
         _signal_stats["total"] += 1
         _signal_stats["fallback"] += 1
         return result
     except Exception as e:
         logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
-        result = _technical_fallback(technical_data or {})
-        _record_signal_health(pair, "FALLBACK", result["signal"], result["confidence"])
+        result = _technical_fallback(technical_data or {}, pair=pair)
+        _record_signal_health(pair, result.get("source", "FALLBACK"), result["signal"], result["confidence"])
         _signal_stats["total"] += 1
         _signal_stats["fallback"] += 1
         return result
@@ -1597,6 +2061,23 @@ if __name__ == "__main__":
             finally:
                 if conn:
                     conn.close()
+
+        @serve_app.post("/scan")
+        async def scan_endpoint(request: Request):
+            """Phase 20: Opportunity Scanner — wide pair screening."""
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            pairs = body.get("pairs", [])
+            top_n = body.get("top_n", 15)
+            try:
+                from opportunity_scanner import OpportunityScanner
+                scanner = OpportunityScanner()
+                results = scanner.scan_pairs_from_db(pairs, top_n=top_n)
+                return {"results": results, "count": len(results)}
+            except Exception as e:
+                return {"error": str(e), "results": []}
 
         logger.info(f"RAG Signal Service starting on port {args.port}")
         logger.info(f"Models loaded: ColBERT={'active' if retriever.colbert_reranker else 'disabled'}, "

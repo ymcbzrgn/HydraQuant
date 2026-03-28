@@ -27,6 +27,9 @@ frequi/dist/
 # Macos related
 .DS_Store
 
+examples/
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -133,3 +136,8 @@ freqtrade-strategies/db
 freqtrade-strategies/scripts
 freqtrade-strategies/vectordb
 freqtrade-strategies/user_data/scripts
+
+# HydraQuant cleanup
+.claude/
+config_binance_testnet_futures.json
+uv.lock

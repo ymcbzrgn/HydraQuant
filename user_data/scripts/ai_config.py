@@ -1,6 +1,18 @@
 import os
 import threading
 
+# ── NumPy 2.x Compatibility Shim ─────────────────────────────────────
+# numpy 2.0 removed np.matrix. yfinance 1.2.0 (via pandas internals)
+# still uses it, causing "module 'numpy' has no attribute 'matrix'" errors.
+# This shim restores the attribute using np.asmatrix (still available).
+# Applied here because ai_config.py is imported by ALL AI modules.
+try:
+    import numpy as _np
+    if not hasattr(_np, 'matrix'):
+        _np.matrix = _np.asmatrix
+except ImportError:
+    pass
+
 # Base paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

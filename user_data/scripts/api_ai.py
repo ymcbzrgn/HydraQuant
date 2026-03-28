@@ -536,6 +536,117 @@ def get_hypothetical():
     return result
 
 
+@app.get("/api/ai/market-data")
+def get_market_data(pair: str = "BTC/USDT"):
+    """Phase 19 Level 3: Get latest derivatives, DeFi, and macro data."""
+    try:
+        from market_data_fetcher import MarketDataFetcher
+        fetcher = MarketDataFetcher()
+        return {
+            "derivatives": fetcher.get_latest_derivatives(pair),
+            "defi": fetcher.get_latest_defi(),
+            "macro": fetcher.get_latest_macro(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/pattern-stats")
+def get_pattern_stats(pair: str = None, regime: str = None, rsi: str = None):
+    """Phase 19: Query historical backtest pattern statistics."""
+    try:
+        from pattern_stat_store import PatternStatStore
+        store = PatternStatStore()
+        stats = store.query(pair=pair, regime=regime, rsi_bucket=rsi)
+        return stats
+    except Exception as e:
+        return {"error": str(e), "matching_trades": 0}
+
+
+@app.get("/api/ai/calibration")
+def get_calibration():
+    """Phase 19: Get confidence calibration report and Brier score."""
+    try:
+        from confidence_calibrator import ConfidenceCalibrator
+        cal = ConfidenceCalibrator()
+        return {
+            "brier_score": cal.brier_score(),
+            "calibration_curve": cal.calibration_curve(),
+            "platt_a": cal._platt_a,
+            "platt_b": cal._platt_b,
+            "calibrated": cal._calibrated,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/opportunities")
+def get_opportunities(top_n: int = 20):
+    """Phase 20: Latest opportunity scanner results."""
+    try:
+        with get_db_conn() as conn:
+            rows = conn.execute("""
+                SELECT pair, composite_score, top_type, momentum_score, reversion_score,
+                       funding_score, regime_shift_score, volume_anomaly_score, timestamp
+                FROM opportunity_scores
+                WHERE id IN (SELECT MAX(id) FROM opportunity_scores GROUP BY pair)
+                ORDER BY composite_score DESC
+                LIMIT ?
+            """, (top_n,)).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@app.get("/api/ai/agents")
+def get_agent_performance():
+    """Phase 20: Agent pool performance statistics."""
+    try:
+        from agent_pool import AgentPool
+        pool = AgentPool(db_path=AI_DB_PATH)
+        return pool.get_performance_summary()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/evidence/{pair:path}")
+def get_evidence_audit(pair: str, limit: int = 10):
+    """Phase 20: Evidence Engine audit log for a pair."""
+    try:
+        with get_db_conn() as conn:
+            rows = conn.execute("""
+                SELECT pair, signal, confidence, sub_scores_json, contradictions_json,
+                       evidence_sources_json, regime, max_confidence_cap, timestamp
+                FROM evidence_audit_log
+                WHERE pair = ? ORDER BY timestamp DESC LIMIT ?
+            """, (pair, limit)).fetchall()
+            results = []
+            for r in rows:
+                d = dict(r)
+                # Parse JSON fields for cleaner API response
+                for jf in ("sub_scores_json", "contradictions_json", "evidence_sources_json"):
+                    if d.get(jf):
+                        try:
+                            d[jf] = __import__('json').loads(d[jf])
+                        except Exception:
+                            pass
+                results.append(d)
+            return results
+    except Exception:
+        return []
+
+
+@app.get("/api/ai/cross-pair")
+def get_cross_pair_intel():
+    """Phase 20: Cross-pair market intelligence."""
+    try:
+        from cross_pair_intel import CrossPairIntel
+        intel = CrossPairIntel(db_path=AI_DB_PATH)
+        return intel.get_latest()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8890)

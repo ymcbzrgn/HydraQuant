@@ -61,7 +61,9 @@ class LLMCostTracker:
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
                 cursor = conn.cursor()
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS llm_calls (
@@ -111,19 +113,31 @@ class LLMCostTracker:
         return input_cost + output_cost
 
     def log_call(self, model: str, provider: str, input_tokens: int, output_tokens: int,
-                 cost_usd: float, latency_ms: float, agent_name: str = "", 
+                 cost_usd: float, latency_ms: float, agent_name: str = "",
                  cache_hit: bool = False, pair: str = "", status: str = "success"):
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO llm_calls 
-                    (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair))
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Error logging LLM call: {e}")
+        import time as _time
+        for attempt in range(3):
+            try:
+                with sqlite3.connect(self.db_path, timeout=30) as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA busy_timeout=30000")
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO llm_calls
+                        (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair))
+                    conn.commit()
+                return  # Success
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < 2:
+                    _time.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error(f"Error logging LLM call: {e}")
+                    return
+            except Exception as e:
+                logger.error(f"Error logging LLM call: {e}")
+                return
 
     def get_daily_cost(self, target_date: Optional[str] = None) -> float:
         """Get the total cost for a specific date (YYYY-MM-DD). Defaults to today."""

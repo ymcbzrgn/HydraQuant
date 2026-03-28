@@ -165,11 +165,150 @@ def init_db():
         )
     ''')
 
+    # Phase 19 Level 3: Market data tables (derivatives, DeFi, macro)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS derivatives_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            open_interest_usd REAL,
+            funding_rate REAL,
+            long_short_ratio REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS macro_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            prev_value REAL,
+            change_pct REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS defi_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            change_pct REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # OHLCV Pattern Matcher (candle-sequence similarity search)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS ohlcv_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timeframe TEXT DEFAULT '1h',
+            timestamp TEXT,
+            fingerprint TEXT NOT NULL,
+            outcome_1h REAL,
+            outcome_4h REAL,
+            outcome_24h REAL,
+            direction TEXT,
+            indicators_json TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_ohlcv_pair ON ohlcv_patterns(pair)')
+
+    # Phase 19 Level 3: Google Trends search interest
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS search_trends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL,
+            interest_score INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Phase 20: Agent Pool — agent decisions memory (MiroFish-inspired)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS agent_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_type TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            regime TEXT,
+            signal TEXT NOT NULL,
+            strength REAL,
+            key_argument TEXT,
+            evidence_engine_confidence REAL,
+            final_outcome_pnl REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Phase 20: Agent Pool — historical performance tracking
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS agent_performance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_type TEXT NOT NULL,
+            pair TEXT NOT NULL,
+            regime TEXT,
+            signal TEXT NOT NULL,
+            outcome_pnl REAL,
+            was_correct BOOLEAN,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Phase 20: Opportunity Scanner — cached scan results
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS opportunity_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            composite_score REAL NOT NULL,
+            top_type TEXT,
+            momentum_score REAL,
+            reversion_score REAL,
+            funding_score REAL,
+            regime_shift_score REAL,
+            volume_anomaly_score REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Phase 20: Evidence Engine — structured audit log
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS evidence_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            sub_scores_json TEXT,
+            contradictions_json TEXT,
+            evidence_sources_json TEXT,
+            regime TEXT,
+            max_confidence_cap REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Phase 20: Cross-Pair Intelligence cache (single-row table)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS cross_pair_cache (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data_json TEXT,
+            timestamp TEXT
+        )
+    ''')
+
     # Create indices
     c.execute('CREATE INDEX IF NOT EXISTS idx_market_news_published ON market_news(published_at)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_ai_decisions_pair ON ai_decisions(pair)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_sentiment_rolling_coin ON coin_sentiment_rolling(coin, timestamp)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_signal_health_ts ON signal_health(timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_deriv_pair_ts ON derivatives_data(pair, timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_macro_name_ts ON macro_data(metric_name, timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_defi_name_ts ON defi_data(metric_name, timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_trends_kw_ts ON search_trends(keyword, timestamp)')
+    # Phase 20 indices
+    c.execute('CREATE INDEX IF NOT EXISTS idx_agent_mem_type ON agent_memory(agent_type, regime)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_agent_perf ON agent_performance(agent_type, regime)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_opp_pair_ts ON opportunity_scores(pair, timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_evidence_pair_ts ON evidence_audit_log(pair, timestamp)')
 
     conn.commit()
     conn.close()

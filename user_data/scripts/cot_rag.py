@@ -9,11 +9,11 @@ logger = logging.getLogger(__name__)
 
 class CoTRAG:
     """
-    Phase 16 - CoT-RAG (Chain-of-Thought RAG)
+    Phase 16 + Phase 19 - CoT-RAG (Chain-of-Thought RAG)
     Provides a structured, multi-step reasoning protocol where each step
-    is backed by specifically retrieved evidence.
+    is backed by specifically retrieved evidence AND historical backtest statistics.
     """
-    
+
     REASONING_STEPS = [
         {"step": "market_state", "label": "Market Regime", "search_query_hint": "crypto market trend regime volatility ADX"},
         {"step": "technical", "label": "Technical Analysis", "search_query_hint": "{pair} technical indicators RSI MACD EMA support resistance volume"},
@@ -25,6 +25,19 @@ class CoTRAG:
     def __init__(self, llm_router: Optional[LLMRouter] = None, retriever=None):
         self.router = llm_router or LLMRouter(temperature=0.2)
         self.retriever = retriever
+
+        # Phase 19: PatternStatStore for backtest evidence in each step
+        self._pattern_store = None
+        try:
+            from pattern_stat_store import PatternStatStore
+            self._pattern_store = PatternStatStore()
+            if self._pattern_store.get_total_trades() < 10:
+                self._pattern_store = None
+                logger.info("[CoT-RAG] PatternStatStore has <10 trades, backtest evidence disabled")
+            else:
+                logger.info(f"[CoT-RAG] PatternStatStore loaded: {self._pattern_store.get_total_trades()} trades available")
+        except Exception as e:
+            logger.debug(f"[CoT-RAG] PatternStatStore unavailable: {e}")
 
     def reason_step_by_step(self, pair: str, query: str) -> dict:
         """
@@ -76,15 +89,68 @@ class CoTRAG:
             "reasoning_chain": cumulative_context.strip()
         }
 
+    def _get_backtest_context_for_step(self, step_id: str, pair: str) -> str:
+        """Phase 19: Get relevant backtest statistics for a specific CoT reasoning step."""
+        if not self._pattern_store:
+            return ""
+
+        try:
+            if step_id == "market_state":
+                # Show regime breakdown across all trades for this pair
+                stats = self._pattern_store.query(pair=pair, min_trades=5)
+                if stats.get("insufficient_data"):
+                    return ""
+                rb = stats.get("regime_breakdown", {})
+                if not rb:
+                    return ""
+                parts = [f"{r}: {d['win_rate']:.0%} win rate (n={d['n']})" for r, d in rb.items()]
+                return f"[BACKTEST REGIME DATA] {pair} performance by regime: {' | '.join(parts)}"
+
+            elif step_id == "technical":
+                # Show overall pair statistics
+                stats = self._pattern_store.query(pair=pair, min_trades=5)
+                if stats.get("insufficient_data"):
+                    return ""
+                return (f"[BACKTEST TECHNICAL DATA] {pair}: {stats['matching_trades']} historical trades, "
+                        f"win rate {stats['win_rate']:.0%}, avg P&L {stats['avg_profit_pct']:+.2f}%, "
+                        f"profit factor {stats.get('profit_factor', 0):.2f}")
+
+            elif step_id == "risk":
+                # Show worst-case scenarios from backtests
+                stats = self._pattern_store.query(pair=pair, min_trades=5)
+                if stats.get("insufficient_data"):
+                    return ""
+                return (f"[BACKTEST RISK DATA] {pair}: worst trade {stats.get('max_drawdown_pct', 0):.2f}%, "
+                        f"avg duration {stats.get('avg_duration_hours', 0):.0f}h, "
+                        f"exit reasons: {stats.get('exit_reason_dist', {})}")
+
+            elif step_id == "decision":
+                # Comprehensive summary for decision
+                prompt_block = self._pattern_store.format_for_prompt(pair)
+                if prompt_block:
+                    return f"[BACKTEST DECISION DATA]\n{prompt_block}"
+
+        except Exception as e:
+            logger.debug(f"[CoT-RAG:Phase19] Backtest context for step '{step_id}' failed: {e}")
+
+        return ""
+
     def _execute_step(self, step_config: dict, pair: str, base_query: str, previous_context: str) -> dict:
         """Executes a single reasoning step with dedicated retrieval if applicable."""
         step_id = step_config["step"]
         label = step_config["label"]
         hint_template = step_config["search_query_hint"]
-        
+
         evidence_text = ""
         evidence_count = 0
-        
+
+        # Phase 19: Inject backtest statistics for this step
+        backtest_context = self._get_backtest_context_for_step(step_id, pair)
+        if backtest_context:
+            evidence_text += f"\n{backtest_context}\n"
+            evidence_count += 1
+            logger.info(f"[CoT-RAG:Phase19] Step '{label}' enriched with backtest data for {pair}")
+
         # 1. Retrieve evidence if needed
         if hint_template and self.retriever:
             search_query = hint_template.replace("{pair}", pair)

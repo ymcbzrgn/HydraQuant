@@ -10,12 +10,24 @@ logger = logging.getLogger(__name__)
 
 class FLARERetriever:
     """
-    Phase 16 - FLARE (Forward-Looking Active Retrieval)
+    Phase 16 + Level 4 - FLARE (Forward-Looking Active Retrieval)
     Detects uncertainty during generation and triggers active retrieval when needed.
+    Level 4: Also queries PatternStatStore for historical evidence on low-confidence claims.
     """
     def __init__(self, llm_router: Optional[LLMRouter] = None, retriever=None):
         self.router = llm_router or LLMRouter()
         self.retriever = retriever
+
+        # Level 4: PatternStatStore for backtest evidence on low-confidence sentences
+        self._pattern_store = None
+        try:
+            from pattern_stat_store import PatternStatStore
+            ps = PatternStatStore()
+            if ps.get_total_trades() >= 10:
+                self._pattern_store = ps
+                logger.info(f"[FLARE] PatternStatStore loaded: {ps.get_total_trades()} trades for evidence retrieval")
+        except Exception:
+            pass
         
     def generate_with_active_retrieval(self, query: str, context: str = "") -> dict:
         """
@@ -142,18 +154,39 @@ class FLARERetriever:
 
     def _retrieve_for_sentence(self, sentence: str) -> List[str]:
         """Retrieve additional context for a low-confidence sentence."""
-        if not self.retriever:
-            logger.warning("[FLARE] No retriever provided. Cannot perform active retrieval.")
-            return []
-            
-        try:
-            # Assuming HybridRetriever.search exists and returns a list of dicts with 'text'
-            results = self.retriever.search(query=sentence, top_k=2)
-            if results and isinstance(results[0], dict) and 'text' in results[0]:
-                return [r['text'] for r in results]
-            elif results and isinstance(results[0], str):
-                 return results
-            return []
-        except Exception as e:
-            logger.error(f"[FLARE] Retrieval failed for sentence: {e}")
-            return []
+        results = []
+
+        # Standard RAG retrieval
+        if self.retriever:
+            try:
+                rag_results = self.retriever.search(query=sentence, top_k=2)
+                if rag_results and isinstance(rag_results[0], dict) and 'text' in rag_results[0]:
+                    results.extend([r['text'] for r in rag_results])
+                elif rag_results and isinstance(rag_results[0], str):
+                    results.extend(rag_results)
+            except Exception as e:
+                logger.error(f"[FLARE] RAG retrieval failed for sentence: {e}")
+
+        # Level 4: PatternStatStore evidence retrieval
+        if self._pattern_store:
+            try:
+                # Extract pair from sentence (look for X/USDT pattern)
+                import re
+                pair_match = re.search(r'([A-Z]{2,10}/USDT)', sentence)
+                pair = pair_match.group(1) if pair_match else None
+
+                if pair:
+                    stats = self._pattern_store.get_pair_summary(pair)
+                    if not stats.get("insufficient_data"):
+                        evidence = (f"[BACKTEST EVIDENCE] {pair}: {stats['matching_trades']} historical trades, "
+                                    f"win rate {stats['win_rate']:.0%}, avg P&L {stats['avg_profit_pct']:+.2f}%, "
+                                    f"profit factor {stats.get('profit_factor', 0):.2f}")
+                        results.append(evidence)
+                        logger.info(f"[FLARE:Level4] Backtest evidence injected for {pair}")
+            except Exception as e:
+                logger.debug(f"[FLARE:Level4] PatternStatStore retrieval failed: {e}")
+
+        if not results:
+            logger.warning("[FLARE] No retrieval sources available.")
+
+        return results
