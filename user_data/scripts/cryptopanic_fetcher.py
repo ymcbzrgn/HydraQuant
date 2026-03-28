@@ -16,13 +16,17 @@ class CryptoPanicFetcher:
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.environ.get("CRYPTOPANIC_API_KEY")
         self.base_url = "https://cryptopanic.com/api/v1/posts/"
+        self._disabled = False
+        self._404_logged = False
 
     def fetch(self, currencies: List[str] = ["BTC", "ETH"], limit: int = 20) -> List[Dict[str, Any]]:
         """
         CryptoPanic API'den haberleri ve oyları (votes) çek.
         """
+        if self._disabled:
+            return []
         if not self.api_key:
-            logger.warning("CRYPTOPANIC_API_KEY eksik. Veri çekilmeyecek.")
+            logger.warning("[CryptoPanic] API key missing. Set CRYPTOPANIC_API_KEY in .env")
             return []
 
         results = []
@@ -32,19 +36,30 @@ class CryptoPanicFetcher:
                 "currencies": ",".join(currencies),
                 "public": "true"
             }
-            
-            # rate limits apply
+
             response = requests.get(self.base_url, params=params, timeout=10)
+
+            # Handle specific HTTP errors gracefully
+            if response.status_code == 404:
+                if not self._404_logged:
+                    logger.warning("[CryptoPanic] API returned 404 — token may be expired or endpoint changed. "
+                                   "Disabling until next restart. Check CRYPTOPANIC_API_KEY in .env")
+                    self._404_logged = True
+                self._disabled = True
+                return []
+            if response.status_code == 429:
+                logger.info("[CryptoPanic] Rate limited (429). Skipping this cycle.")
+                return []
+
             response.raise_for_status()
-            
+
             data = response.json()
             posts = data.get("results", [])[:limit]
-            
+
             for post in posts:
-                # Calculate community sentiment from votes dict
                 votes = post.get("votes", {})
                 sentiment_score = self.calculate_crowd_sentiment(votes)
-                
+
                 results.append({
                     "title": post.get("title", ""),
                     "url": post.get("url", ""),
@@ -53,12 +68,17 @@ class CryptoPanicFetcher:
                     "sentiment_score": sentiment_score,
                     "votes": votes
                 })
-                
-            logger.info(f"CryptoPanic: {len(results)} posts fetched for {currencies}")
+
+            logger.info(f"[CryptoPanic] {len(results)} posts fetched for {currencies}")
             return results
-            
+
+        except requests.exceptions.HTTPError as e:
+            # Mask auth token in error log
+            err_msg = str(e).replace(self.api_key, "***MASKED***") if self.api_key else str(e)
+            logger.error(f"[CryptoPanic] HTTP error: {err_msg}")
+            return []
         except Exception as e:
-            logger.error(f"CryptoPanic fetch failed: {e}")
+            logger.error(f"[CryptoPanic] Fetch failed: {type(e).__name__}: {e}")
             return []
 
     def calculate_crowd_sentiment(self, votes: dict) -> float:

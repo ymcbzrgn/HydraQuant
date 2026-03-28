@@ -39,6 +39,10 @@ einops==0.8.2
 duckduckgo-search==8.1.1
 apscheduler==3.11.0
 
+# Phase 19 Level 3: Market Data Sources
+yfinance==1.2.0
+pytrends==4.9.2
+
 # API Server
 fastapi==0.111.0
 uvicorn==0.29.0

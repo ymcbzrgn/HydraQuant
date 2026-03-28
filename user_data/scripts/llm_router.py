@@ -27,8 +27,8 @@ except ImportError:
 
 # Global dictionary to store API Keys currently in Penalty Box: {api_key: unlock_timestamp}
 KEY_COOLDOWNS: Dict[str, float] = {}
-GEMINI_COOLDOWN_DURATION = 60.0  # Gemini: daily quota can take minutes to reset
-FALLBACK_COOLDOWN_DURATION = 15.0  # Non-Gemini providers: 15s cooldown (was 5s, caused 1221x 429 on OpenRouter)
+GEMINI_COOLDOWN_DURATION = 90.0  # Gemini: daily quota takes minutes to reset (was 60, still too fast)
+FALLBACK_COOLDOWN_DURATION = 45.0  # Non-Gemini providers: 45s cooldown (was 15, caused 5393× 429 in 3 days)
 _COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
 
 # Module-level model discovery cache — shared across ALL LLMRouter instances
@@ -349,11 +349,20 @@ class LLMRouter:
                     # Skip -customtools variants (same model, same rate limit bucket)
                     if "-customtools" in short:
                         continue
-                    # Skip dead/shutdown models
+                    # Skip dead/shutdown/deprecated models
                     if short == "gemini-3-pro-preview":  # Shut down March 9, 2026
                         continue
                     if short.startswith("gemini-2.0-"):  # Deprecated June 1, 2026
                         continue
+                    # Skip preview models with old dates (deprecated by Google)
+                    # Pattern: gemini-X.X-*-preview-MM-YYYY or gemini-X.X-*-preview-09-2025
+                    import re as _re
+                    _preview_date = _re.search(r'-preview-(\d{2})-(\d{4})$', short)
+                    if _preview_date:
+                        _month, _year = int(_preview_date.group(1)), int(_preview_date.group(2))
+                        if _year < 2026 or (_year == 2026 and _month < 2):
+                            logger.info(f"[ModelDiscovery] Skipping deprecated preview: {short}")
+                            continue
                     deduped.append(name)
                 discovered = deduped
                 logger.info(f"Discovered {len(discovered)} Gemini chat models (deduped): {discovered}")
@@ -727,6 +736,16 @@ class LLMRouter:
             # Circuit breaker: too many consecutive Gemini failures in THIS call → skip remaining
             if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
                 continue
+
+            # Token pre-check: skip models with low TPM limits if prompt is too large
+            # Groq free tier qwen3-32b has 6000 TPM limit — prompts >5000 tokens always 413
+            _m_name_check = getattr(model, "model_name", getattr(model, "model", ""))
+            if "qwen3-32b" in str(_m_name_check):
+                prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
+                est_tokens = prompt_chars // 3  # conservative (1 token ~ 3 chars)
+                if est_tokens > 5000:
+                    logger.debug(f"[TokenPreCheck] Skipping qwen3-32b: ~{est_tokens} tokens > 5000 TPM limit")
+                    continue
 
             try:
                 # Per-call temperature override via LangChain bind() — thread-safe, zero allocation

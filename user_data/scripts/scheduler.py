@@ -11,11 +11,18 @@ Schedule:
 
 import os
 import sys
+import json
 import sqlite3
 import logging
 from datetime import datetime, timezone
 
 sys.path.append(os.path.dirname(__file__))
+
+# NumPy 2.x compat shim — MUST be before any pandas/yfinance import
+# yfinance 1.2.0 internally uses np.matrix (removed in numpy 2.0)
+import numpy as _np
+if not hasattr(_np, 'matrix'):
+    _np.matrix = _np.asmatrix
 
 # Load .env BEFORE any module that needs API keys
 from dotenv import load_dotenv
@@ -117,12 +124,12 @@ class PipelineScheduler:
             replace_existing=True
         )
 
-        # Daily 04:00 UTC: Cleanup old news
+        # Daily 04:00 UTC: Cleanup old news + old market data
         self.scheduler.add_job(
-            self._cleanup_old_news,
+            self._cleanup_old_data,
             'cron', hour=4, minute=0,
             id='cleanup',
-            name='Old News Cleanup',
+            name='Old Data Cleanup (news + market data)',
             replace_existing=True
         )
 
@@ -162,8 +169,107 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Phase 19: Daily 05:00 UTC: Re-fit confidence calibrator with latest trade outcomes
+        self.scheduler.add_job(
+            self._refit_calibrator,
+            'cron', hour=5, minute=0,
+            id='refit_calibrator',
+            name='Confidence Calibrator Re-fit',
+            replace_existing=True
+        )
+
+        # Phase 19: Weekly Monday 05:30 UTC: Forgone P&L threshold analysis
+        self.scheduler.add_job(
+            self._analyze_forgone_threshold,
+            'cron', day_of_week='mon', hour=5, minute=30,
+            id='forgone_threshold',
+            name='Forgone P&L Threshold Analysis',
+            replace_existing=True
+        )
+
+        # Phase 19: Daily 06:00 UTC: Process new backtest results into PatternStatStore + ChromaDB
+        self.scheduler.add_job(
+            self._process_new_backtests,
+            'cron', hour=6, minute=0,
+            id='process_backtests',
+            name='Backtest Embedder Processing',
+            replace_existing=True
+        )
+
+        # Phase 19 Level 3: Every 15 min: Fetch derivatives data (OI, funding, L/S ratio)
+        self.scheduler.add_job(
+            self._fetch_market_data_derivatives,
+            'interval', minutes=15,
+            id='fetch_derivatives',
+            name='Market Data: Derivatives (Bybit)',
+            max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 19 Level 3: Every hour: Fetch DeFi + Macro data (TVL, stablecoins, FRED)
+        self.scheduler.add_job(
+            self._fetch_market_data_defi_macro,
+            'interval', minutes=60,
+            id='fetch_defi_macro',
+            name='Market Data: DeFi + Macro',
+            max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 20: Opportunity Scanner — pre-screen pairs before each signal cycle
+        self.scheduler.add_job(
+            self._opportunity_scan,
+            'interval', minutes=55,
+            id='opportunity_scan',
+            name='Opportunity Scanner Wide Screening',
+            max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 20: Agent Pool — weekly weight rebalancing based on performance
+        self.scheduler.add_job(
+            self._rebalance_agent_weights,
+            'cron', day_of_week='sun', hour=2, minute=0,
+            id='agent_rebalance',
+            name='Agent Pool Weight Rebalancing',
+            replace_existing=True
+        )
+
+        # Phase 20: Cross-Pair Intelligence — market-wide pattern detection
+        self.scheduler.add_job(
+            self._update_cross_pair_intel,
+            'interval', minutes=30,
+            id='cross_pair_intel',
+            name='Cross-Pair Intelligence Update',
+            max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 20: Event-driven market condition monitor
+        # Checks every 5 min for extreme F&G or funding rate spikes
+        # If detected, triggers Evidence Engine re-analysis of affected pairs
+        self.scheduler.add_job(
+            self._event_driven_reanalysis,
+            'interval', minutes=5,
+            id='event_reanalysis',
+            name='Event-Driven Re-Analysis (F&G extreme, funding spike)',
+            max_instances=1,
+            replace_existing=True
+        )
+
+        # Phase 21: Auto Backtest & Bootstrap — daily at 03:00 UTC
+        # Runs backtest on top pairs, feeds results into PatternStatStore + Calibrator
+        self.scheduler.add_job(
+            self._auto_backtest_bootstrap,
+            'cron', hour=3, minute=0,
+            id='auto_backtest',
+            name='Auto Backtest & Bootstrap (daily 03:00 UTC)',
+            max_instances=1,
+            replace_existing=True
+        )
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 12 jobs: fetch(5m), cache_cleanup(5m), health(5m), embed(15m), flush(15m), sentiment(15m), reset(day), cleanup(day), daily_summary(23:55), weekly_summary(sun), prune_magma(sun), embed_bidi(day)")
+        logger.info("[Scheduler] Started with 22 jobs (21 + auto_backtest)")
         return True
 
     def stop(self):
@@ -220,35 +326,48 @@ class PipelineScheduler:
         except Exception as e:
             logger.error(f"[Scheduler:Job] Daily reset failed: {e}")
 
-    def _cleanup_old_news(self, max_age_days: int = 180):
-        """Job: Remove news older than max_age_days from SQLite + ChromaDB."""
-        logger.info(f"[Scheduler:Job] Cleaning up news older than {max_age_days} days...")
+    def _cleanup_old_data(self, max_age_days: int = 180):
+        """Job: Remove old news + market data older than max_age_days."""
+        logger.info(f"[Scheduler:Job] Cleaning up data older than {max_age_days} days...")
         try:
             from db import get_db_connection
             conn = get_db_connection()
             c = conn.cursor()
 
-            # Count before
+            total_deleted = 0
+
+            # Old news
             c.execute("SELECT COUNT(*) FROM market_news")
             before = c.fetchone()[0]
-
-            # Delete old articles
-            c.execute(
-                "DELETE FROM market_news WHERE published_at < datetime('now', ?)",
-                (f"-{max_age_days} days",)
-            )
+            c.execute("DELETE FROM market_news WHERE published_at < datetime('now', ?)", (f"-{max_age_days} days",))
             conn.commit()
-
-            # Count after
             c.execute("SELECT COUNT(*) FROM market_news")
             after = c.fetchone()[0]
+            news_deleted = before - after
+            total_deleted += news_deleted
+
+            # Phase 19 Level 3: Old derivatives data (keep 30 days — high volume table)
+            for table in ['derivatives_data', 'macro_data', 'defi_data', 'search_trends']:
+                try:
+                    c.execute(f"SELECT COUNT(*) FROM {table}")
+                    before_t = c.fetchone()[0]
+                    c.execute(f"DELETE FROM {table} WHERE timestamp < datetime('now', '-30 days')")
+                    conn.commit()
+                    c.execute(f"SELECT COUNT(*) FROM {table}")
+                    after_t = c.fetchone()[0]
+                    deleted_t = before_t - after_t
+                    total_deleted += deleted_t
+                    if deleted_t > 0:
+                        logger.info(f"[Scheduler:Job] Cleaned {deleted_t} old rows from {table}")
+                except Exception:
+                    pass  # Table may not exist yet
+
             conn.close()
 
-            deleted = before - after
-            if deleted > 0:
-                logger.info(f"[Scheduler:Job] Cleaned up {deleted} old news articles.")
+            if total_deleted > 0:
+                logger.info(f"[Scheduler:Job] Total cleanup: {total_deleted} rows ({news_deleted} news + market data).")
             else:
-                logger.info("[Scheduler:Job] No old articles to clean up.")
+                logger.info("[Scheduler:Job] No old data to clean up.")
 
         except Exception as e:
             logger.error(f"[Scheduler:Job] Cleanup failed: {e}")
@@ -332,6 +451,108 @@ class PipelineScheduler:
         except Exception as e:
             logger.error(f"[Scheduler:Job] Bidirectional embedding failed: {e}")
 
+    def _refit_calibrator(self):
+        """Job: Re-fit Platt scaling on latest trade outcomes for confidence calibration."""
+        logger.info("[Scheduler:Job] Re-fitting confidence calibrator...")
+        try:
+            from confidence_calibrator import ConfidenceCalibrator
+            calibrator = ConfidenceCalibrator()
+            calibrator.fit_platt_scaling()
+            report = calibrator.report()
+            logger.info(f"[Scheduler:Job] Calibrator re-fit complete.\n{report}")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Calibrator re-fit failed: {e}")
+
+    def _analyze_forgone_threshold(self):
+        """
+        Job: Compare forgone vs executed P&L weekly.
+        If forgone consistently outperforms executed → we're blocking good trades → log recommendation.
+        This is diagnostic only — does NOT auto-change thresholds (user reviews via Telegram).
+        """
+        logger.info("[Scheduler:Job] Analyzing forgone vs executed P&L...")
+        try:
+            from forgone_pnl_engine import ForgonePnLEngine
+            engine = ForgonePnLEngine()
+            summary = engine.weekly_summary()
+
+            forgone_trades = summary.get("forgone_trades", {})
+            executed_trades = summary.get("executed_trades", {})
+
+            forgone_pnl = forgone_trades.get("total_pnl_pct", 0)
+            executed_pnl = executed_trades.get("total_pnl_pct", 0)
+            forgone_count = forgone_trades.get("count", 0)
+            executed_count = executed_trades.get("count", 0)
+
+            analysis = (
+                f"[Forgone Analysis] Week: Forgone={forgone_pnl:+.2f}% ({forgone_count} signals) | "
+                f"Executed={executed_pnl:+.2f}% ({executed_count} trades)"
+            )
+
+            if forgone_pnl > executed_pnl and forgone_pnl > 0:
+                gap = forgone_pnl - executed_pnl
+                analysis += f" | GAP: +{gap:.2f}% left on table. Consider LOWERING confidence threshold."
+                logger.warning(analysis)
+
+                # Send Telegram alert about missed opportunity
+                try:
+                    from telegram_notifier import AITelegramNotifier
+                    notifier = AITelegramNotifier()
+                    notifier.send_alert(
+                        f"📊 Forgone P&L Alert: Blocked signals would have earned {forgone_pnl:+.2f}% "
+                        f"vs executed {executed_pnl:+.2f}% (gap: {gap:.2f}%). "
+                        f"Consider lowering confidence_threshold for more trades.",
+                        level="WARNING"
+                    )
+                except Exception:
+                    pass
+            elif executed_pnl > forgone_pnl:
+                analysis += f" | GOOD: Guardrails saved {executed_pnl - forgone_pnl:.2f}% by blocking bad signals."
+                logger.info(analysis)
+            else:
+                logger.info(analysis)
+
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Forgone threshold analysis failed: {e}")
+
+    def _fetch_market_data_derivatives(self):
+        """Job: Fetch derivatives data (OI, funding, L/S ratio) from Bybit."""
+        logger.info("[Scheduler:Job] Fetching derivatives market data...")
+        try:
+            from market_data_fetcher import MarketDataFetcher
+            fetcher = MarketDataFetcher()
+            count = fetcher.fetch_derivatives()
+            logger.info(f"[Scheduler:Job] Derivatives: {count} pair(s) fetched.")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Derivatives fetch failed: {e}")
+
+    def _fetch_market_data_defi_macro(self):
+        """Job: Fetch DeFi (TVL, stablecoins) + Macro (FRED) + CrossAsset (yfinance) + Trends data."""
+        logger.info("[Scheduler:Job] Fetching DeFi + Macro + CrossAsset + Trends market data...")
+        try:
+            from market_data_fetcher import MarketDataFetcher
+            fetcher = MarketDataFetcher()
+            d = fetcher.fetch_defi()
+            m = fetcher.fetch_macro()
+            c = fetcher.fetch_cross_asset()
+            t = fetcher.fetch_google_trends()
+            logger.info(f"[Scheduler:Job] DeFi: {d}, Macro: {m}, CrossAsset: {c}, Trends: {t} metrics.")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] DeFi/Macro/CrossAsset/Trends fetch failed: {e}")
+
+    def _process_new_backtests(self):
+        """Job: Process any new backtest result files into PatternStatStore + ChromaDB + MAGMA."""
+        logger.info("[Scheduler:Job] Processing new backtest results...")
+        try:
+            from backtest_embedder import BacktestEmbedder
+            embedder = BacktestEmbedder()
+            count = embedder.process_all(enrich=True)
+            if count > 0:
+                logger.info(f"[Scheduler:Job] Processed {count} new backtest trades into RAG pipeline.")
+            else:
+                logger.info("[Scheduler:Job] No new backtest results to process.")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Backtest processing failed: {e}")
+
     def _prune_magma_memory(self):
         """Job: Clean up old/weak linkages inside MAGMA memory tables."""
         logger.info("[Scheduler:Job] Pruning MAGMAMemory edges...")
@@ -342,6 +563,123 @@ class PipelineScheduler:
             logger.info(f"[Scheduler:Job] Removed {deleted} MAGMA connections.")
         except Exception as e:
             logger.error(f"[Scheduler:Job] MAGMAMemory pruning failed: {e}")
+
+    def _opportunity_scan(self):
+        """Phase 20 Job: Wide screening of all pairs for trading opportunities."""
+        logger.info("[Scheduler:Job] Running opportunity scanner...")
+        try:
+            from opportunity_scanner import OpportunityScanner
+            scanner = OpportunityScanner()
+            results = scanner.scan_pairs_from_db(top_n=30)
+            if results:
+                logger.info(f"[Scheduler:Job] Opportunity scan: {len(results)} pairs scored, "
+                           f"top: {results[0]['pair']}({results[0]['composite_score']})")
+            else:
+                logger.info("[Scheduler:Job] Opportunity scan: no cached scores yet (run via strategy first)")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Opportunity scan failed: {e}")
+
+    def _rebalance_agent_weights(self):
+        """Phase 20 Job: Rebalance agent weights based on 30-day performance."""
+        logger.info("[Scheduler:Job] Rebalancing agent weights...")
+        try:
+            from agent_pool import AgentPool
+            pool = AgentPool()
+            pool.rebalance_weights()
+            logger.info("[Scheduler:Job] Agent weight rebalancing complete.")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Agent rebalance failed: {e}")
+
+    def _update_cross_pair_intel(self):
+        """Phase 20 Job: Update cross-pair market intelligence."""
+        logger.info("[Scheduler:Job] Updating cross-pair intelligence...")
+        try:
+            from cross_pair_intel import CrossPairIntel
+            intel = CrossPairIntel()
+            intel.update()
+            latest = intel.get_latest()
+            bias = latest.get("market_bias", {}).get("bias", "UNKNOWN")
+            funding = latest.get("funding_heatmap", {}).get("crowding", "unknown")
+            logger.info(f"[Scheduler:Job] Cross-pair intel: market_bias={bias}, funding={funding}")
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Cross-pair intel failed: {e}")
+
+    def _event_driven_reanalysis(self):
+        """Phase 20 Job: Check for extreme market events and trigger re-analysis.
+        Runs every 5 min. If F&G hits extreme (<15 or >85) or funding rate spikes,
+        force Evidence Engine re-analysis of affected pairs."""
+        try:
+            import sqlite3
+            from ai_config import AI_DB_PATH
+            conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+
+            triggered = False
+            trigger_reason = ""
+
+            # Check Fear & Greed for extreme values
+            fng_row = conn.execute(
+                "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            if fng_row:
+                fng = int(fng_row["value"])
+                if fng < 15 or fng > 85:
+                    triggered = True
+                    trigger_reason = f"F&G extreme: {fng}"
+
+            # Check for extreme funding rates (any pair)
+            if not triggered:
+                extreme_funding = conn.execute("""
+                    SELECT pair, funding_rate FROM derivatives_data
+                    WHERE ABS(funding_rate) > 0.001
+                    AND timestamp > datetime('now', '-15 minutes')
+                    ORDER BY ABS(funding_rate) DESC LIMIT 1
+                """).fetchone()
+                if extreme_funding:
+                    triggered = True
+                    trigger_reason = f"Funding spike: {extreme_funding['pair']} {float(extreme_funding['funding_rate'])*100:.3f}%"
+
+            conn.close()
+
+            if triggered:
+                logger.warning(f"[Phase20:EventTrigger] {trigger_reason} → forcing Evidence Engine re-analysis")
+                try:
+                    from evidence_engine import EvidenceEngine
+                    engine = EvidenceEngine()
+                    # Re-analyze top pairs from opportunity_scores
+                    conn2 = sqlite3.connect(AI_DB_PATH, timeout=10)
+                    conn2.row_factory = sqlite3.Row
+                    pairs = conn2.execute("""
+                        SELECT pair FROM opportunity_scores
+                        WHERE id IN (SELECT MAX(id) FROM opportunity_scores GROUP BY pair)
+                        ORDER BY composite_score DESC LIMIT 10
+                    """).fetchall()
+                    conn2.close()
+
+                    for p in pairs:
+                        try:
+                            result = engine.generate_signal(p["pair"], {"current_price": 1, "_event_trigger": trigger_reason})
+                            logger.info(f"[Phase20:EventTrigger] {p['pair']} re-analyzed: "
+                                       f"{result['signal']} conf={result['confidence']:.2f}")
+                        except Exception:
+                            pass
+
+                    # Send Telegram alert
+                    try:
+                        from telegram_notifier import AITelegramNotifier
+                        notifier = AITelegramNotifier()
+                        notifier.send_alert(
+                            f"Event Trigger: {trigger_reason}. Re-analyzed top 10 pairs.",
+                            level="WARNING"
+                        )
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    logger.error(f"[Phase20:EventTrigger] Re-analysis failed: {e}")
+
+        except Exception as e:
+            logger.debug(f"[Phase20:EventTrigger] Event check failed: {e}")
 
     def _send_daily_summary(self):
         """Job: Aggregate stats and send daily Telegram summary."""
@@ -436,6 +774,195 @@ class PipelineScheduler:
             }
             for job in self.scheduler.get_jobs()
         ]
+
+
+    def _auto_backtest_bootstrap(self):
+        """
+        Phase 21: Auto Backtest & Bootstrap — daily at 03:00 UTC.
+
+        Runs freqtrade backtesting on top traded pairs, then feeds results
+        into PatternStatStore + ChromaDB + Calibrator. This solves the
+        cold-start problem (pattern_trades=0) by continuously generating
+        backtest data.
+
+        Flow:
+          1. Get top 10 most-traded pairs from tradesv3.sqlite
+          2. Create temp config with StaticPairList (VolumePairList not supported in backtest)
+          3. Run freqtrade backtesting (last 30 days, or incremental 1 day)
+          4. Feed results into BacktestEmbedder → PatternStatStore + ChromaDB
+          5. Clean up old backtest results (>30 days)
+        """
+        import subprocess
+        import tempfile
+        logger.info("[Scheduler:AutoBacktest] Starting auto backtest & bootstrap...")
+
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(base_dir, "..", "config_bybit_testnet_futures.json")
+            if not os.path.exists(config_path):
+                # Try alternative paths
+                for p in [
+                    os.path.join(base_dir, "..", "config_bybit_testnet_futures.json"),
+                    os.path.join(base_dir, "config_bybit_testnet_futures.json"),
+                ]:
+                    if os.path.exists(p):
+                        config_path = p
+                        break
+
+            # 1. Get top 10 pairs from recent trades
+            pairs = self._get_top_traded_pairs(10)
+            if not pairs:
+                pairs = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+                         "DOGE/USDT:USDT", "ADA/USDT:USDT"]
+                logger.info(f"[Scheduler:AutoBacktest] No trade history, using default pairs")
+
+            logger.info(f"[Scheduler:AutoBacktest] Pairs: {pairs}")
+
+            # 2. Create temp config with StaticPairList (backtesting needs this)
+            override_config = {
+                "pairlists": [{"method": "StaticPairList"}],
+                "exchange": {"pair_whitelist": pairs},
+                "dry_run": True,  # backtesting always dry_run
+            }
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='bt_auto_',
+                                             dir='/tmp', delete=False) as tf:
+                json.dump(override_config, tf)
+                override_path = tf.name
+
+            # 3. Calculate timerange (last 30 days for first run, last 2 days incremental)
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            bt_results_dir = os.path.join(base_dir, "backtest_results")
+
+            # Check if we have recent backtests (incremental mode)
+            recent_backtest = False
+            if os.path.isdir(bt_results_dir):
+                for f in os.listdir(bt_results_dir):
+                    if f.endswith('.zip'):
+                        fstat = os.stat(os.path.join(bt_results_dir, f))
+                        age_hours = (now.timestamp() - fstat.st_mtime) / 3600
+                        if age_hours < 48:
+                            recent_backtest = True
+                            break
+
+            if recent_backtest:
+                # Incremental: last 3 days
+                start = (now - timedelta(days=3)).strftime("%Y%m%d")
+                mode = "incremental"
+            else:
+                # Full: last 30 days
+                start = (now - timedelta(days=30)).strftime("%Y%m%d")
+                mode = "full"
+
+            end = now.strftime("%Y%m%d")
+            timerange = f"{start}-{end}"
+            logger.info(f"[Scheduler:AutoBacktest] Mode={mode}, timerange={timerange}")
+
+            # 4. Download data first (if needed)
+            freqtrade_bin = os.path.join(base_dir, "..", ".venv", "bin", "freqtrade")
+            if not os.path.exists(freqtrade_bin):
+                freqtrade_bin = "freqtrade"  # Try PATH
+
+            try:
+                dl_cmd = [
+                    freqtrade_bin, "download-data",
+                    "--config", config_path,
+                    "--config", override_path,
+                    "--timerange", timerange,
+                    "--timeframe", "1h",
+                ]
+                dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600,
+                                          cwd=os.path.join(base_dir, ".."))
+                if dl_result.returncode == 0:
+                    logger.info(f"[Scheduler:AutoBacktest] Data download complete")
+                else:
+                    logger.warning(f"[Scheduler:AutoBacktest] Data download warning: {dl_result.stderr[:200]}")
+            except subprocess.TimeoutExpired:
+                logger.warning("[Scheduler:AutoBacktest] Data download timed out (10min), proceeding with existing data")
+            except Exception as e:
+                logger.warning(f"[Scheduler:AutoBacktest] Data download failed: {e}")
+
+            # 5. Run backtest
+            bt_cmd = [
+                freqtrade_bin, "backtesting",
+                "--strategy", "AIFreqtradeSizer",
+                "--config", config_path,
+                "--config", override_path,
+                "--timerange", timerange,
+                "--timeframe", "1h",
+                "--export", "trades",
+            ]
+
+            logger.info(f"[Scheduler:AutoBacktest] Running: {' '.join(bt_cmd)}")
+            bt_result = subprocess.run(bt_cmd, capture_output=True, text=True, timeout=1800,
+                                      cwd=os.path.join(base_dir, ".."))
+
+            if bt_result.returncode != 0:
+                logger.error(f"[Scheduler:AutoBacktest] Backtest failed (rc={bt_result.returncode}): "
+                           f"{bt_result.stderr[:500]}")
+                return
+
+            logger.info(f"[Scheduler:AutoBacktest] Backtest complete")
+
+            # 6. Feed results into PatternStatStore + ChromaDB
+            try:
+                from backtest_embedder import BacktestEmbedder
+                embedder = BacktestEmbedder()
+                count = embedder.process_all(results_dir=bt_results_dir, enrich=True)
+                logger.info(f"[Scheduler:AutoBacktest] Bootstrap loaded {count} trades into AI pipeline")
+            except Exception as e:
+                logger.error(f"[Scheduler:AutoBacktest] Bootstrap failed: {e}")
+
+            # 7. Clean up temp config
+            try:
+                os.unlink(override_path)
+            except Exception:
+                pass
+
+            # 8. Clean up old backtest results (>60 days — research: 60d optimal for crypto)
+            if os.path.isdir(bt_results_dir):
+                cutoff = now.timestamp() - (60 * 86400)
+                for f in os.listdir(bt_results_dir):
+                    fpath = os.path.join(bt_results_dir, f)
+                    try:
+                        if os.path.isfile(fpath) and os.stat(fpath).st_mtime < cutoff:
+                            os.unlink(fpath)
+                            logger.info(f"[Scheduler:AutoBacktest] Cleaned old file: {f}")
+                    except Exception:
+                        pass
+
+            logger.info("[Scheduler:AutoBacktest] Auto backtest & bootstrap complete.")
+
+        except subprocess.TimeoutExpired:
+            logger.error("[Scheduler:AutoBacktest] Backtest timed out (30min)")
+        except Exception as e:
+            logger.error(f"[Scheduler:AutoBacktest] Failed: {e}")
+
+    def _get_top_traded_pairs(self, n: int = 10) -> list:
+        """Get top N most-traded pairs from Freqtrade's trade history."""
+        try:
+            # Try tradesv3.sqlite first
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            trade_db = os.path.join(base_dir, "tradesv3.sqlite")
+            if not os.path.exists(trade_db):
+                trade_db = os.path.join(base_dir, "..", "user_data", "tradesv3.sqlite")
+
+            if os.path.exists(trade_db):
+                conn = sqlite3.connect(trade_db, timeout=10)
+                rows = conn.execute(
+                    "SELECT pair, COUNT(*) as cnt FROM trades GROUP BY pair ORDER BY cnt DESC LIMIT ?",
+                    (n,)
+                ).fetchall()
+                conn.close()
+                if rows:
+                    return [r[0] for r in rows]
+
+            # Fallback: read from config pair_whitelist or hardcoded
+            return []
+        except Exception as e:
+            logger.debug(f"[Scheduler:AutoBacktest] Could not get top pairs: {e}")
+            return []
 
 
 if __name__ == "__main__":

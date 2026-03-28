@@ -59,7 +59,7 @@ class HybridRetriever:
             logger.error("[HybridRetriever] DualEmbeddingPipeline unavailable. Search will be degraded.")
 
         # FlashRank + ColBERT via model server HTTP (replaces in-process loading)
-        self._flashrank_http = httpx.Client(timeout=30)
+        self._flashrank_http = httpx.Client(timeout=60)  # FlashRank is fast but give breathing room
         self._flashrank_last_fail = 0.0
         self._flashrank_available = False
         self.colbert_reranker = None

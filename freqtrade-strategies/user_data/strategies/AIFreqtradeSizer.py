@@ -39,12 +39,14 @@ class AIFreqtradeSizer(IStrategy):
     startup_candle_count = 400  # EMA 200 + daily RSI warmup + multi-timeframe resampling
     position_adjustment_enable = True  # Phase 22: DCA + partial exit via adjust_trade_position
 
-    # Minimal ROI (handled mostly by AI and custom stoploss)
+    # Minimal ROI — let winners run longer (Dobrynskaya 2021: crypto momentum lasts weeks)
+    # Old "240": 0 was killing +0.5% winners at 4h. Extended to give trailing stop time to work.
     minimal_roi = {
-        "0": 0.15,
-        "60": 0.05,
-        "120": 0.02,
-        "240": 0
+        "0": 0.15,       # 15% immediate (unlikely, but protects windfall)
+        "60": 0.05,      # 5% after 1h
+        "120": 0.03,     # 3% after 2h (was 2% — slightly more room)
+        "360": 0.015,    # 1.5% after 6h (new — was 0% at 4h)
+        "720": 0.005,    # 0.5% after 12h (new — let it breathe)
     }
 
     # Stoploss (Wide, rely on dynamic trailing/custom stoploss)
@@ -59,7 +61,7 @@ class AIFreqtradeSizer(IStrategy):
     # ── Hyperopt Parameters (Phase 22) ──────────────────────────────────
     # These make ALL key thresholds tunable via: freqtrade hyperopt --spaces entry exit stake protection
     confidence_threshold = DecimalParameter(0.30, 0.80, decimals=2, default=0.50, space='buy', optimize=True, load=True)
-    atr_stoploss_mult = DecimalParameter(1.5, 5.0, decimals=1, default=3.0, space='protection', optimize=True, load=True)
+    atr_stoploss_mult = DecimalParameter(1.5, 5.0, decimals=1, default=2.5, space='protection', optimize=True, load=True)
     fg_extreme_threshold = IntParameter(15, 30, default=20, space='buy', optimize=True, load=True)
     stale_trade_hours = IntParameter(4, 24, default=8, space='sell', optimize=True, load=True)
     leverage_max = DecimalParameter(1.0, 5.0, decimals=1, default=2.0, space='buy', optimize=True, load=True)
@@ -98,9 +100,13 @@ class AIFreqtradeSizer(IStrategy):
         # Phase 18: Staggered batching — process 10 pairs per batch, 6 min apart
         self._batch_queue = []          # Pairs waiting for fetch in current cycle
         self._batch_index = 0           # Current position in queue
-        self._batch_size = 10           # Pairs per batch
-        self._batch_interval_secs = 360  # 6 minutes between batches
+        self._batch_size = 5            # Smaller batches = higher quality per signal
+        self._batch_interval_secs = 480  # 8 min between batches — quality over speed
         self._last_batch_time = 0       # Unix timestamp of last batch
+
+        # Phase 20: OpportunityScanner singleton + rate limit (prevent file descriptor leak)
+        self._opp_scanner = None        # Lazy init singleton
+        self._last_scan_time = 0        # Rate limit: min 5 min between scans
 
         logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget, Telegram & Staggered Batching.")
 
@@ -128,6 +134,23 @@ class AIFreqtradeSizer(IStrategy):
                 return
             if not pairs:
                 return
+
+            # Phase 20: OpportunityScanner — screen pairs (rate-limited, singleton)
+            # Only scan every 5 minutes to prevent file descriptor leak
+            scan_age = _time.time() - self._last_scan_time
+            if scan_age >= 300:  # 5 minutes
+                try:
+                    if self._opp_scanner is None:
+                        from opportunity_scanner import OpportunityScanner
+                        self._opp_scanner = OpportunityScanner()
+                    scored = self._opp_scanner.scan_pairs(pairs, dp=self.dp, timeframe=self.timeframe, top_n=20)
+                    if scored:
+                        screened_pairs = [s["pair"] for s in scored]
+                        logger.info(f"[Phase20:Scanner] {len(pairs)} whitelist → {len(screened_pairs)} top opportunities")
+                        pairs = screened_pairs
+                    self._last_scan_time = _time.time()
+                except Exception as e:
+                    logger.warning(f"[Phase20:Scanner] Failed, using full whitelist: {e}")
 
             pairs_to_fetch = []
             for pair in pairs:
@@ -182,9 +205,9 @@ class AIFreqtradeSizer(IStrategy):
 
                 _t = _time.time()
                 if technical_data:
-                    resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=30)
+                    resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=120)
                 else:
-                    resp = session.get(f"{url}/signal/{p}", timeout=30)
+                    resp = session.get(f"{url}/signal/{p}", timeout=120)
                 lat = (_time.time() - _t) * 1000
                 logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code}, POST={'Y' if technical_data else 'N'})")
                 if resp.status_code == 200:
@@ -330,6 +353,11 @@ class AIFreqtradeSizer(IStrategy):
             "bb_mid": _safe(last.get('bb_mid')),
             "bb_lower": _safe(last.get('bb_lower')),
         }
+
+        # === RECENT CLOSES (for OHLCV pattern matching - Evidence Engine needs 21+) ===
+        n_closes = min(50, len(dataframe))
+        if n_closes >= 21:
+            td["recent_closes"] = [round(float(c), 6) for c in dataframe['close'].iloc[-n_closes:].tolist()]
 
         # === KEY LEVELS (Support/Resistance/Fibonacci/Pivots) ===
         levels = {}
@@ -582,12 +610,12 @@ class AIFreqtradeSizer(IStrategy):
                 response = requests.post(
                     f"{rag_service_url}/signal/{pair}",
                     json={"technical_data": technical_data},
-                    timeout=30
+                    timeout=120
                 )
             else:
                 response = requests.get(
                     f"{rag_service_url}/signal/{pair}",
-                    timeout=30  # Fast-fail: 20 pairs × 30s = 10min << 60min candle
+                    timeout=120  # Quality-first: give ColBERT+MADAM time to complete
                 )
             _latency = (_time.time() - _t0) * 1000
             logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code}, POST={'Y' if technical_data else 'N'})")
@@ -674,6 +702,10 @@ class AIFreqtradeSizer(IStrategy):
         dataframe['cdl_harami'] = ta.CDLHARAMI(dataframe)
         dataframe['cdl_inverted_hammer'] = ta.CDLINVERTEDHAMMER(dataframe)
 
+        # Chandelier Exit: highest high / lowest low over 14 bars (for trailing stoploss)
+        dataframe['highest_high_14'] = dataframe['high'].rolling(14).max()
+        dataframe['lowest_low_14'] = dataframe['low'].rolling(14).min()
+
         # Sentiment features from SQLite (used by custom_stake_amount)
         conn = self._get_sqlite_connection()
         if conn:
@@ -735,31 +767,46 @@ class AIFreqtradeSizer(IStrategy):
             is_bullish = signal_type == 'BULLISH'
             is_bearish = signal_type == 'BEARISH'
 
-            # Forgone P&L: Log signal as NOT executed here.
-            # Actual execution is confirmed in confirm_trade_entry().
-            if signal_type != 'NEUTRAL':
-                fid = self.forgone_engine.log_forgone_signal(
-                    pair=pair,
-                    signal_type="BULL" if is_bullish else "BEAR",
-                    confidence=confidence,
-                    entry_price=float(current_rate),
-                    was_executed=False  # Will be updated in confirm_trade_entry
-                )
-                if fid:
-                    self._forgone_ids[pair] = fid
+            # ═══ GRADUATED EXECUTION: Log ALL signals, trade only high-confidence ═══
+            # Philosophy: LOG EVERYTHING → TRADE SELECTIVELY
+            # Every signal (even conf=0.05) is shadow-logged for calibrator learning.
+            # Only conf>=0.55 directional signals become real trades (fee break-even ~0.55).
+            # The calibrator needs BOTH positive and negative examples to learn properly.
+            # Logging <0.30 = "look how bad this was" is just as valuable as "look how good".
+            # Shadow data proves: conf 0.30+ = +7.88% avg PnL, %83 win rate
+            # Lowered from 0.55 to 0.40 — sweet spot between fee break-even and missed alpha
+            REAL_TRADE_THRESHOLD = 0.40
 
-            # Set entry signals based on AI decision (only last candle)
-            # Trade-First: NEUTRAL defaults to enter_long=1 (min_stake sizing handles risk)
-            if is_bullish:
-                df.iloc[-1, df.columns.get_loc('enter_long')] = 1
-                logger.info(f"[Signal] {pair} → enter_long=1 (BULLISH conf={confidence:.2f})")
-            elif is_bearish:
-                df.iloc[-1, df.columns.get_loc('enter_short')] = 1
-                logger.info(f"[Signal] {pair} → enter_short=1 (BEARISH conf={confidence:.2f})")
+            # Determine execution mode for logging
+            if confidence >= REAL_TRADE_THRESHOLD and signal_type != 'NEUTRAL':
+                exec_mode = "REAL"
+            elif confidence >= 0.30:
+                exec_mode = "SHADOW"      # Decent signal, paper trade it
             else:
-                # NEUTRAL: Trade-First philosophy — confidence modulates SIZE not PERMISSION
+                exec_mode = "SHADOW_WEAK"  # Garbage signal, still log for learning
+
+            # Log EVERY signal to forgone engine (shadow or real)
+            sig_label = "BULL" if is_bullish else ("BEAR" if is_bearish else "NEUTRAL")
+            fid = self.forgone_engine.log_forgone_signal(
+                pair=pair,
+                signal_type=sig_label,
+                confidence=confidence,
+                entry_price=float(current_rate),
+                was_executed=(exec_mode == "REAL")
+            )
+            if fid:
+                self._forgone_ids[pair] = fid
+
+            # Set entry signals — ONLY for high-confidence directional signals
+            if exec_mode == "REAL" and is_bullish:
                 df.iloc[-1, df.columns.get_loc('enter_long')] = 1
-                logger.info(f"[Signal] {pair} → enter_long=1 (NEUTRAL default, min_stake sizing)")
+                logger.info(f"[Signal:REAL] {pair} → enter_long=1 (BULLISH conf={confidence:.2f})")
+            elif exec_mode == "REAL" and is_bearish:
+                df.iloc[-1, df.columns.get_loc('enter_short')] = 1
+                logger.info(f"[Signal:REAL] {pair} → enter_short=1 (BEARISH conf={confidence:.2f})")
+            else:
+                # Shadow trade: NO real entry, just learn from the outcome
+                logger.info(f"[Signal:{exec_mode}] {pair} → NO TRADE ({signal_type} conf={confidence:.2f}) — shadow tracking for calibrator")
         else:
             # Backtesting: Simple technical signals
             if 'rsi' in df.columns and 'macd' in df.columns:
@@ -800,37 +847,67 @@ class AIFreqtradeSizer(IStrategy):
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
         """
-        Dynamic ATR-based stoploss. Sizing manages risk, so we allow wide breathing room
-        but cut if trend drastically reverses (e.g. 3x ATR).
-        Handles both LONG and SHORT positions correctly.
+        Chandelier Exit — ATR-based trailing stoploss with confidence-adaptive distance.
+
+        Uses highest_high_14 (LONG) or lowest_low_14 (SHORT) as the anchor, not current_rate.
+        This creates a proper trailing stop that locks in profits as price advances.
+
+        Confidence modulates trailing distance (research: IDS 2025):
+          conf >= 0.80: 3.0x ATR (wide — stay in strong trend)
+          conf 0.60-0.79: 2.5x ATR (normal)
+          conf < 0.60: 2.0x ATR (tight — exit quickly on weak conviction)
+
+        References:
+          - Karassavidis et al. (2025) SSRN 5821842
+          - Palazzi (2025) Journal of Futures Markets
+          - LuxAlgo (2024): 2.0-2.5x ATR optimal for 1H crypto
         """
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if dataframe is None or len(dataframe) < 2:
+            return self.stoploss
+
         last_candle = dataframe.iloc[-1].squeeze()
 
-        if 'atr' in last_candle and current_rate > 0:
-            atr = last_candle['atr']
+        atr = last_candle.get('atr')
+        if not atr or atr != atr or current_rate <= 0:  # NaN check + sanity
+            return self.stoploss
 
-            mult = self.atr_stoploss_mult.value
+        atr = float(atr)
 
-            if trade.is_short:
-                # SHORT: stoploss is ABOVE current price
-                stop_price = current_rate + (mult * atr)
-                result = -((stop_price / current_rate) - 1)
-            else:
-                # LONG: stoploss is BELOW current price
-                stop_price = current_rate - (mult * atr)
-                result = (stop_price / current_rate) - 1
+        # Confidence-adaptive ATR multiplier
+        ai = self.ai_signal_cache.get(pair, {})
+        confidence = ai.get('confidence', 0.0)
 
-            # Sanity: result must be negative (a loss). If ATR is stale/huge, fall back.
-            if result >= 0:
-                logger.warning(f"[Stoploss] {pair} ATR-based SL would be >= current price "
-                               f"(atr={atr:.4f}, rate={current_rate:.4f}). Using hard stoploss.")
-                return self.stoploss
+        if confidence >= 0.80:
+            mult = 3.0   # Wide — high conviction, let it run
+        elif confidence >= 0.60:
+            mult = 2.5   # Normal — default Chandelier
+        else:
+            mult = 2.0   # Tight — low conviction, protect capital
 
-            # Never exceed hard stop of -0.20
-            return max(result, self.stoploss)
+        if trade.is_short:
+            # SHORT: trailing anchor = lowest low over 14 bars
+            anchor = last_candle.get('lowest_low_14')
+            if not anchor or anchor != anchor:
+                anchor = current_rate  # Fallback
+            anchor = float(anchor)
+            stop_price = anchor + (mult * atr)
+            result = -((stop_price / current_rate) - 1)
+        else:
+            # LONG: trailing anchor = highest high over 14 bars
+            anchor = last_candle.get('highest_high_14')
+            if not anchor or anchor != anchor:
+                anchor = current_rate  # Fallback
+            anchor = float(anchor)
+            stop_price = anchor - (mult * atr)
+            result = (stop_price / current_rate) - 1
 
-        return self.stoploss
+        # Sanity: result must be negative (a loss)
+        if result >= 0:
+            return self.stoploss
+
+        # Never exceed hard stop of -0.20
+        return max(result, self.stoploss)
 
     def _sync_portfolio_to_ai(self):
         """Bridge: Sync real exchange balance → AI modules (RiskBudget, Autonomy)."""
@@ -889,7 +966,7 @@ class AIFreqtradeSizer(IStrategy):
                 finally:
                     conn.close()
 
-            self._last_portfolio_sync = current_time if hasattr(self, '_last_portfolio_sync') else datetime.utcnow()
+            self._last_portfolio_sync = datetime.utcnow()
             logger.debug(f"[Portfolio Sync] {stake}: stake=${total:.2f} total_usd=${total_portfolio_usd:.2f} assets={len(all_balances)}")
         except Exception as e:
             logger.debug(f"[Portfolio Sync] Skipped: {e}")
@@ -974,11 +1051,50 @@ class AIFreqtradeSizer(IStrategy):
             except Exception:
                 pass
 
-            # Consume budget for this trade
+            # Phase 20: Opportunity score boost — reuse singleton scanner
+            try:
+                if self._opp_scanner is None:
+                    from opportunity_scanner import OpportunityScanner
+                    self._opp_scanner = OpportunityScanner()
+                opp_score = self._opp_scanner.get_cached_score(pair)
+                if opp_score and opp_score > 70:
+                    final_stake *= 1.15  # 15% boost for high-opportunity pairs
+                    logger.info(f"[Phase20:Opportunity] {pair} stake boosted 15% (score={opp_score:.0f})")
+            except Exception:
+                pass
+
+            # ═══ EQUAL RISK PER TRADE (Van Tharp CPR Formula) ═══
+            # Stake = Risk_per_trade / stoploss_distance_pct
+            # This prevents BTC ($322 stake, -$42 loss) vs HOOK ($0.60 stake, -$0.03 loss) asymmetry
+            # With this cap, every trade risks the SAME dollar amount regardless of pair
             atr_volatility = last_candle.get('atr', 0.02) / current_rate if current_rate > 0 else 0.02
+            if atr_volatility > 0:
+                portfolio_val = self.risk_budget.portfolio_value
+                risk_pct = 0.005  # 0.5% of portfolio per trade (conservative for cold start)
+                risk_per_trade = portfolio_val * risk_pct
+                # Stoploss distance ≈ 2.5x ATR as fraction of price
+                stoploss_distance = min(2.5 * atr_volatility, 0.15)  # cap at 15%
+                stoploss_distance = max(stoploss_distance, 0.01)     # floor at 1%
+                max_risk_stake = risk_per_trade / stoploss_distance
+                if final_stake > max_risk_stake:
+                    logger.info(f"[EqualRisk] {pair} stake capped: ${final_stake:.2f} → ${max_risk_stake:.2f} "
+                               f"(risk=${risk_per_trade:.0f}, SL={stoploss_distance:.1%})")
+                    final_stake = max_risk_stake
+
+            # Consume budget for this trade
             self.risk_budget.consume_budget(final_stake, atr_volatility, confidence)
 
-        # Trade-First: ALWAYS trade at least min_stake. Confidence modulates SIZE, never PERMISSION.
+        # Graduated Kelly: confidence determines fraction of Kelly
+        # Cold-start phase: conservative sizing until calibrator matures
+        # conf 0.55-0.65 → quarter Kelly, 0.65-0.80 → half Kelly, 0.80+ → full Kelly
+        if self.dp.runmode.value in ('dry_run', 'live') and confidence < 0.80:
+            if confidence < 0.65:
+                final_stake *= 0.25   # Quarter Kelly — cautious, still learning
+            elif confidence < 0.80:
+                final_stake *= 0.50   # Half Kelly — proven track record
+            # conf >= 0.80: full Kelly (no reduction)
+
+        # Min stake floor: only enforce for real trades that passed the threshold
         if final_stake < min_stake:
             final_stake = min_stake
 
@@ -1060,6 +1176,102 @@ class AIFreqtradeSizer(IStrategy):
         except Exception as e:
             logger.warning(f"[Portfolio] Update failed: {e}")
 
+        # ══════════════════════════════════════════════════════════════
+        # LIVE FEEDBACK LOOP: Update ALL learning modules on trade close
+        # This is the CORE self-improvement mechanism.
+        # ══════════════════════════════════════════════════════════════
+        trade_pnl_pct = (trade.calc_profit_ratio(rate) * 100) if hasattr(trade, 'calc_profit_ratio') else 0.0
+
+        # 1. PatternStatStore — record this trade for future statistical queries
+        try:
+            from pattern_stat_store import PatternStatStore
+            pss = PatternStatStore(db_path=self.db_path)
+            # Get cached indicators from trade entry
+            ai_meta = {}
+            try:
+                ai_meta = {
+                    'confidence': trade.custom_data.get('ai_confidence', {}).get('value'),
+                    'signal': trade.custom_data.get('ai_signal', {}).get('value'),
+                    'reasoning': trade.custom_data.get('ai_reasoning', {}).get('value'),
+                    'rsi': trade.custom_data.get('entry_rsi', {}).get('value'),
+                    'fng': trade.custom_data.get('entry_fng', {}).get('value'),
+                }
+            except Exception:
+                pass
+
+            pss.ingest_trade({
+                'pair': pair,
+                'strategy': self.name,
+                'direction': 'short' if trade.is_short else 'long',
+                'entry_date': str(trade.open_date),
+                'exit_date': str(current_time),
+                'profit_pct': round(trade_pnl_pct, 3),
+                'duration_hours': round((current_time - trade.open_date).total_seconds() / 3600, 2) if trade.open_date else None,
+                'exit_reason': exit_reason,
+                'entry_price': trade.open_rate,
+                'rsi_bucket': PatternStatStore.classify_rsi(float(ai_meta['rsi'])) if ai_meta.get('rsi') else None,
+                'fng_bucket': PatternStatStore.classify_fng(int(ai_meta['fng'])) if ai_meta.get('fng') else None,
+            })
+            logger.info(f"[LiveFeedback:PatternStatStore] {pair} trade recorded: {trade_pnl_pct:+.2f}%")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:PatternStatStore] {pair} failed: {e}")
+
+        # 2. BidirectionalRAG — generate lesson from this trade
+        try:
+            from bidirectional_rag import BidirectionalRAG
+            bidi = BidirectionalRAG(db_path=self.db_path)
+            reasoning = ai_meta.get('reasoning', '') or 'No reasoning available'
+            bidi.evaluate_trade_outcome(
+                decision_id=0, pair=pair,
+                signal='BULLISH' if not trade.is_short else 'BEARISH',
+                outcome_pnl=trade_pnl_pct, reasoning=str(reasoning)
+            )
+            logger.info(f"[LiveFeedback:BidiRAG] {pair} lesson generated")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:BidiRAG] {pair} failed: {e}")
+
+        # 3. MAGMA — reinforce causal edges based on outcome
+        try:
+            from magma_memory import MAGMAMemory
+            magma = MAGMAMemory(db_path=self.db_path)
+            outcome = "win" if trade_pnl_pct > 0 else "loss"
+            magma.add_edge("causal", pair.lower().replace("/", "_"), f"trade_{outcome}",
+                           exit_reason, metadata={"pnl": trade_pnl_pct})
+            logger.info(f"[LiveFeedback:MAGMA] {pair} causal edge: {outcome} via {exit_reason}")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:MAGMA] {pair} failed: {e}")
+
+        # 4. Update ai_decisions outcome (for ConfidenceCalibrator to use in next re-fit)
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn.execute("""
+                UPDATE ai_decisions SET outcome_pnl = ?, outcome_duration = ?
+                WHERE pair = ? AND outcome_pnl IS NULL
+                ORDER BY timestamp DESC LIMIT 1
+            """, (trade_pnl_pct,
+                  int((current_time - trade.open_date).total_seconds() / 60) if trade.open_date else None,
+                  pair))
+            conn.commit()
+            conn.close()
+            logger.info(f"[LiveFeedback:Calibrator] {pair} decision outcome updated: {trade_pnl_pct:+.2f}%")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:Calibrator] {pair} outcome update failed: {e}")
+
+        # 5. Phase 20: Agent Pool — update agent track records
+        try:
+            from agent_pool import AgentPool
+            pool = AgentPool(db_path=self.db_path)
+            pool.record_trade_outcome(
+                pair=pair,
+                outcome_pnl=trade_pnl_pct,
+                regime=ai_meta.get('regime'),
+                signal='BULLISH' if not trade.is_short else 'BEARISH'
+            )
+            logger.info(f"[LiveFeedback:AgentPool] {pair} agent outcomes updated: {trade_pnl_pct:+.2f}%")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:AgentPool] {pair} agent update failed: {e}")
+
         # Phase 22: Notify exit via strategy message
         try:
             self.dp.send_msg(
@@ -1123,12 +1335,14 @@ class AIFreqtradeSizer(IStrategy):
                 "only_per_pair": True,
             },
             {
-                # Nuclear option: only if account drawdown >25% (very loose)
+                # Nuclear option: only if account drawdown >50%
+                # Testnet: Equal Risk sizing limits per-trade loss to 0.5% of portfolio
+                # so 50% drawdown would require ~100 consecutive losses — nearly impossible
                 "method": "MaxDrawdown",
-                "lookback_period_candles": 72,  # 3 days window
+                "lookback_period_candles": 168,  # 7 days window (was 3 days — too short)
                 "trade_limit": 20,
-                "stop_duration_candles": 4,  # Brief pause, not long lock
-                "max_allowed_drawdown": 0.25,  # 25% (was 15%) — testnet, let it breathe
+                "stop_duration_candles": 2,  # Brief pause, resume quickly
+                "max_allowed_drawdown": 0.50,  # 50% (was 25% — kept locking bot)
             },
         ]
 
@@ -1176,14 +1390,14 @@ class AIFreqtradeSizer(IStrategy):
         signal = cached.get('signal', 'NEUTRAL')
         confidence = cached.get('confidence', 0.0)
 
-        if not trade.is_short and signal == 'BEARISH' and confidence >= 0.75:
+        if not trade.is_short and signal == 'BEARISH' and confidence >= 0.55:
             return f"ai_flip_bearish_{confidence:.0%}"
-        if trade.is_short and signal == 'BULLISH' and confidence >= 0.75:
+        if trade.is_short and signal == 'BULLISH' and confidence >= 0.55:
             return f"ai_flip_bullish_{confidence:.0%}"
 
-        # 3. CONFIDENCE DEGRADATION
+        # 3. CONFIDENCE DEGRADATION — exit if confidence dropped significantly
         entry_conf = trade.get_custom_data("ai_confidence", 0.5)
-        if isinstance(entry_conf, (int, float)) and entry_conf > 0.7 and confidence < 0.3:
+        if isinstance(entry_conf, (int, float)) and entry_conf > 0.55 and confidence < 0.30:
             return f"confidence_drop_{entry_conf:.0%}_to_{confidence:.0%}"
 
         # 4. FEAR & GREED CRASH
@@ -1198,9 +1412,27 @@ class AIFreqtradeSizer(IStrategy):
         except Exception:
             pass
 
-        # 5. FIRST-HOUR CRASH
-        if hours_held <= 1.0 and current_profit <= -0.07:
-            return "first_hour_7pct_loss"
+        # 5. FIRST-HOUR CRASH — dynamic ATR-based threshold (was fixed 7%)
+        # Wen et al. (2022): crypto intraday reversal exists, fixed % is too aggressive
+        # for high-ATR coins. 2.5x ATR as % of price = pair-appropriate threshold.
+        if hours_held <= 1.0 and current_profit < 0:
+            try:
+                dataframe_fh, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                if dataframe_fh is not None and len(dataframe_fh) > 0 and 'atr' in dataframe_fh.columns:
+                    atr_val = float(dataframe_fh['atr'].iloc[-1])
+                    atr_pct = atr_val / current_rate if current_rate > 0 else 0.03
+                    dynamic_threshold = -(2.5 * atr_pct)  # 2.5x ATR as loss threshold
+                    dynamic_threshold = max(dynamic_threshold, -0.15)  # Never wider than 15%
+                    dynamic_threshold = min(dynamic_threshold, -0.03)  # Never tighter than 3%
+                    if current_profit <= dynamic_threshold:
+                        return f"first_hour_atr_loss_{abs(current_profit):.1%}"
+                else:
+                    # Fallback: fixed 7% if no ATR data
+                    if current_profit <= -0.07:
+                        return "first_hour_7pct_loss"
+            except Exception:
+                if current_profit <= -0.07:
+                    return "first_hour_7pct_loss"
 
         # 6. LOG EVERYTHING for testnet analysis (even when NOT exiting)
         # This data is gold when we switch to real money

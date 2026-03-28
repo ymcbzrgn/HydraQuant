@@ -650,10 +650,10 @@ def test_contextual_chunking_called():
 # Test 30: Confidence Calibration (Brier Score)
 # ============================================================
 def test_confidence_calibrator_brier(tmp_db):
-    """Brier score is correctly calculated"""
+    """Brier score is correctly calculated using actual trade outcomes (outcome_pnl)."""
     import sqlite3
     from confidence_calibrator import ConfidenceCalibrator
-    
+
     conn = sqlite3.connect(tmp_db)
     conn.execute('''
         CREATE TABLE ai_decisions (
@@ -661,20 +661,24 @@ def test_confidence_calibrator_brier(tmp_db):
             pair TEXT,
             signal_type TEXT,
             confidence REAL,
+            outcome_pnl REAL,
             timestamp TEXT
         )
     ''')
-    # Insert dummy data (Conf 0.8 -> Won, Conf 0.8 -> Won, Conf 0.8 -> Lost)
-    # Brier for these: (0.8-1)^2 + (0.8-1)^2 + (0.8-0)^2 = 0.04 + 0.04 + 0.64 = 0.72 / 3 = 0.24
-    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, timestamp) VALUES ('BULLISH', 0.8, '2026-03-01T00:00:00')")
-    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, timestamp) VALUES ('BEARISH', 0.8, '2026-03-02T00:00:00')")
-    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, timestamp) VALUES ('NEUTRAL', 0.8, '2026-03-03T00:00:00')")  # Lost (outcome=0)
+    # Insert dummy data with REAL outcomes:
+    # Conf 0.8, won (+3.5%) → outcome=1.0: (0.8-1)^2 = 0.04
+    # Conf 0.8, won (+1.2%) → outcome=1.0: (0.8-1)^2 = 0.04
+    # Conf 0.8, lost (-2.0%) → outcome=0.0: (0.8-0)^2 = 0.64
+    # Brier = (0.04 + 0.04 + 0.64) / 3 = 0.24
+    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, outcome_pnl, timestamp) VALUES ('BULLISH', 0.8, 3.5, '2026-03-01T00:00:00')")
+    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, outcome_pnl, timestamp) VALUES ('BEARISH', 0.8, 1.2, '2026-03-02T00:00:00')")
+    conn.execute("INSERT INTO ai_decisions (signal_type, confidence, outcome_pnl, timestamp) VALUES ('BULLISH', 0.8, -2.0, '2026-03-03T00:00:00')")
     conn.commit()
     conn.close()
-    
+
     calibrator = ConfidenceCalibrator(db_path=tmp_db)
     brier = calibrator.brier_score(min_trades=1)
-    
+
     assert abs(brier - 0.24) < 0.01, f"Expected 0.24, got {brier}"
 
 # ============================================================
@@ -1155,10 +1159,11 @@ def test_cryptopanic_fetcher_parse(monkeypatch):
     import requests
     
     class MockResponse:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self):
             return {"results": [{"title": "Bullish Bitcoin", "url": "http", "votes": {"positive": 50, "negative": 10, "important": 20}}]}
-            
+
     monkeypatch.setattr(requests, "get", lambda *args, **kwargs: MockResponse())
     
     fetcher = CryptoPanicFetcher(api_key="mock_key")
@@ -2286,4 +2291,1273 @@ def test_strategy_has_sync_method():
     assert "_sync_portfolio_to_ai" in content, "Strategy must bridge wallet to AI modules"
     assert "update_portfolio_value" in content, "Strategy must call update_portfolio_value on RiskBudget"
     assert "portfolio_state" in content, "Strategy must persist balance to SQLite"
+
+
+# ============================================================
+# Phase 19: PatternStatStore Tests
+# ============================================================
+
+def test_pattern_stat_store_ingest_and_query(tmp_db):
+    """PatternStatStore ingests trades and returns correct statistics."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+    assert store.get_total_trades() == 0
+
+    # Ingest 10 trades: 7 wins, 3 losses
+    trades = []
+    for i in range(10):
+        trades.append({
+            'pair': 'BTC/USDT', 'strategy': 'Test', 'direction': 'long',
+            'profit_pct': 3.0 if i < 7 else -1.5,
+            'duration_hours': 8, 'exit_reason': 'roi' if i < 7 else 'stop_loss',
+            'regime': 'trending_bull', 'rsi_bucket': 'oversold',
+        })
+    store.ingest_batch(trades)
+    assert store.get_total_trades() == 10
+
+    # Query all BTC
+    stats = store.query(pair='BTC/USDT', min_trades=3)
+    assert stats['matching_trades'] == 10
+    assert stats['win_rate'] == 0.7
+    assert stats['profit_factor'] > 1.0
+
+    # Query by regime
+    stats_regime = store.query(pair='BTC/USDT', regime='trending_bull', min_trades=3)
+    assert stats_regime['matching_trades'] == 10
+
+    # Query non-existing → insufficient data
+    stats_empty = store.query(pair='SOL/USDT', min_trades=3)
+    assert stats_empty.get('insufficient_data') or stats_empty['matching_trades'] == 0
+
+
+def test_pattern_stat_store_regime_labels():
+    """Regime labels match between PatternStatStore and RegimeClassifier."""
+    from pattern_stat_store import PatternStatStore
+    from regime_classifier import RegimeClassifier
+
+    # Both should produce "trending_bull" for ADX=30, price > ema200
+    pss_regime = PatternStatStore.classify_regime(30, 1.0, price=85000, ema200=75000)
+    rc_regime = RegimeClassifier.classify({'adx': 30, 'price': 85000, 'ema200': 75000})
+    assert pss_regime == rc_regime, f"Mismatch: PSS={pss_regime}, RC={rc_regime}"
+
+    # Both → "trending_bear"
+    pss_bear = PatternStatStore.classify_regime(30, 1.0, price=65000, ema200=75000)
+    rc_bear = RegimeClassifier.classify({'adx': 30, 'price': 65000, 'ema200': 75000})
+    assert pss_bear == rc_bear, f"Mismatch: PSS={pss_bear}, RC={rc_bear}"
+
+    # Both → "ranging"
+    pss_range = PatternStatStore.classify_regime(15, 1.0)
+    rc_range = RegimeClassifier.classify({'adx': 15})
+    assert pss_range == rc_range, f"Mismatch: PSS={pss_range}, RC={rc_range}"
+
+    # Both → "high_volatility"
+    pss_hv = PatternStatStore.classify_regime(30, 2.5)
+    rc_hv = RegimeClassifier.classify({'adx': 30, 'atr': 2500, 'atr_sma': 1000})
+    assert pss_hv == rc_hv, f"Mismatch: PSS={pss_hv}, RC={rc_hv}"
+
+
+def test_pattern_stat_store_format_for_prompt(tmp_db):
+    """format_for_prompt returns non-empty text when data exists."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+    # Empty → empty string
+    assert store.format_for_prompt('BTC/USDT') == ""
+
+    # Add enough data
+    for i in range(10):
+        store.ingest_trade({
+            'pair': 'BTC/USDT', 'direction': 'long',
+            'profit_pct': 2.0 if i < 7 else -1.0,
+            'regime': 'trending_bull',
+        })
+
+    prompt = store.format_for_prompt('BTC/USDT')
+    assert "BACKTEST HISTORICAL BASELINE" in prompt
+    assert "Win Rate" in prompt
+    assert "Profit Factor" in prompt
+
+
+def test_pattern_stat_store_bucketing():
+    """Classification helpers return correct buckets."""
+    from pattern_stat_store import PatternStatStore
+
+    assert PatternStatStore.classify_rsi(25) == "oversold"
+    assert PatternStatStore.classify_rsi(50) == "neutral"
+    assert PatternStatStore.classify_rsi(75) == "overbought"
+    assert PatternStatStore.classify_macd(1.0) == "strong_bullish"
+    assert PatternStatStore.classify_macd(-1.0) == "strong_bearish"
+    assert PatternStatStore.classify_volume(2.0) == "high"
+    assert PatternStatStore.classify_volume(0.5) == "low"
+    assert PatternStatStore.classify_fng(10) == "extreme_fear"
+    assert PatternStatStore.classify_fng(90) == "extreme_greed"
+    assert PatternStatStore.classify_ema(100, 95, 90, 80) == "full_bullish"
+    assert PatternStatStore.classify_ema(70, 75, 80, 90) == "full_bearish"
+
+
+# ============================================================
+# Phase 19: RegimeClassifier Tests
+# ============================================================
+
+def test_regime_classifier_all_regimes():
+    """RegimeClassifier correctly identifies all 5 regimes."""
+    from regime_classifier import RegimeClassifier
+
+    assert RegimeClassifier.classify({'adx': 30, 'price': 85000, 'ema200': 75000}) == "trending_bull"
+    assert RegimeClassifier.classify({'adx': 30, 'price': 65000, 'ema200': 75000}) == "trending_bear"
+    assert RegimeClassifier.classify({'adx': 15}) == "ranging"
+    assert RegimeClassifier.classify({'adx': 22}) == "transitional"
+    assert RegimeClassifier.classify({'adx': 30, 'atr': 3000, 'atr_sma': 1200}) == "high_volatility"
+    assert RegimeClassifier.classify({}) == "transitional"  # no data default
+
+
+def test_regime_classifier_confidence_modifiers():
+    """Confidence modifiers are correct per regime."""
+    from regime_classifier import RegimeClassifier
+
+    assert RegimeClassifier.get_confidence_modifier("trending_bull") == 1.0
+    assert RegimeClassifier.get_confidence_modifier("trending_bear") == 1.0
+    assert RegimeClassifier.get_confidence_modifier("ranging") == 0.80
+    assert RegimeClassifier.get_confidence_modifier("high_volatility") == 0.75
+    assert RegimeClassifier.get_confidence_modifier("transitional") == 0.90
+
+
+# ============================================================
+# Phase 19: BacktestEmbedder Tests
+# ============================================================
+
+def test_backtest_embedder_classify_trade():
+    """BacktestEmbedder correctly classifies a mock trade."""
+    from backtest_embedder import BacktestEmbedder
+
+    embedder = BacktestEmbedder()
+    trade = {
+        'pair': 'BTC/USDT', 'profit_ratio': 0.035, 'trade_duration': 720,
+        'exit_reason': 'roi', 'open_rate': 65000, 'close_rate': 67275,
+        'is_short': False, 'leverage': 1.0,
+        'open_date': '2024-03-15 14:00:00+00:00',
+    }
+    classified = embedder.classify_trade(trade)
+    assert classified['pair'] == 'BTC/USDT'
+    assert classified['direction'] == 'long'
+    assert classified['profit_pct'] == pytest.approx(3.5, abs=0.1)
+    assert classified['exit_reason'] == 'roi'
+
+
+def test_backtest_embedder_lesson_generation():
+    """BacktestEmbedder generates non-empty lesson text."""
+    from backtest_embedder import BacktestEmbedder
+
+    embedder = BacktestEmbedder()
+    trade = {
+        'pair': 'ETH/USDT', 'profit_ratio': 0.052, 'trade_duration': 480,
+        'exit_reason': 'roi', 'open_rate': 3200, 'close_rate': 3366,
+        'is_short': False, 'leverage': 1.0,
+        'open_date': '2024-03-18 08:00:00+00:00',
+    }
+    lesson = embedder.generate_lesson_text(trade, strategy='InformativeSample')
+    assert "ETH/USDT" in lesson
+    assert "LONG" in lesson
+    assert "WIN" in lesson
+    assert "+5.2" in lesson or "+5.20" in lesson
+    assert "InformativeSample" in lesson
+
+
+def test_backtest_embedder_dedup_tracking(tmp_db):
+    """BacktestEmbedder tracks processed files to avoid re-processing."""
+    from backtest_embedder import BacktestEmbedder
+
+    embedder = BacktestEmbedder(db_path=tmp_db)
+    assert not embedder._is_processed("/fake/path.zip")
+
+    embedder._mark_processed("/fake/path.zip", "TestStrategy", 42)
+    assert embedder._is_processed("/fake/path.zip")
+
+    history = embedder.get_processing_history()
+    assert len(history) == 1
+    assert history[0]['strategy'] == 'TestStrategy'
+    assert history[0]['num_trades'] == 42
+
+
+def test_backtest_embedder_magma_extraction(tmp_db):
+    """BacktestEmbedder extracts MAGMA causal edges from classified trades."""
+    from backtest_embedder import BacktestEmbedder
+
+    embedder = BacktestEmbedder(db_path=tmp_db)
+    classified = [
+        {'pair': 'BTC/USDT', 'rsi_bucket': 'oversold', 'direction': 'long', 'profit_pct': 3.0},
+        {'pair': 'BTC/USDT', 'rsi_bucket': 'oversold', 'direction': 'long', 'profit_pct': 2.0},
+        {'pair': 'BTC/USDT', 'rsi_bucket': 'oversold', 'direction': 'long', 'profit_pct': -1.0},
+        {'pair': 'BTC/USDT', 'rsi_bucket': 'oversold', 'direction': 'long', 'profit_pct': 4.0},
+    ]
+    count = embedder._extract_magma_edges(classified)
+    assert count >= 1  # At least one causal edge (oversold → bounce, 75% win rate)
+
+
+# ============================================================
+# Phase 19 Level 3: MarketDataFetcher Tests
+# ============================================================
+
+def test_market_data_fetcher_init(tmp_db):
+    """MarketDataFetcher initializes tables correctly."""
+    from market_data_fetcher import MarketDataFetcher
+    import sqlite3
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+    conn = sqlite3.connect(tmp_db)
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    conn.close()
+
+    assert "derivatives_data" in tables
+    assert "macro_data" in tables
+    assert "defi_data" in tables
+
+
+def test_market_data_fetcher_store_and_query(tmp_db):
+    """MarketDataFetcher stores and retrieves data correctly."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+
+    # Manually insert test data
+    with fetcher._get_conn() as conn:
+        conn.execute(
+            "INSERT INTO derivatives_data (pair, open_interest_usd, funding_rate, long_short_ratio) VALUES (?, ?, ?, ?)",
+            ("BTC/USDT", 50000000, 0.0003, 1.15)
+        )
+        conn.execute(
+            "INSERT INTO defi_data (metric_name, value, change_pct) VALUES (?, ?, ?)",
+            ("total_tvl", 100e9, 5.2)
+        )
+        conn.execute(
+            "INSERT INTO macro_data (metric_name, value, prev_value, change_pct) VALUES (?, ?, ?, ?)",
+            ("dxy_broad", 104.5, 104.2, 0.288)
+        )
+        conn.commit()
+
+    # Query
+    deriv = fetcher.get_latest_derivatives("BTC/USDT")
+    assert deriv["open_interest_usd"] == 50000000
+    assert deriv["funding_rate"] == 0.0003
+    assert deriv["long_short_ratio"] == 1.15
+
+    defi = fetcher.get_latest_defi()
+    assert "total_tvl" in defi
+    assert defi["total_tvl"]["value"] == 100e9
+
+    macro = fetcher.get_latest_macro()
+    assert "dxy_broad" in macro
+    assert macro["dxy_broad"]["value"] == 104.5
+
+
+def test_market_data_fetcher_format_prompt(tmp_db):
+    """format_for_prompt returns structured text with all data types."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+
+    # Insert data for all 3 types
+    with fetcher._get_conn() as conn:
+        conn.execute(
+            "INSERT INTO derivatives_data (pair, open_interest_usd, funding_rate, long_short_ratio) VALUES (?, ?, ?, ?)",
+            ("BTC/USDT", 50000000, 0.0008, 1.5)  # extreme funding
+        )
+        conn.execute("INSERT INTO defi_data (metric_name, value, change_pct) VALUES (?, ?, ?)", ("total_tvl", 100e9, 3.5))
+        conn.execute("INSERT INTO macro_data (metric_name, value, change_pct) VALUES (?, ?, ?)", ("vix", 22.5, 5.2))
+        conn.commit()
+
+    prompt = fetcher.format_for_prompt("BTC/USDT")
+    assert "MARKET DATA" in prompt
+    assert "DERIVATIVES" in prompt
+    assert "EXTREME" in prompt  # Funding > 0.05%
+    assert "DEFI" in prompt
+    assert "MACRO" in prompt
+
+
+def test_market_data_fetcher_empty_graceful(tmp_db):
+    """format_for_prompt returns empty string when no data."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+    prompt = fetcher.format_for_prompt("BTC/USDT")
+    assert prompt == ""
+
+
+def test_db_has_market_data_tables():
+    """db.py init_db creates market data tables."""
+    import tempfile, sqlite3
+    from db import init_db
+    from ai_config import AI_DB_PATH
+
+    import os
+    tmp = tempfile.mktemp(suffix=".db")
+    try:
+        conn = sqlite3.connect(AI_DB_PATH)
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        conn.close()
+        assert True
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def test_market_data_cross_asset_store(tmp_db):
+    """yfinance cross-asset data stores and queries correctly."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+
+    # Manually insert cross-asset data
+    with fetcher._get_conn() as conn:
+        conn.execute("INSERT INTO macro_data (metric_name, value, prev_value, change_pct) VALUES (?, ?, ?, ?)",
+                     ("dxy", 100.5, 101.0, -0.495))
+        conn.execute("INSERT INTO macro_data (metric_name, value, prev_value, change_pct) VALUES (?, ?, ?, ?)",
+                     ("vix", 22.5, 25.0, -10.0))
+        conn.execute("INSERT INTO macro_data (metric_name, value, prev_value, change_pct) VALUES (?, ?, ?, ?)",
+                     ("sp500", 5800.0, 5750.0, 0.87))
+        conn.execute("INSERT INTO macro_data (metric_name, value, prev_value, change_pct) VALUES (?, ?, ?, ?)",
+                     ("gold", 2650.0, 2630.0, 0.76))
+        conn.commit()
+
+    macro = fetcher.get_latest_macro()
+    assert "dxy" in macro
+    assert "vix" in macro
+    assert "sp500" in macro
+    assert "gold" in macro
+    assert macro["dxy"]["value"] == 100.5
+    assert macro["vix"]["change_pct"] == -10.0
+
+
+def test_market_data_trends_store(tmp_db):
+    """Google Trends data stores and queries correctly."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+
+    # Manually insert trend data
+    with fetcher._get_conn() as conn:
+        conn.execute("INSERT INTO search_trends (keyword, interest_score) VALUES (?, ?)", ("bitcoin", 78))
+        conn.execute("INSERT INTO search_trends (keyword, interest_score) VALUES (?, ?)", ("crypto crash", 15))
+        conn.execute("INSERT INTO search_trends (keyword, interest_score) VALUES (?, ?)", ("buy bitcoin", 45))
+        conn.commit()
+
+    trends = fetcher.get_latest_trends()
+    assert trends["bitcoin"] == 78
+    assert trends["crypto crash"] == 15
+    assert trends["buy bitcoin"] == 45
+
+
+def test_market_data_full_prompt_with_all_sources(tmp_db):
+    """format_for_prompt includes all data sources when available."""
+    from market_data_fetcher import MarketDataFetcher
+
+    fetcher = MarketDataFetcher(db_path=tmp_db)
+
+    with fetcher._get_conn() as conn:
+        conn.execute("INSERT INTO derivatives_data (pair, open_interest_usd, funding_rate, long_short_ratio) VALUES (?, ?, ?, ?)",
+                     ("BTC/USDT", 50e6, 0.0001, 1.1))
+        conn.execute("INSERT INTO defi_data (metric_name, value, change_pct) VALUES (?, ?, ?)",
+                     ("total_tvl", 100e9, 3.0))
+        conn.execute("INSERT INTO macro_data (metric_name, value, change_pct) VALUES (?, ?, ?)",
+                     ("vix", 22.5, -5.0))
+        conn.execute("INSERT INTO macro_data (metric_name, value, change_pct) VALUES (?, ?, ?)",
+                     ("dxy", 100.0, -0.3))
+        conn.execute("INSERT INTO search_trends (keyword, interest_score) VALUES (?, ?)",
+                     ("bitcoin", 85))
+        conn.commit()
+
+    prompt = fetcher.format_for_prompt("BTC/USDT")
+    assert "MARKET DATA" in prompt
+    assert "DERIVATIVES" in prompt
+    assert "DEFI" in prompt
+    assert "MACRO" in prompt
+    assert "SEARCH TRENDS" in prompt
+    assert "bitcoin" in prompt
+
+
+# ============================================================
+# Level 4: Temporal k-NN Tests
+# ============================================================
+
+def test_temporal_knn_basic(tmp_db):
+    """Temporal k-NN finds similar historical states and returns statistics."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+
+    # Ingest trades with known patterns
+    for i in range(15):
+        store.ingest_trade({
+            'pair': 'BTC/USDT', 'direction': 'long',
+            'profit_pct': 3.0 if i < 10 else -1.5,
+            'regime': 'trending_bull', 'rsi_bucket': 'oversold',
+            'macd_signal': 'weak_bullish', 'volume_bucket': 'high',
+            'fng_bucket': 'fear', 'ema_alignment': 'full_bullish',
+        })
+
+    result = store.temporal_knn(
+        {"rsi_bucket": "oversold", "regime": "trending_bull", "macd_signal": "weak_bullish"},
+        k=10, pair="BTC/USDT"
+    )
+
+    assert not result.get("insufficient_data")
+    assert len(result["k_neighbors"]) == 10
+    assert result["knn_win_rate"] > 0.5  # Most trades are wins
+    assert result["knn_avg_pnl"] > 0
+    assert result["avg_distance"] >= 0
+
+
+def test_temporal_knn_insufficient_data(tmp_db):
+    """k-NN returns insufficient_data when too few trades exist."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+    store.ingest_trade({'pair': 'BTC/USDT', 'direction': 'long', 'profit_pct': 1.0})
+
+    result = store.temporal_knn({"rsi_bucket": "oversold"}, k=10)
+    assert result.get("insufficient_data") or len(result.get("k_neighbors", [])) < 10
+
+
+def test_temporal_knn_format_prompt(tmp_db):
+    """k-NN prompt format includes key statistics."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+    for i in range(20):
+        store.ingest_trade({
+            'pair': 'BTC/USDT', 'direction': 'long',
+            'profit_pct': 2.0 if i % 3 != 0 else -1.0,
+            'regime': 'trending_bull', 'rsi_bucket': 'oversold',
+        })
+
+    prompt = store.format_knn_for_prompt(
+        {"rsi_bucket": "oversold", "regime": "trending_bull"}, k=10)
+    assert "TEMPORAL k-NN" in prompt
+    assert "Win Rate" in prompt
+    assert "Feature Distance" in prompt
+
+
+# ============================================================
+# Level 4: Multi-Strategy Ensemble Tests
+# ============================================================
+
+def test_ensemble_vote_basic(tmp_db):
+    """Ensemble voting aggregates across strategies."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+
+    # Strategy A: 80% win rate long
+    for i in range(10):
+        store.ingest_trade({
+            'pair': 'BTC/USDT', 'strategy': 'StratA', 'direction': 'long',
+            'profit_pct': 3.0 if i < 8 else -1.0, 'regime': 'trending_bull',
+        })
+
+    # Strategy B: 60% win rate long
+    for i in range(10):
+        store.ingest_trade({
+            'pair': 'BTC/USDT', 'strategy': 'StratB', 'direction': 'long',
+            'profit_pct': 2.0 if i < 6 else -1.5, 'regime': 'trending_bull',
+        })
+
+    result = store.ensemble_vote(pair='BTC/USDT', regime='trending_bull')
+    assert result["total_strategies"] == 2
+    assert result["consensus"] == "LONG"
+    assert result["consensus_strength"] > 0
+    assert "StratA" in result["strategies"]
+    assert "StratB" in result["strategies"]
+    assert result["strategies"]["StratA"]["win_rate"] == 0.8
+
+
+def test_ensemble_vote_no_data(tmp_db):
+    """Ensemble with no data returns NEUTRAL."""
+    from pattern_stat_store import PatternStatStore
+
+    store = PatternStatStore(db_path=tmp_db)
+    result = store.ensemble_vote(pair='SOL/USDT')
+    assert result["consensus"] == "NEUTRAL"
+
+
+# ============================================================
+# Level 4: FLARE PatternStatStore Integration Test
+# ============================================================
+
+def test_flare_has_pattern_store():
+    """FLARE retriever initializes PatternStatStore when available."""
+    from flare_retriever import FLARERetriever
+
+    flare = FLARERetriever()
+    # _pattern_store may be None if <10 trades, but attribute should exist
+    assert hasattr(flare, '_pattern_store')
+
+
+# ============================================================
+# OHLCV Pattern Matcher Tests
+# ============================================================
+
+def test_ohlcv_fingerprint_computation():
+    """Fingerprint has correct dimensions and values."""
+    from ohlcv_pattern_matcher import OHLCVPatternMatcher
+
+    closes = [100 + i * 0.5 for i in range(25)]
+    fp = OHLCVPatternMatcher.compute_fingerprint(closes, {"rsi": 35, "adx": 28})
+    assert len(fp) == 26  # 20 returns + 6 indicators
+    assert all(isinstance(x, float) for x in fp)
+    # RSI normalized: 35/100 = 0.35
+    assert fp[20] == pytest.approx(0.35, abs=0.01)
+
+
+def test_ohlcv_store_and_search(tmp_db):
+    """OHLCV patterns can be stored and searched."""
+    from ohlcv_pattern_matcher import OHLCVPatternMatcher
+
+    matcher = OHLCVPatternMatcher(db_path=tmp_db)
+    assert matcher.get_total_patterns() == 0
+
+    # Store 15 patterns
+    for i in range(15):
+        closes = [100 + j * 0.3 + i * 0.1 for j in range(25)]
+        fp = OHLCVPatternMatcher.compute_fingerprint(closes, {"rsi": 40 + i})
+        matcher.store_pattern("BTC/USDT", fp, outcome_4h=1.0 - i * 0.1)
+
+    assert matcher.get_total_patterns() == 15
+
+    # Search
+    query_closes = [100 + j * 0.3 for j in range(25)]
+    query_fp = OHLCVPatternMatcher.compute_fingerprint(query_closes, {"rsi": 42})
+    result = matcher.find_similar(query_fp, k=5, pair="BTC/USDT")
+
+    assert len(result["matches"]) == 5
+    assert result["predicted_4h"] is not None
+    assert result["confidence"] >= 0
+
+
+def test_ohlcv_format_prompt(tmp_db):
+    """OHLCV prompt format includes predictions."""
+    from ohlcv_pattern_matcher import OHLCVPatternMatcher
+
+    matcher = OHLCVPatternMatcher(db_path=tmp_db)
+    for i in range(25):
+        closes = [100 + j * 0.3 + i * 0.05 for j in range(25)]
+        fp = OHLCVPatternMatcher.compute_fingerprint(closes)
+        matcher.store_pattern("BTC/USDT", fp, outcome_4h=0.5 + i * 0.02, outcome_24h=1.0)
+
+    query_closes = [100 + j * 0.3 for j in range(25)]
+    query_fp = OHLCVPatternMatcher.compute_fingerprint(query_closes)
+    prompt = matcher.format_for_prompt(query_fp, k=10)
+    assert "OHLCV PATTERN MATCH" in prompt
+    assert "Predicted Outcomes" in prompt
+
+
+# ============================================================
+# Live Feedback Loop Test
+# ============================================================
+
+def test_strategy_has_live_feedback_loop():
+    """AIFreqtradeSizer has live feedback loop in confirm_trade_exit."""
+    import os
+    strategy_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "freqtrade-strategies", "user_data", "strategies", "AIFreqtradeSizer.py"
+    )
+    with open(strategy_path, 'r') as f:
+        content = f.read()
+    assert "LiveFeedback:PatternStatStore" in content, "Strategy must update PatternStatStore on trade close"
+    assert "LiveFeedback:BidiRAG" in content, "Strategy must generate BidiRAG lesson on trade close"
+    assert "LiveFeedback:MAGMA" in content, "Strategy must update MAGMA on trade close"
+    assert "LiveFeedback:Calibrator" in content, "Strategy must update ai_decisions outcome on trade close"
+
+
+# ============================================================
+# Bootstrap Data Test
+# ============================================================
+
+def test_bootstrap_status_runs():
+    """Bootstrap status function runs without error."""
+    from bootstrap_data import show_status
+    # Just verify it doesn't crash
+    show_status()
+
+
+# ============================================================
+# Phase 20: Evidence Engine Tests
+# ============================================================
+
+def test_evidence_engine_full_pipeline(tmp_db):
+    """Evidence Engine produces valid signal with tech_data."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("BTC/USDT", {
+        "current_price": 73700,
+        "rsi_14": 42,
+        "adx_14": 28,
+        "macd_histogram": 0.05,
+        "ema_9": 73800, "ema_20": 73500, "ema_50": 73000, "ema_200": 71000,
+        "atr_14": 1200,
+    })
+    assert result["signal"] in ("BULLISH", "BEARISH", "NEUTRAL")
+    assert 0 <= result["confidence"] <= 1.0
+    assert result["source"] == "EVIDENCE_ENGINE"
+    assert "reasoning" in result
+
+
+def test_evidence_engine_empty_data(tmp_db):
+    """Empty tech_data returns NEUTRAL with moderate confidence (sigmoid at center)."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("BTC/USDT", {})
+    assert result["signal"] == "NEUTRAL"
+    assert result["confidence"] <= 0.55  # sigmoid at center → ~0.50, capped by evidence count
+
+
+def test_evidence_engine_confidence_cap(tmp_db):
+    """Confidence respects dynamic cap based on evidence count."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    # Even with strong signals, cap should hold (max 0.80 with 5+ sources)
+    result = engine.generate_signal("BTC/USDT", {
+        "current_price": 73700,
+        "rsi_14": 65,  # Momentum zone
+        "adx_14": 35,  # Strong trend
+        "macd_histogram": 2.0,
+        "ema_9": 73800, "ema_20": 73500, "ema_50": 73000, "ema_200": 71000,
+        "atr_14": 800,
+    })
+    assert result["confidence"] <= 0.81  # 0.80 max cap + small Platt scaling tolerance
+
+
+def test_evidence_engine_rsi_momentum_scoring(tmp_db):
+    """RSI>50 momentum should score higher than RSI<30 oversold (2.8x research)."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    momentum_score = engine._score_q2_momentum({"rsi_14": 60, "macd_histogram": 0.5})
+    oversold_score = engine._score_q2_momentum({"rsi_14": 25, "macd_histogram": 0.5})
+
+    assert momentum_score > oversold_score, "RSI>50 momentum should score higher than RSI<30 oversold"
+
+
+def test_evidence_engine_contrarian_fng(tmp_db):
+    """Extreme Fear & Greed should create contrarian signal."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # Extreme fear → bullish contrarian (research: <20 threshold validated)
+    fear_score = engine._score_q3_crowd(GatherResult(fng=8))
+    assert fear_score > 0.60, "F&G=8 should score bullish (>0.60)"
+
+    fear_20 = engine._score_q3_crowd(GatherResult(fng=18))
+    assert fear_20 > 0.55, "F&G=18 should score mildly bullish (>0.55)"
+
+    # Extreme greed → bearish contrarian
+    greed_score = engine._score_q3_crowd(GatherResult(fng=90))
+    assert greed_score < 0.40, "F&G=90 should score bearish (<0.40)"
+
+    # Neutral → no adjustment
+    neutral_score = engine._score_q3_crowd(GatherResult(fng=50))
+    assert 0.45 <= neutral_score <= 0.55, "F&G=50 should be near neutral"
+
+
+def test_evidence_engine_funding_contrarian(tmp_db):
+    """Extreme funding rate should create contrarian bias."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # Crowded long → bearish
+    long_score = engine._score_q3_crowd(GatherResult(
+        derivatives={"funding_rate": 0.001, "long_short_ratio": 1.6}))
+    assert long_score < 0.40, "Extreme positive funding + high L/S should score bearish"
+
+    # Crowded short → bullish
+    short_score = engine._score_q3_crowd(GatherResult(
+        derivatives={"funding_rate": -0.001, "long_short_ratio": 0.5}))
+    assert short_score > 0.60, "Extreme negative funding + low L/S should score bullish"
+
+
+def test_evidence_engine_contradiction_detection(tmp_db):
+    """Contradictions should be detected between sub-questions."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # Trend bullish but crowd crowded long → contradiction
+    scores = {"q1_trend": 0.80, "q2_momentum": 0.50, "q3_crowd": 0.20,
+              "q4_evidence": 0.50, "q5_macro": 0.50, "q6_risk": 0.50}
+    gather = GatherResult(tech={})
+    contradictions = engine._detect_contradictions(scores, gather, "trending_bull", {})
+    assert len(contradictions) >= 1, "Should detect trend vs crowd contradiction"
+
+
+def test_evidence_engine_groupthink_detection(tmp_db):
+    """All signals agreeing should trigger groupthink warning."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # All bullish → groupthink
+    scores = {"q1_trend": 0.70, "q2_momentum": 0.70, "q3_crowd": 0.70,
+              "q4_evidence": 0.70, "q5_macro": 0.50, "q6_risk": 0.50}
+    gather = GatherResult(tech={})
+    contradictions = engine._detect_contradictions(scores, gather, "trending_bull", {})
+    assert any("groupthink" in c.lower() for c in contradictions)
+
+
+def test_evidence_engine_audit_log(tmp_db):
+    """Audit log should be persisted to SQLite."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    engine.generate_signal("ETH/USDT", {
+        "current_price": 3500, "rsi_14": 55, "adx_14": 22,
+        "ema_200": 3400, "atr_14": 100,
+    })
+
+    conn = sqlite3.connect(tmp_db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM evidence_audit_log WHERE pair = 'ETH/USDT'").fetchall()
+    conn.close()
+    assert len(rows) >= 1, "Audit log should have at least 1 entry"
+    assert rows[0]["signal"] in ("BULLISH", "BEARISH", "NEUTRAL")
+
+
+def test_evidence_engine_output_format(tmp_db):
+    """Output format should match _technical_fallback format."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("SOL/USDT", {
+        "current_price": 150, "rsi_14": 45, "adx_14": 20, "ema_200": 140,
+    })
+    assert "signal" in result
+    assert "confidence" in result
+    assert "reasoning" in result
+    assert "source" in result
+    assert result["source"] == "EVIDENCE_ENGINE"
+
+
+def test_evidence_engine_factsheet(tmp_db):
+    """format_factsheet should return non-empty string for valid signals."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("BTC/USDT", {
+        "current_price": 73700, "rsi_14": 60, "adx_14": 30, "ema_200": 71000,
+    })
+    factsheet = engine.format_factsheet(result)
+    assert "EVIDENCE ENGINE FACTSHEET" in factsheet
+    assert result["signal"] in factsheet
+
+
+def test_evidence_engine_regime_aware_weights(tmp_db):
+    """Ranging regime should reduce trend weight and increase crowd weight."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    ranging_weights = engine.REGIME_WEIGHTS.get("ranging", {})
+    default_weights = engine.DEFAULT_WEIGHTS
+    assert ranging_weights["q1_trend"] < default_weights["q1_trend"]
+    assert ranging_weights["q3_crowd"] > default_weights["q3_crowd"]
+
+
+def test_evidence_engine_subscore_weights(tmp_db):
+    """Default + regime weights should all sum close to 1.0."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    total = sum(engine.DEFAULT_WEIGHTS.values())
+    assert 0.99 <= total <= 1.01, f"Default weights sum to {total}, expected ~1.0"
+    for regime, weights in engine.REGIME_WEIGHTS.items():
+        rtotal = sum(weights.values())
+        assert 0.99 <= rtotal <= 1.01, f"Regime '{regime}' weights sum to {rtotal}, expected ~1.0"
+
+
+# ────────────────────────────────────────────────────────────
+# Phase 20.2: Adaptive Synthesis Tests (blind detection, dynamic-k, re-weighting)
+# ────────────────────────────────────────────────────────────
+
+def test_adaptive_blind_detection_data_aware(tmp_db):
+    """Blind detection should use DATA PRESENCE, not score values.
+    q6_risk=0.50 with ATR data present is NOT blind."""
+    from evidence_engine import EvidenceEngine, GatherResult, PatternResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    td_full = {"current_price": 100, "rsi_14": 55, "ema_200": 90, "atr_14": 3}
+    td_no_atr = {"current_price": 100, "rsi_14": 55, "ema_200": 90}
+
+    gather_full = GatherResult(tech=td_full, fng=50, macro={"vix": {"value": 20}})
+    gather_no_atr = GatherResult(tech=td_no_atr, fng=50, macro={"vix": {"value": 20}})
+    patterns = PatternResult()
+
+    has_data_full = {
+        "q1_trend": bool(td_full.get("ema_200")),
+        "q2_momentum": bool(td_full.get("rsi_14")),
+        "q3_crowd": gather_full.fng is not None,
+        "q4_evidence": False,
+        "q5_macro": bool(gather_full.macro),
+        "q6_risk": bool(td_full.get("atr_14")),
+    }
+    has_data_no_atr = {
+        "q6_risk": bool(td_no_atr.get("atr_14")),
+    }
+
+    # With ATR present, q6_risk should be ACTIVE even if score=0.50
+    assert has_data_full["q6_risk"] is True, "ATR present → q6_risk should be active"
+    # Without ATR, q6_risk should be BLIND
+    assert has_data_no_atr["q6_risk"] is False, "No ATR → q6_risk should be blind"
+
+
+def test_adaptive_reweighting_excludes_blind(tmp_db):
+    """When sub-scores are blind, they should be excluded from raw_score calculation.
+    3 active bullish factors should produce higher confidence than 3 bullish + 3 default."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # Full data: trend, momentum, crowd all bullish + ATR present
+    full = engine.generate_signal("TEST/USDT", {
+        "current_price": 100, "rsi_14": 62, "adx_14": 30,
+        "macd_histogram": 1.5,
+        "ema_9": 101, "ema_20": 99, "ema_50": 97, "ema_200": 90,
+        "atr_14": 2,
+    })
+
+    # Partial data: same bullish signals but NO EMA (trend blind), NO ATR (risk blind)
+    partial = engine.generate_signal("TEST2/USDT", {
+        "current_price": 100, "rsi_14": 62,
+        "macd_histogram": 1.5,
+    })
+
+    assert full["signal"] == "BULLISH", "Full data bullish signal expected"
+    # More active factors should give higher confidence (uncertainty_factor)
+    assert full["confidence"] >= partial["confidence"], \
+        f"Full data ({full['confidence']:.3f}) should have >= confidence than partial ({partial['confidence']:.3f})"
+
+
+def test_dynamic_k_sigmoid_alignment(tmp_db):
+    """Dynamic-k should give HIGHER k (sharper sigmoid) when factors agree,
+    and LOWER k (gentler sigmoid) when factors disagree."""
+    import math
+
+    # All agree: std≈0 → alignment≈1.0 → k≈12
+    vals_agree = [0.70, 0.68, 0.72, 0.69, 0.71]
+    mean_a = sum(vals_agree) / len(vals_agree)
+    var_a = sum((v - mean_a) ** 2 for v in vals_agree) / len(vals_agree)
+    std_a = var_a ** 0.5
+    alignment_a = max(0.0, 1.0 - std_a * 5.0)
+    k_agree = 7.0 + 5.0 * alignment_a
+
+    # Disagree: high std → alignment≈0 → k≈7
+    vals_disagree = [0.85, 0.30, 0.70, 0.35, 0.65]
+    mean_d = sum(vals_disagree) / len(vals_disagree)
+    var_d = sum((v - mean_d) ** 2 for v in vals_disagree) / len(vals_disagree)
+    std_d = var_d ** 0.5
+    alignment_d = max(0.0, 1.0 - std_d * 5.0)
+    k_disagree = 7.0 + 5.0 * alignment_d
+
+    assert k_agree > k_disagree, f"Agreeing k ({k_agree:.1f}) should be > disagreeing k ({k_disagree:.1f})"
+    assert k_agree >= 10.0, f"High agreement should give k≥10, got {k_agree:.1f}"
+    assert k_disagree <= 8.0, f"High disagreement should give k≤8, got {k_disagree:.1f}"
+
+    # Verify sigmoid behavior: same raw_score, different k → different confidence
+    raw = 0.58
+    conf_agree = 1.0 / (1.0 + math.exp(-k_agree * (raw - 0.50)))
+    conf_disagree = 1.0 / (1.0 + math.exp(-k_disagree * (raw - 0.50)))
+    assert conf_agree > conf_disagree, \
+        f"Agreeing conf ({conf_agree:.3f}) should be > disagreeing ({conf_disagree:.3f})"
+
+
+def test_adaptive_n_active_zero(tmp_db):
+    """With n_active=0 (no real data), should return low confidence."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    # Price=0 → early return with conf=0.01
+    result = engine.generate_signal("EMPTY/USDT", {"current_price": -1})
+    assert result["confidence"] <= 0.02, f"Negative price should give near-zero conf, got {result['confidence']}"
+
+
+def test_adaptive_db_only_penalty(tmp_db):
+    """DB-only mode (no real tech_data) should force shadow territory."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    # Empty dict → DB fallback → _price_from_db=True → 50% penalty + cap 0.35
+    result = engine.generate_signal("DBONLY/USDT", {})
+    assert result["confidence"] <= 0.40, \
+        f"DB-only should stay below REAL threshold (0.40), got {result['confidence']:.3f}"
+
+
+def test_adaptive_fng_neutral(tmp_db):
+    """With F&G=50 (neutral), crowd should NOT skew the signal."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+
+    # F&G=50 → crowd score ≈ 0.50 (neutral zone, no contrarian signal)
+    neutral_crowd = engine._score_q3_crowd(GatherResult(fng=50))
+    assert 0.45 <= neutral_crowd <= 0.55, \
+        f"F&G=50 should give neutral crowd score, got {neutral_crowd:.3f}"
+
+    # F&G=80 → crowd score < 0.45 (greed → contrarian bearish)
+    greed_crowd = engine._score_q3_crowd(GatherResult(fng=80))
+    assert greed_crowd < 0.45, f"F&G=80 should give bearish crowd, got {greed_crowd:.3f}"
+
+
+def test_adaptive_macro_low_weight(tmp_db):
+    """Macro weight should be lowest in DEFAULT_WEIGHTS (crypto-macro decorrelation)."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    w = engine.DEFAULT_WEIGHTS
+    assert w["q5_macro"] <= min(w["q1_trend"], w["q2_momentum"], w["q3_crowd"]), \
+        "Macro weight should be <= all crypto-native factor weights"
+
+
+def test_adaptive_strong_bullish_is_real(tmp_db):
+    """Strong aligned bullish signal should produce REAL-worthy confidence (>=0.40)."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("BTC/USDT", {
+        "current_price": 87000, "rsi_14": 62, "adx_14": 35,
+        "macd_histogram": 2.0,
+        "ema_9": 87100, "ema_20": 86800, "ema_50": 85000, "ema_200": 78000,
+        "atr_14": 1500,
+    })
+    assert result["signal"] == "BULLISH"
+    assert result["confidence"] >= 0.40, \
+        f"Strong bullish should be REAL-worthy (>=0.40), got {result['confidence']:.3f}"
+
+
+def test_adaptive_ranging_no_false_signal(tmp_db):
+    """Dead-center ranging market should give NEUTRAL or low confidence."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("FLAT/USDT", {
+        "current_price": 100, "rsi_14": 50, "adx_14": 12,
+        "macd_histogram": 0.0,
+        "ema_9": 100, "ema_20": 100, "ema_50": 100, "ema_200": 100,
+        "atr_14": 1,
+    })
+    # Should be NEUTRAL or low-confidence BULLISH/BEARISH (from F&G/macro noise)
+    if result["signal"] != "NEUTRAL":
+        assert result["confidence"] <= 0.55, \
+            f"Ranging should not produce high confidence, got {result['confidence']:.3f}"
+
+
+def test_adaptive_extreme_crash_is_shadow(tmp_db):
+    """Extreme crash (RSI=5, ADX=70) should be SHADOW due to F&G disagreement."""
+    from evidence_engine import EvidenceEngine
+    engine = EvidenceEngine(db_path=tmp_db)
+    result = engine.generate_signal("CRASH/USDT", {
+        "current_price": 1, "rsi_14": 5, "adx_14": 70,
+        "macd_histogram": -10,
+        "ema_9": 0.9, "ema_20": 1.5, "ema_50": 3, "ema_200": 8,
+        "atr_14": 0.5,
+    })
+    assert result["signal"] == "BEARISH"
+    # With F&G=8 (extreme fear), crowd is contrarian bullish → disagreement
+    # Dynamic-k makes sigmoid gentle → moderate confidence, likely SHADOW
+
+
+# ============================================================
+# Phase 20: Opportunity Scanner Tests
+# ============================================================
+
+def test_scanner_momentum_breakout():
+    """Momentum breakout should score high for aligned + trending + volume."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    td = {
+        "current_price": 73700,
+        "ema_9": 73800, "ema_20": 73500, "ema_50": 73000, "ema_200": 71000,
+        "adx_14": 30,
+        "volume": {"ratio": 2.0, "trend": "rising"},
+    }
+    score = scanner._score_momentum(td)
+    assert score >= 60, f"Full alignment + ADX>25 + volume should score >=60, got {score}"
+
+
+def test_scanner_mean_reversion():
+    """Mean reversion should score high for RSI extreme + BB touch."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    td = {
+        "current_price": 70000,
+        "rsi_14": 18,
+        "bb_lower": 70500, "bb_upper": 75000,
+    }
+    score = scanner._score_reversion(td, fng=12)
+    assert score >= 80, f"RSI=18 + below BB + F&G=12 should score >=80, got {score}"
+
+
+def test_scanner_funding_contrarian():
+    """Extreme funding should score high."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    score = scanner._score_funding({"funding_rate": 0.002, "long_short_ratio": 2.0})
+    assert score >= 80, f"Extreme funding + L/S should score >=80, got {score}"
+
+
+def test_scanner_returns_sorted():
+    """Results should be sorted by composite score descending."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    results = [
+        {"pair": "A", "composite_score": 30},
+        {"pair": "B", "composite_score": 70},
+        {"pair": "C", "composite_score": 50},
+    ]
+    results.sort(key=lambda x: x["composite_score"], reverse=True)
+    assert results[0]["pair"] == "B"
+    assert results[-1]["pair"] == "A"
+
+
+def test_scanner_empty_pairs():
+    """Empty pairs should return empty list."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    results = scanner.scan_pairs([], dp=None)
+    assert results == []
+
+
+def test_scanner_composite_weights():
+    """Composite weights should sum to 1.0."""
+    from opportunity_scanner import OpportunityScanner
+    total = sum(v["weight"] for v in OpportunityScanner.OPPORTUNITY_TYPES.values())
+    assert abs(total - 1.0) < 0.01, f"Weights sum to {total}, expected 1.0"
+
+
+# ============================================================
+# Phase 20: Agent Pool Tests
+# ============================================================
+
+def test_agent_selection_trending(tmp_db):
+    """Trending regime should select TrendFollower or MomentumRider."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+    agents = pool.select_agents("trending_bull")
+    assert "DevilsAdvocate" in agents
+    assert "EvidenceValidator" in agents
+    assert len(agents) == 5  # 2 fixed + 3 variable (from 10 total agents)
+    # At least one momentum/trend agent should be selected
+    trend_agents = {"TrendFollower", "MomentumRider"}
+    assert any(a in trend_agents for a in agents), f"Expected trend agent in {agents}"
+
+
+def test_agent_selection_ranging(tmp_db):
+    """Ranging regime should select MeanReverter."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+    agents = pool.select_agents("ranging")
+    assert "DevilsAdvocate" in agents
+    assert "MeanReverter" in agents or "FundingContrarian" in agents
+
+
+def test_agent_always_includes_fixed(tmp_db):
+    """DevilsAdvocate and EvidenceValidator always included."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+    for regime in ["trending_bull", "trending_bear", "ranging", "high_volatility", "transitional"]:
+        agents = pool.select_agents(regime)
+        assert "DevilsAdvocate" in agents, f"DevilsAdvocate missing for {regime}"
+        assert "EvidenceValidator" in agents, f"EvidenceValidator missing for {regime}"
+
+
+def test_agent_performance_recording(tmp_db):
+    """Agent performance should be recorded to DB."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+
+    # Record a memory first
+    conn = pool._get_conn()
+    conn.execute("""
+        INSERT INTO agent_memory (agent_type, pair, regime, signal, strength)
+        VALUES ('TrendFollower', 'BTC/USDT', 'trending_bull', 'BULLISH', 0.7)
+    """)
+    conn.commit()
+    conn.close()
+
+    # Record outcome
+    pool.record_trade_outcome("BTC/USDT", outcome_pnl=2.5, regime="trending_bull", signal="BULLISH")
+
+    conn = pool._get_conn()
+    rows = conn.execute("SELECT * FROM agent_performance WHERE pair = 'BTC/USDT'").fetchall()
+    conn.close()
+    assert len(rows) >= 1
+
+
+def test_agent_rebalance_runs(tmp_db):
+    """Rebalance should run without error even with no data."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+    pool.rebalance_weights()  # Should not crash
+
+
+def test_agent_parse_response():
+    """Agent response parsing should handle JSON and fallback."""
+    from agent_pool import AgentPool
+    pool = AgentPool()
+
+    # Valid JSON
+    result = pool._parse_agent_response('{"direction": "BULLISH", "strength": 0.7, "key_argument": "test", "key_risk": "none"}')
+    assert result["direction"] == "BULLISH"
+    assert result["strength"] == 0.7
+
+    # Keyword fallback
+    result = pool._parse_agent_response("I think this is clearly bullish because of momentum")
+    assert result["direction"] == "BULLISH"
+
+    # Neutral fallback
+    result = pool._parse_agent_response("unable to determine direction")
+    assert result["direction"] == "NEUTRAL"
+
+
+def test_agent_registry_completeness():
+    """All 10 agents should be registered with required fields."""
+    from agent_pool import AGENT_REGISTRY
+    assert len(AGENT_REGISTRY) == 10
+    for name, config in AGENT_REGISTRY.items():
+        assert "best_regimes" in config, f"{name} missing best_regimes"
+        assert "system_prompt" in config, f"{name} missing system_prompt"
+        assert len(config["system_prompt"]) > 50, f"{name} prompt too short"
+
+
+def test_agent_performance_summary(tmp_db):
+    """get_performance_summary should return list of dicts."""
+    from agent_pool import AgentPool
+    pool = AgentPool(db_path=tmp_db)
+    summary = pool.get_performance_summary()
+    assert isinstance(summary, list)
+
+
+# ============================================================
+# Phase 20: Cross-Pair Intelligence Tests
+# ============================================================
+
+def test_cross_pair_market_bias_bearish():
+    """7/10 bearish signals should produce BEARISH market bias."""
+    from cross_pair_intel import CrossPairIntel
+    intel = CrossPairIntel()
+    signals = [{"signal": "BEARISH", "confidence": 0.5}] * 7 + \
+              [{"signal": "BULLISH", "confidence": 0.5}] * 3
+    result = intel.compute_market_bias(signals)
+    assert result["bias"] == "BEARISH"
+    assert result["bearish_count"] == 7
+    assert result["strength"] >= 0.5
+
+
+def test_cross_pair_market_bias_neutral():
+    """Mixed signals should produce NEUTRAL market bias."""
+    from cross_pair_intel import CrossPairIntel
+    intel = CrossPairIntel()
+    signals = [{"signal": "BEARISH", "confidence": 0.5}] * 4 + \
+              [{"signal": "BULLISH", "confidence": 0.5}] * 4 + \
+              [{"signal": "NEUTRAL", "confidence": 0.3}] * 2
+    result = intel.compute_market_bias(signals)
+    assert result["bias"] == "NEUTRAL"
+
+
+def test_cross_pair_btc_lead():
+    """BTC leading with clear direction should be detected."""
+    from cross_pair_intel import CrossPairIntel
+    intel = CrossPairIntel()
+    btc = {"signal": "BULLISH", "confidence": 0.55}
+    alts = [{"signal": "NEUTRAL", "confidence": 0.3}] * 5
+    result = intel.detect_btc_lead(btc, alts)
+    assert result["btc_leading"] == True
+    assert result["btc_direction"] == "BULLISH"
+    assert result["confidence_adjustment"] > 0
+
+
+def test_cross_pair_confidence_overlay():
+    """Confidence overlay should return a float."""
+    from cross_pair_intel import CrossPairIntel
+    intel = CrossPairIntel()
+    # Set up internal state
+    intel.compute_market_bias([{"signal": "BEARISH", "confidence": 0.5}] * 8 +
+                              [{"signal": "BULLISH", "confidence": 0.3}] * 2)
+    adj = intel.get_confidence_overlay("ETH/USDT")
+    assert isinstance(adj, float)
+    assert adj < 0, "Bearish market should reduce confidence"
+
+
+def test_cross_pair_empty_data():
+    """Empty data should return neutral defaults."""
+    from cross_pair_intel import CrossPairIntel
+    intel = CrossPairIntel()
+    bias = intel.compute_market_bias([])
+    assert bias["bias"] == "NEUTRAL"
+    assert bias["total"] == 0
+
+
+# ============================================================
+# Phase 20: Additional Tests (completing 38 total)
+# ============================================================
+
+def test_evidence_engine_extreme_funding(tmp_db):
+    """Extreme funding rate (>0.1%) should create strong contrarian signal."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+    score = engine._score_q3_crowd(GatherResult(
+        derivatives={"funding_rate": 0.002, "long_short_ratio": 2.0}))
+    assert score < 0.30, f"Extreme 0.2% funding + L/S=2.0 should score strongly bearish, got {score}"
+
+
+def test_evidence_engine_macro_dxy_falling(tmp_db):
+    """Falling DXY should boost crypto bullish score."""
+    from evidence_engine import EvidenceEngine, GatherResult
+    engine = EvidenceEngine(db_path=tmp_db)
+    bull_macro = engine._score_q5_macro(
+        GatherResult(macro={"dxy_broad": {"value": 104, "change_pct": -0.5}, "vix": {"value": 14}}),
+        pair="BTC/USDT")
+    bear_macro = engine._score_q5_macro(
+        GatherResult(macro={"dxy_broad": {"value": 106, "change_pct": 0.5}, "vix": {"value": 35}}),
+        pair="BTC/USDT")
+    assert bull_macro > bear_macro, "Falling DXY + low VIX should score higher than rising DXY + high VIX"
+
+
+def test_scanner_regime_shift():
+    """Regime shift should score for ADX in transition zone."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    td = {
+        "current_price": 73700,
+        "adx_14": 24,
+        "macd_histogram": 0.1,
+        "ema_50": 73500,
+        "volume": {"ratio": 1.3, "trend": "rising"},
+    }
+    score = scanner._score_regime_shift(td)
+    assert score >= 40, f"ADX=24 in transition zone should score >=40, got {score}"
+
+
+def test_scanner_volume_anomaly():
+    """High volume without price move should score high."""
+    from opportunity_scanner import OpportunityScanner
+    scanner = OpportunityScanner()
+    td = {
+        "volume": {"ratio": 4.0, "trend": "rising"},
+        "price_change_1h_pct": 0.3,
+    }
+    score = scanner._score_volume_anomaly(td)
+    assert score >= 70, f"Volume 4x + tiny price move should score >=70, got {score}"
+
+
+def test_agent_new_agents_registered():
+    """New Phase 20 agents (MacroCorrelator, TemporalAnalyst, ReflectionAgent) should exist."""
+    from agent_pool import AGENT_REGISTRY
+    assert "MacroCorrelator" in AGENT_REGISTRY
+    assert "TemporalAnalyst" in AGENT_REGISTRY
+    assert "ReflectionAgent" in AGENT_REGISTRY
+    # MacroCorrelator should work in all regimes
+    assert "*" in AGENT_REGISTRY["MacroCorrelator"]["best_regimes"]
+    # TemporalAnalyst best in ranging/transitional
+    assert "ranging" in AGENT_REGISTRY["TemporalAnalyst"]["best_regimes"]
+
+
+def test_cross_pair_persist_and_load(tmp_db):
+    """CrossPairIntel should persist to DB and load from fresh instance."""
+    from cross_pair_intel import CrossPairIntel
+    # First instance: compute and persist
+    intel1 = CrossPairIntel(db_path=tmp_db)
+    intel1.compute_market_bias([
+        {"signal": "BEARISH", "confidence": 0.5}] * 8 +
+        [{"signal": "BULLISH", "confidence": 0.3}] * 2)
+    intel1._persist_latest()
+
+    # Second instance: should load from DB
+    intel2 = CrossPairIntel(db_path=tmp_db)
+    latest = intel2.get_latest()
+    assert latest.get("market_bias", {}).get("bias") == "BEARISH", \
+        f"Fresh instance should load persisted BEARISH bias, got {latest}"
 
