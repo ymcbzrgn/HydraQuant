@@ -10,12 +10,13 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ymcbzrgn/HydraQuant/releases"><img src="https://img.shields.io/badge/Release-v0.1.0--alpha-blue" alt="Release"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/AI_Modules-64-blueviolet" alt="AI Modules">
   <img src="https://img.shields.io/badge/RAG_Types-18-orange" alt="RAG Types">
   <img src="https://img.shields.io/badge/Agents-10-green" alt="Agents">
   <img src="https://img.shields.io/badge/Tests-189-brightgreen" alt="Tests">
-  <img src="https://img.shields.io/badge/License-GPLv3-red" alt="License">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-red" alt="License"></a>
 </p>
 
 <p align="center">
