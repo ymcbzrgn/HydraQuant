@@ -49,8 +49,9 @@ class AIFreqtradeSizer(IStrategy):
         "720": 0.005,    # 0.5% after 12h (new — let it breathe)
     }
 
-    # Stoploss (Wide, rely on dynamic trailing/custom stoploss)
-    stoploss = -0.20
+    # Stoploss — hard floor for 1x leverage case. custom_stoploss enforces leverage-aware cap.
+    # Dynamic formula: max_equity_loss(15%) / leverage → 1x=-15%, 2x=-7.5%, 3x=-5%
+    stoploss = -0.15
     use_custom_stoploss = True
 
     # Trailing stop
@@ -203,13 +204,16 @@ class AIFreqtradeSizer(IStrategy):
                 except Exception:
                     pass
 
+                # No tech_data = blind signal. Don't cache it — let populate_entry_trend
+                # handle this pair with full dataframe (it always has indicators).
+                if not technical_data:
+                    logger.debug(f"[bot_loop_start] {p}: no tech_data, skipping (populate_entry_trend will POST)")
+                    return p, sig  # NEUTRAL 0.0, won't be cached (see below)
+
                 _t = _time.time()
-                if technical_data:
-                    resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=120)
-                else:
-                    resp = session.get(f"{url}/signal/{p}", timeout=120)
+                resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=120)
                 lat = (_time.time() - _t) * 1000
-                logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code}, POST={'Y' if technical_data else 'N'})")
+                logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code})")
                 if resp.status_code == 200:
                     parsed = resp.json()
                     sig["signal"] = parsed.get("signal", "NEUTRAL")
@@ -217,8 +221,10 @@ class AIFreqtradeSizer(IStrategy):
                     sig["reasoning"] = parsed.get("reasoning", "")
             except Exception as e:
                 logger.warning(f"[bot_loop_start] Fetch failed for {p}: {e}")
-            # Cache ALL results (including NEUTRAL) — populate_entry_trend reads from here
-            self.ai_signal_cache[p] = sig
+            # Only cache if we got a real signal (POST with tech_data).
+            # NEUTRAL from missing tech_data should NOT pollute cache.
+            if sig.get("confidence", 0) > 0 or sig.get("signal") != "NEUTRAL":
+                self.ai_signal_cache[p] = sig
             return p, sig
 
         results = {}
@@ -226,7 +232,7 @@ class AIFreqtradeSizer(IStrategy):
             futures = {executor.submit(fetch_one, p): p for p in current_batch}
             for future in as_completed(futures):
                 try:
-                    pair, signal = future.result(timeout=45)
+                    pair, signal = future.result(timeout=180)  # 3min — let MADAM finish (quality > speed)
                     results[pair] = signal
                 except Exception as e:
                     pair = futures[future]
@@ -934,8 +940,12 @@ class AIFreqtradeSizer(IStrategy):
         # Pick the TIGHTER of breakeven vs chandelier (higher value = tighter)
         result = max(chandelier_result, breakeven_sl)
 
-        # Never exceed hard stop of -0.20
-        return max(result, self.stoploss)
+        # Leverage-aware equity cap: max 15% EQUITY loss regardless of leverage
+        # 1x → -15% price, 2x → -7.5% price, 3x → -5% price
+        MAX_EQUITY_LOSS = 0.15
+        leverage = trade.leverage or 1.0
+        leverage_aware_floor = -(MAX_EQUITY_LOSS / leverage)
+        return max(result, leverage_aware_floor)
 
     def _sync_portfolio_to_ai(self):
         """Bridge: Sync real exchange balance → AI modules (RiskBudget, Autonomy)."""
@@ -1101,7 +1111,9 @@ class AIFreqtradeSizer(IStrategy):
                 risk_pct = 0.005  # 0.5% of portfolio per trade (conservative for cold start)
                 risk_per_trade = portfolio_val * risk_pct
                 # Stoploss distance ≈ 2.5x ATR as fraction of price
-                stoploss_distance = min(2.5 * atr_volatility, 0.15)  # cap at 15%
+                # Leverage-aware: assume max possible leverage for worst-case sizing
+                _max_lev = float(self.leverage_max.value)
+                stoploss_distance = min(2.5 * atr_volatility, 0.15 / max(_max_lev, 1.0))
                 stoploss_distance = max(stoploss_distance, 0.01)     # floor at 1%
                 max_risk_stake = risk_per_trade / stoploss_distance
                 if final_stake > max_risk_stake:
@@ -1407,6 +1419,7 @@ class AIFreqtradeSizer(IStrategy):
 
         # Regime-aware max leverage cap (OMEGA-inspired but safer)
         regime_max = self.leverage_max.value  # default 3.0
+        atr_safe_max = self.leverage_max.value  # ATR safety cap (calculated below)
         try:
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             if dataframe is not None and len(dataframe) > 0:
@@ -1420,16 +1433,30 @@ class AIFreqtradeSizer(IStrategy):
                     regime_max = min(2.0, self.leverage_max.value)  # ranging → cap 2x
                 else:
                     regime_max = min(1.5, self.leverage_max.value)  # bear/volatile → cap 1.5x
+
+                # ATR-based leverage cap: keep max equity loss <= 15%
+                # Chandelier Exit uses 2.5x ATR. leverage * chandelier_distance <= 15%
+                # This lets Chandelier work freely — we limit leverage, not stoploss.
+                atr = float(last.get('atr', 0))
+                if atr > 0 and price > 0:
+                    chandelier_distance = 2.5 * (atr / price)
+                    atr_safe_max = 0.15 / max(chandelier_distance, 0.005)
+                    if atr_safe_max < regime_max:
+                        logger.info(f"[SmartLeverage] {pair} ATR cap: {atr_safe_max:.1f}x "
+                                   f"(ATR={atr/price:.1%}, chandelier={chandelier_distance:.1%})")
         except Exception:
             regime_max = 1.0  # Error → safe
 
-        # Confidence-based within regime cap
+        # Effective cap = minimum of regime, ATR safety, and exchange max
+        effective_max = min(regime_max, atr_safe_max, max_leverage)
+
+        # Confidence-based within effective cap
         if confidence >= 0.75:
-            lev = min(regime_max, max_leverage)
+            lev = effective_max
         elif confidence >= 0.60:
-            lev = min(regime_max * 0.7, max_leverage)
+            lev = effective_max * 0.7
         elif confidence >= 0.45:
-            lev = min(regime_max * 0.5, max_leverage)
+            lev = effective_max * 0.5
         else:
             lev = 1.0
 

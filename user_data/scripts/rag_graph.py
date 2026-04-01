@@ -1726,22 +1726,29 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         if ee_confidence >= 0.30:
             _semantic_cache.put(query=query_str, response=json.dumps(ee_result), pair=pair)
 
-        # Queue MADAM in background — when it finishes, it will overwrite cache
-        # with a richer LLM-enhanced signal for the NEXT query cycle
+        # Queue MADAM in background — enrich cache with full LLM pipeline
+        # for the NEXT query cycle (CoT-RAG, Bull/Bear debate, ColBERT reranking)
         def _background_madam(p, td):
             try:
-                acq = _signal_semaphore.acquire(timeout=30)  # Background MADAM can wait longer
+                acq = _signal_semaphore.acquire(timeout=120)  # Wait up to 2min — quality over speed
                 if acq:
                     try:
+                        # CRITICAL: Invalidate cache INSIDE semaphore so MADAM actually runs.
+                        # Without this, _get_trading_signal_inner reads back the EE result
+                        # we just cached (line 1727) and returns without running LLM pipeline.
+                        # This was causing 85% of signals to skip CoT-RAG, debate, ColBERT.
+                        _semantic_cache.invalidate(pair=p)
                         result = _get_trading_signal_inner(p, td)
-                        if result and result.get("confidence", 0) > ee_confidence:
-                            logger.info(f"[Phase20:BackgroundMADAM] {p} improved: "
+                        if result:
+                            logger.info(f"[Phase20:BackgroundMADAM] {p} LLM-enriched: "
                                        f"{result['signal']} conf={result['confidence']:.2f} "
-                                       f"(was EE {ee_confidence:.2f})")
+                                       f"(EE was {ee_confidence:.2f})")
                     finally:
                         _signal_semaphore.release()
-            except Exception:
-                pass
+                else:
+                    logger.debug(f"[Phase20:BackgroundMADAM] {p} semaphore busy after 120s, skipping")
+            except Exception as e:
+                logger.debug(f"[Phase20:BackgroundMADAM] {p} failed: {e}")
 
         try:
             import threading
