@@ -312,12 +312,22 @@ class AgentPool:
                     f"{'Adjust your conviction based on where you historically perform well.' if perf['n_signals'] > 10 else 'No significant history yet — be humble in your conviction.'}"
                 )
 
+                # Agentic RAG: agent can request retrieval by including [RETRIEVE: type]
+                retrieval_hint = (
+                    "\n\nYou can request evidence by including these tags in your response:\n"
+                    "[RETRIEVE: news] — recent crypto news about this pair\n"
+                    "[RETRIEVE: events] — similar historical events\n"
+                    "[RETRIEVE: patterns] — statistical pattern matching from backtests\n"
+                    "Include the tag where you need evidence. It will be resolved before Round 2.\n"
+                )
+
                 prompt = (
                     f"Analyze {pair} for a trading decision.\n\n"
                     f"EVIDENCE ENGINE FACTSHEET (verified data — you MUST reference this):\n"
                     f"{evidence_factsheet}\n\n"
                     f"Current regime: {regime}\n"
-                    f"{perf_context}\n\n"
+                    f"{perf_context}"
+                    f"{retrieval_hint}\n\n"
                     f"Respond in this EXACT JSON format (no other text):\n"
                     f'{{"direction": "BULLISH" or "BEARISH" or "NEUTRAL", '
                     f'"strength": 0.0 to 1.0, '
@@ -331,7 +341,11 @@ class AgentPool:
                     temperature=0.4, priority="high"
                 )
 
-                parsed = self._parse_agent_response(response.content)
+                # Agentic RAG: process any retrieval requests in response
+                raw_content = response.content
+                raw_content = self._process_retrieval_requests(raw_content, pair)
+
+                parsed = self._parse_agent_response(raw_content)
                 positions[agent_name] = parsed
                 logger.info(f"[AgentPool:R1] {agent_name} → {parsed.get('direction', '?')} "
                            f"str={parsed.get('strength', 0):.2f}")
@@ -414,6 +428,62 @@ class AgentPool:
         self._record_agent_memories(pair, regime, positions, result.get("confidence", 0))
 
         return result
+
+    def _process_retrieval_requests(self, response_text: str, pair: str) -> str:
+        """Agentic RAG: parse [RETRIEVE: X] tags and inject retrieval results."""
+        import re
+        pattern = re.compile(r'\[RETRIEVE:\s*(\w+)\]')
+        matches = pattern.findall(response_text)
+        if not matches:
+            return response_text
+
+        for source in matches[:3]:  # Max 3 retrievals per agent
+            retrieved = ""
+            try:
+                if source == "news":
+                    from hybrid_retriever import HybridRetriever
+                    r = HybridRetriever()
+                    results = r.search(f"{pair} latest analysis", top_k=3)
+                    retrieved = "\n".join(
+                        doc.get("text", "")[:150] for doc in results[:3]
+                    ) if results else "No news found."
+
+                elif source == "events":
+                    from hybrid_retriever import HybridRetriever
+                    from streaming_rag import detect_event_type
+                    r = HybridRetriever()
+                    event = detect_event_type(pair)
+                    if event != "general":
+                        results = r.search_similar_events(event, top_k=3)
+                        retrieved = "\n".join(
+                            doc.get("text", "")[:150] for doc in results[:3]
+                        ) if results else "No historical events found."
+                    else:
+                        retrieved = "No specific event detected."
+
+                elif source == "patterns":
+                    from pattern_stat_store import PatternStatStore
+                    store = PatternStatStore()
+                    stats = store.query(pair=pair)
+                    if stats and not stats.get("insufficient_data"):
+                        retrieved = (
+                            f"Win rate: {stats.get('win_rate', 0):.0%}, "
+                            f"Avg PnL: {stats.get('avg_profit_pct', 0):+.2f}%, "
+                            f"Trades: {stats.get('matching_trades', 0)}"
+                        )
+                    else:
+                        retrieved = "Insufficient pattern data."
+
+            except Exception as e:
+                retrieved = f"Retrieval failed: {e}"
+
+            response_text = response_text.replace(
+                f"[RETRIEVE: {source}]",
+                f"\n[Retrieved {source}]: {retrieved}\n"
+            )
+            logger.info(f"[AgentPool:AgenticRAG] Retrieved {source} for {pair}")
+
+        return response_text
 
     def _compute_majority(self, positions: Dict) -> str:
         """Determine majority direction from agent positions."""

@@ -316,12 +316,49 @@ class RAGQualityEvaluator:
         if not rows or rows['cnt'] == 0:
             return "No RAG evaluations in the last 7 days."
 
-        report = f"""📊 Weekly RAG Quality Report
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+        report = f"""Weekly RAG Quality Report
 Evaluations: {rows['cnt']}
-Faithfulness:       {rows['f']:.3f} {'✅' if rows['f'] >= 0.90 else '❌'} (target: ≥0.90)
-Context Precision:  {rows['cp']:.3f} {'✅' if rows['cp'] >= 0.85 else '❌'} (target: ≥0.85)
-Answer Relevancy:   {rows['ar']:.3f} {'✅' if rows['ar'] >= 0.90 else '❌'} (target: ≥0.90)
-Overall Average:    {rows['avg']:.3f}
-━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+Faithfulness:       {rows['f']:.3f} {'OK' if rows['f'] >= 0.90 else 'LOW'} (target: >=0.90)
+Context Precision:  {rows['cp']:.3f} {'OK' if rows['cp'] >= 0.85 else 'LOW'} (target: >=0.85)
+Answer Relevancy:   {rows['ar']:.3f} {'OK' if rows['ar'] >= 0.90 else 'LOW'} (target: >=0.90)
+Overall Average:    {rows['avg']:.3f}"""
         return report
+
+    def get_weekly_quality_report(self) -> dict:
+        """Structured weekly quality report for scheduler feedback loop."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+
+            this_week = conn.execute("""
+                SELECT AVG(faithfulness) as f, AVG(context_precision) as cp,
+                       AVG(answer_relevancy) as ar, COUNT(*) as n
+                FROM rag_quality_metrics
+                WHERE timestamp > datetime('now', '-7 days')
+            """).fetchone()
+
+            last_week = conn.execute("""
+                SELECT AVG(faithfulness) as f
+                FROM rag_quality_metrics
+                WHERE timestamp BETWEEN datetime('now', '-14 days') AND datetime('now', '-7 days')
+            """).fetchone()
+
+            conn.close()
+
+            if not this_week or this_week["n"] == 0:
+                return None
+
+            trend = "stable"
+            if last_week and last_week["f"]:
+                diff = (this_week["f"] or 0) - (last_week["f"] or 0)
+                trend = "improving" if diff > 0.05 else ("declining" if diff < -0.05 else "stable")
+
+            return {
+                "avg_faithfulness": this_week["f"] or 0,
+                "avg_context_precision": this_week["cp"] or 0,
+                "avg_answer_relevancy": this_week["ar"] or 0,
+                "sample_count": this_week["n"],
+                "trend": trend,
+            }
+        except Exception:
+            return None

@@ -6,24 +6,24 @@
 
 <p align="center">
   <strong>AI-Powered Quantitative Crypto Trading Engine</strong><br>
-  <em>18 RAG Types &middot; 10 Autonomous Agents &middot; Evidence-First Signal Engine &middot; Self-Learning</em>
+  <em>25 RAG Types &middot; 10 Autonomous Agents &middot; Evidence-First Signal Engine &middot; Self-Learning</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/ymcbzrgn/HydraQuant/releases"><img src="https://img.shields.io/badge/Release-v0.1.0--alpha-blue" alt="Release"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/AI_Modules-64-blueviolet" alt="AI Modules">
-  <img src="https://img.shields.io/badge/RAG_Types-18-orange" alt="RAG Types">
+  <img src="https://img.shields.io/badge/AI_Modules-66-blueviolet" alt="AI Modules">
+  <img src="https://img.shields.io/badge/RAG_Types-25-orange" alt="RAG Types">
   <img src="https://img.shields.io/badge/Agents-10-green" alt="Agents">
   <img src="https://img.shields.io/badge/Tests-189-brightgreen" alt="Tests">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-red" alt="License"></a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Lines_of_AI_Code-25%2C032-yellow" alt="Lines">
+  <img src="https://img.shields.io/badge/Lines_of_AI_Code-26%2C000%2B-yellow" alt="Lines">
   <img src="https://img.shields.io/badge/API_Endpoints-27-blue" alt="API">
   <img src="https://img.shields.io/badge/Data_Sources-8-teal" alt="Data Sources">
-  <img src="https://img.shields.io/badge/Scheduled_Jobs-22-purple" alt="Jobs">
+  <img src="https://img.shields.io/badge/Scheduled_Jobs-27-purple" alt="Jobs">
   <img src="https://img.shields.io/badge/Telegram-Bot_Control-2CA5E0?logo=telegram" alt="Telegram">
 </p>
 
@@ -117,21 +117,23 @@ The core signal generator. **Zero API cost, ~50ms latency.** Decomposes every tr
 
 **Adaptive Synthesis:** Blind sub-scores (no data) are automatically excluded and their weights redistributed. Dynamic-k sigmoid adjusts confidence sharpness based on factor alignment — disagreement makes the engine *cautious*, not *blind*.
 
-### Head 2: RAG Pipeline (18 Types)
+### Head 2: RAG Pipeline (25 Types)
 
 The largest RAG implementation in any open-source trading system:
 
 <p align="center">
-  <img src="docs/assets/hydraquant-rag-types.png" alt="18 RAG Types" width="85%">
+  <img src="docs/assets/hydraquant-rag-types.png" alt="25 RAG Types" width="85%">
 </p>
 
 | Category | RAG Types |
 |----------|-----------|
 | **Core Retrieval** | Hybrid (Dense+BM25+ColBERT+RRF), Semantic Cache, Binary Quantization |
-| **Quality Control** | CRAG (Corrective), Self-RAG (Reflective), FLARE (Forward-Looking) |
+| **Quality Control** | CRAG (Corrective), Self-RAG (Reflective), FLARE (Forward-Looking), RAGAS Feedback Loop |
 | **Reasoning** | CoT-RAG (Chain-of-Thought), Speculative RAG, HyDE, RAG-Fusion |
 | **Memory** | MemoRAG (Global), StreamingRAG (Hot/Cold), Bidirectional (Lessons), MAGMA (Graph) |
-| **Structure** | RAPTOR (Hierarchical), GAM-RAG (Graph-Augmented), Adaptive Router |
+| **Structure** | RAPTOR (Hierarchical), GAM-RAG (Graph-Augmented), GraphRAG (Community), Adaptive Router |
+| **Context** | Contextual Retrieval (Anthropic-style), Regime-Aware Filter, Event-Driven Temporal |
+| **Self-Improving** | Outcome-Based Chunk Scoring (PnL→quality), Agentic RAG (agent-driven retrieval) |
 | **Reranking** | ColBERT v2 (Token-level), FlashRank (Lightweight) |
 
 ### Head 3: Agent Pool (10 Specialists)
@@ -184,13 +186,13 @@ Inspired by MiroFish's $30M autonomous trading system. Each agent has a personal
 
 | Metric | Value |
 |--------|-------|
-| AI Python modules | **64** |
-| Lines of AI code | **25,032** |
-| RAG types implemented | **18** |
+| AI Python modules | **66** |
+| Lines of AI code | **26,000+** |
+| RAG types implemented | **25** (self-improving) |
 | Autonomous agents | **10** |
 | Evidence Engine sub-scores | **6** |
 | IStrategy callbacks | **19** |
-| Scheduled jobs | **22** |
+| Scheduled jobs | **27** |
 | API endpoints | **27** |
 | SQLite tables | **36** |
 | Tests | **189** |

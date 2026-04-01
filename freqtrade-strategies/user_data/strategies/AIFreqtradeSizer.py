@@ -1131,11 +1131,26 @@ class AIFreqtradeSizer(IStrategy):
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime, entry_tag: str,
                             side: str, **kwargs) -> bool:
-        """Mark the forgone P&L entry as ACTUALLY executed. Store AI metadata in Trade.custom_data."""
+        """Pre-trade validation + AI metadata storage."""
         logger.warning(
             f"[TRADE-ATTEMPT] confirm_trade_entry CALLED: {pair} side={side} "
             f"rate={rate:.6f} stake=${amount*rate:.2f}"
         )
+
+        # ═══ POST-QUANTIZATION NOTIONAL CHECK (Hummingbot BudgetChecker pattern) ═══
+        # Freqtrade truncates amount in create_order() AFTER this callback.
+        # But we can pre-check: if notional is borderline, exchange will reject.
+        if rate > 0:
+            notional = amount * rate
+            try:
+                market = self.dp._exchange.markets.get(pair, {})
+                min_cost = market.get("limits", {}).get("cost", {}).get("min")
+                if min_cost and notional < min_cost * 1.1:  # 10% buffer
+                    logger.warning(f"[NotionalCheck] {pair} notional ${notional:.2f} too close to "
+                                  f"min ${min_cost} — skipping to avoid rejection")
+                    return False
+            except Exception:
+                pass  # Can't check = proceed
         ai_decision = self.ai_signal_cache.get(pair, {})
         confidence = ai_decision.get('confidence', 0.5)
         signal_type = "BULL" if side == "long" else "BEAR"

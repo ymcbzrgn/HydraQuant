@@ -123,10 +123,16 @@ class DataPipeline:
         # Phase 5.1: Initialize Knowledge Graph Extractor
         kg = KnowledgeGraphManager()
         
+        # Pre-compute regime and cache it (same for all chunks in this batch)
+        current_regime = self._get_current_btc_regime()
+
         for article in articles:
             text_content = f"Title: {article['title']}\n\nSummary: {article['summary']}"
-            # Document-level context for contextual chunking (Anthropic-style)
-            doc_summary = f"{article['title']} ({article['source']})"
+            # Detect event type from title + summary
+            event_type = self._detect_event_type(
+                article['title'] + ' ' + (article.get('summary') or ''))
+            # Rich contextual prompt — pass full article dict (Anthropic-style enhanced)
+            doc_summary = article  # Pass full article dict for rich context
             
             # Use Parent-Child chunking if text is very long, otherwise Recursive.
             if len(text_content) > 1000:
@@ -144,7 +150,9 @@ class DataPipeline:
                         "sentiment_score": float(article['sentiment_score']) if article['sentiment_score'] else 0.0,
                         "type": "news_child",
                         "url": article['url'],
-                        "parent_text": chunk_dict['parent_text']
+                        "parent_text": chunk_dict['parent_text'],
+                        "market_regime": current_regime,
+                        "event_type": event_type,
                     })
                     ids_to_insert.append(doc_id)
             else:
@@ -162,7 +170,9 @@ class DataPipeline:
                         "sentiment_score": float(article['sentiment_score']) if article['sentiment_score'] else 0.0,
                         "type": "news",
                         "url": article['url'],
-                        "parent_text": text_content
+                        "parent_text": text_content,
+                        "market_regime": current_regime,
+                        "event_type": event_type,
                     })
                     ids_to_insert.append(doc_id)
             
@@ -253,6 +263,48 @@ class DataPipeline:
             
         finally:
             conn.close()
+
+    # ═══ RAG GUARANTEE: Helper methods for regime + event metadata ═══
+
+    EVENT_TAXONOMY = {
+        "macro_fomc": ["fed", "fomc", "rate decision", "powell", "interest rate", "federal reserve"],
+        "macro_cpi": ["cpi", "inflation", "consumer price index"],
+        "macro_jobs": ["nonfarm", "unemployment", "jobs report", "employment"],
+        "crypto_halving": ["halving", "block reward", "mining reward"],
+        "crypto_hack": ["hack", "exploit", "vulnerability", "drain", "stolen", "attack"],
+        "crypto_regulatory": ["sec", "regulation", "ban", "approve", "etf", "lawsuit", "enforcement"],
+        "crypto_listing": ["listing", "delist", "binance list", "coinbase list"],
+        "crypto_whale": ["whale", "large transfer", "dormant wallet"],
+        "market_crash": ["crash", "liquidation", "black swan", "flash crash", "capitulation"],
+        "market_rally": ["rally", "breakout", "all-time high", "ath", "pump"],
+    }
+
+    def _detect_event_type(self, text: str) -> str:
+        """Detect event type from news text using keyword matching."""
+        text_lower = text.lower()
+        for event_type, keywords in self.EVENT_TAXONOMY.items():
+            matches = sum(1 for kw in keywords if kw in text_lower)
+            if matches >= 2:
+                return event_type
+            if matches == 1 and len(text_lower) < 300:
+                return event_type
+        return "general"
+
+    def _get_current_btc_regime(self) -> str:
+        """Get current BTC regime from evidence_audit_log."""
+        try:
+            from ai_config import AI_DB_PATH
+            conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT regime FROM evidence_audit_log WHERE pair LIKE 'BTC%' "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            return row["regime"] if row else "transitional"
+        except Exception:
+            return "transitional"
+
 
 def start_sse_stream():
     """Run the streaming script indefinitely with auto-restart on failure."""
