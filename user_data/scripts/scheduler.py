@@ -674,14 +674,21 @@ class PipelineScheduler:
             trigger_reason = ""
 
             # Check Fear & Greed for extreme values
+            # Smart throttle: only trigger if F&G CHANGED since last check
+            # (same F&G = same analysis needed, no point re-invalidating)
             fng_row = conn.execute(
                 "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
             ).fetchone()
             if fng_row:
                 fng = int(fng_row["value"])
                 if fng < 15 or fng > 85:
-                    triggered = True
-                    trigger_reason = f"F&G extreme: {fng}"
+                    _prev_fng = getattr(self, '_last_event_fng', None)
+                    _fng_bucket = fng // 5  # Group by 5-point bands (0-4, 5-9, 10-14...)
+                    _prev_bucket = (_prev_fng // 5) if _prev_fng is not None else None
+                    if _fng_bucket != _prev_bucket:
+                        triggered = True
+                        trigger_reason = f"F&G extreme: {fng} (was {_prev_fng})"
+                    self._last_event_fng = fng
 
             # Check for extreme funding rates (any pair)
             if not triggered:

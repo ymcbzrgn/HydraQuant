@@ -737,14 +737,15 @@ class LLMRouter:
             if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
                 continue
 
-            # Token pre-check: skip models with low TPM limits if prompt is too large
-            # Groq free tier qwen3-32b has 6000 TPM limit — prompts >5000 tokens always 413
-            _m_name_check = getattr(model, "model_name", getattr(model, "model", ""))
-            if "qwen3-32b" in str(_m_name_check):
+            # Token pre-check: skip Groq free-tier models if prompt is too large
+            # Groq limits: qwen3-32b=6000 TPM, llama-3.1-8b-instant=6000 TPM
+            _m_name_check = str(getattr(model, "model_name", getattr(model, "model", "")))
+            _is_groq = any(g in _m_name_check for g in ["qwen3-32b", "llama-3.1-8b", "llama-3.3-70b", "gemma2"])
+            if _is_groq:
                 prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
                 est_tokens = prompt_chars // 3  # conservative (1 token ~ 3 chars)
-                if est_tokens > 5000:
-                    logger.debug(f"[TokenPreCheck] Skipping qwen3-32b: ~{est_tokens} tokens > 5000 TPM limit")
+                if est_tokens > 4500:
+                    logger.debug(f"[TokenPreCheck] Skipping {_m_name_check}: ~{est_tokens} tokens > 4500 Groq limit")
                     continue
 
             try:
