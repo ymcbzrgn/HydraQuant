@@ -127,6 +127,8 @@ class DataPipeline:
         current_regime = self._get_current_btc_regime()
 
         for article in articles:
+            # Convert sqlite3.Row to dict (Row has [] access but no .get())
+            article = dict(article)
             text_content = f"Title: {article['title']}\n\nSummary: {article['summary']}"
             # Detect event type from title + summary
             event_type = self._detect_event_type(
