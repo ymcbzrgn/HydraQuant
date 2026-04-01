@@ -338,7 +338,7 @@ class AIFreqtradeSizer(IStrategy):
 
         # === BASIC INDICATORS (1h timeframe) ===
         td = {
-            "current_price": round(price, 2),
+            "current_price": round(price, 8),  # 8 decimals for sub-cent coins (1000PEPE etc.)
             "price_change_1h_pct": change_1h,
             "price_change_4h_pct": change_4h,
             "price_change_24h_pct": change_24h,

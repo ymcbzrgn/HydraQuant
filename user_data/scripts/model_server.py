@@ -24,6 +24,10 @@ _flashrank_model = None
 def _load_models():
     global _colbert_model, _bge_model, _flashrank_model
 
+    # Limit PyTorch threads to prevent CPU contention with 2 concurrent MADAMs
+    import torch
+    torch.set_num_threads(2)  # 2 threads per model op (4 cores / 2 concurrent = 2 each)
+
     t0 = time.time()
     try:
         from sentence_transformers import SentenceTransformer
@@ -97,12 +101,14 @@ def rerank_colbert(req: RerankRequest):
         return RerankResponse(results=[])
     try:
         import numpy as np
-        # Truncate documents to avoid tensor dimension mismatch (jina-colbert-v2 issue)
-        max_doc_len = 8192  # jina-colbert-v2 supports up to 8192 tokens for docs
-        truncated_docs = [d[:max_doc_len] for d in req.documents]
+        import gc
+        # Limit docs to prevent OOM (ColBERT creates large tensors per doc)
+        max_docs = 15  # More than enough for quality reranking
+        max_doc_len = 4096  # Reduced from 8192 to halve memory per doc
+        docs_to_rank = req.documents[:max_docs]
+        truncated_docs = [d[:max_doc_len] for d in docs_to_rank]
         query_emb = _colbert_model.encode(req.query)
         # Encode docs ONE BY ONE to avoid batch tensor mismatch
-        # (Root cause: variable-length docs in same batch → broadcast failure)
         scores = []
         for i, doc in enumerate(truncated_docs):
             try:
@@ -124,6 +130,7 @@ def rerank_colbert(req: RerankRequest):
                 scores.append((i, 0.0, req.documents[i]))
         scores.sort(key=lambda x: x[1], reverse=True)
         results = [RerankResult(index=s[0], score=s[1], text=s[2]) for s in scores[:req.top_k]]
+        gc.collect()  # Free tensor memory immediately (prevents OOM under concurrent load)
         return RerankResponse(results=results)
     except RuntimeError as e:
         logger.warning(f"[ColBERT] Tensor error, returning original order: {e}")
