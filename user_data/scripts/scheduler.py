@@ -40,6 +40,16 @@ class PipelineScheduler:
     def __init__(self):
         self.scheduler = None
         self._pipeline = None
+        # Singleton instances — created once, reused across all job runs
+        # Prevents memory leak from creating new objects every 5-60 minutes
+        self._semantic_cache = None
+        self._streaming_rag = None
+        self._market_data_fetcher = None
+        self._backtest_embedder = None
+        self._magma_memory = None
+        self._opportunity_scanner = None
+        self._agent_pool = None
+        self._cross_pair_intel = None
 
     def _get_pipeline(self):
         """Lazy-load DataPipeline to avoid circular imports."""
@@ -268,8 +278,18 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Memory management: gc.collect + memory logging every hour
+        self.scheduler.add_job(
+            self._memory_cleanup,
+            'interval', minutes=60,
+            id='memory_cleanup',
+            name='GC Collect + Memory Log',
+            max_instances=1,
+            replace_existing=True
+        )
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 22 jobs (21 + auto_backtest)")
+        logger.info("[Scheduler] Started with 23 jobs")
         return True
 
     def stop(self):
@@ -376,9 +396,10 @@ class PipelineScheduler:
         """Job: Cleanup expired entries in semantic_cache."""
         logger.info("[Scheduler:Job] Cleaning up expired semantic cache...")
         try:
-            from semantic_cache import SemanticCache
-            cache = SemanticCache()
-            cache.cleanup_expired()
+            if self._semantic_cache is None:
+                from semantic_cache import SemanticCache
+                self._semantic_cache = SemanticCache()
+            self._semantic_cache.cleanup_expired()
         except Exception as e:
             logger.error(f"[Scheduler:Job] Semantic cache cleanup failed: {e}")
 
@@ -386,9 +407,10 @@ class PipelineScheduler:
         """Job: Flush expired hot documents from StreamingRAG into Chroma"""
         logger.info("[Scheduler:Job] Flushing StreamingRAG hot buffer into cold storage...")
         try:
-            from streaming_rag import StreamingRAG
-            s_rag = StreamingRAG()
-            s_rag.flush_to_cold()
+            if self._streaming_rag is None:
+                from streaming_rag import StreamingRAG
+                self._streaming_rag = StreamingRAG()
+            self._streaming_rag.flush_to_cold()
         except Exception as e:
             logger.error(f"[Scheduler:Job] StreamingRAG flush failed: {e}")
 
@@ -518,9 +540,10 @@ class PipelineScheduler:
         """Job: Fetch derivatives data (OI, funding, L/S ratio) from Bybit."""
         logger.info("[Scheduler:Job] Fetching derivatives market data...")
         try:
-            from market_data_fetcher import MarketDataFetcher
-            fetcher = MarketDataFetcher()
-            count = fetcher.fetch_derivatives()
+            if self._market_data_fetcher is None:
+                from market_data_fetcher import MarketDataFetcher
+                self._market_data_fetcher = MarketDataFetcher()
+            count = self._market_data_fetcher.fetch_derivatives()
             logger.info(f"[Scheduler:Job] Derivatives: {count} pair(s) fetched.")
         except Exception as e:
             logger.error(f"[Scheduler:Job] Derivatives fetch failed: {e}")
@@ -529,12 +552,13 @@ class PipelineScheduler:
         """Job: Fetch DeFi (TVL, stablecoins) + Macro (FRED) + CrossAsset (yfinance) + Trends data."""
         logger.info("[Scheduler:Job] Fetching DeFi + Macro + CrossAsset + Trends market data...")
         try:
-            from market_data_fetcher import MarketDataFetcher
-            fetcher = MarketDataFetcher()
-            d = fetcher.fetch_defi()
-            m = fetcher.fetch_macro()
-            c = fetcher.fetch_cross_asset()
-            t = fetcher.fetch_google_trends()
+            if self._market_data_fetcher is None:
+                from market_data_fetcher import MarketDataFetcher
+                self._market_data_fetcher = MarketDataFetcher()
+            d = self._market_data_fetcher.fetch_defi()
+            m = self._market_data_fetcher.fetch_macro()
+            c = self._market_data_fetcher.fetch_cross_asset()
+            t = self._market_data_fetcher.fetch_google_trends()
             logger.info(f"[Scheduler:Job] DeFi: {d}, Macro: {m}, CrossAsset: {c}, Trends: {t} metrics.")
         except Exception as e:
             logger.error(f"[Scheduler:Job] DeFi/Macro/CrossAsset/Trends fetch failed: {e}")
@@ -543,9 +567,10 @@ class PipelineScheduler:
         """Job: Process any new backtest result files into PatternStatStore + ChromaDB + MAGMA."""
         logger.info("[Scheduler:Job] Processing new backtest results...")
         try:
-            from backtest_embedder import BacktestEmbedder
-            embedder = BacktestEmbedder()
-            count = embedder.process_all(enrich=True)
+            if self._backtest_embedder is None:
+                from backtest_embedder import BacktestEmbedder
+                self._backtest_embedder = BacktestEmbedder()
+            count = self._backtest_embedder.process_all(enrich=True)
             if count > 0:
                 logger.info(f"[Scheduler:Job] Processed {count} new backtest trades into RAG pipeline.")
             else:
@@ -557,9 +582,10 @@ class PipelineScheduler:
         """Job: Clean up old/weak linkages inside MAGMA memory tables."""
         logger.info("[Scheduler:Job] Pruning MAGMAMemory edges...")
         try:
-            from magma_memory import MAGMAMemory
-            magma = MAGMAMemory()
-            deleted = magma.prune(min_weight=0.5, max_age_days=180)
+            if self._magma_memory is None:
+                from magma_memory import MAGMAMemory
+                self._magma_memory = MAGMAMemory()
+            deleted = self._magma_memory.prune(min_weight=0.5, max_age_days=180)
             logger.info(f"[Scheduler:Job] Removed {deleted} MAGMA connections.")
         except Exception as e:
             logger.error(f"[Scheduler:Job] MAGMAMemory pruning failed: {e}")
@@ -568,9 +594,10 @@ class PipelineScheduler:
         """Phase 20 Job: Wide screening of all pairs for trading opportunities."""
         logger.info("[Scheduler:Job] Running opportunity scanner...")
         try:
-            from opportunity_scanner import OpportunityScanner
-            scanner = OpportunityScanner()
-            results = scanner.scan_pairs_from_db(top_n=30)
+            if self._opportunity_scanner is None:
+                from opportunity_scanner import OpportunityScanner
+                self._opportunity_scanner = OpportunityScanner()
+            results = self._opportunity_scanner.scan_pairs_from_db(top_n=30)
             if results:
                 logger.info(f"[Scheduler:Job] Opportunity scan: {len(results)} pairs scored, "
                            f"top: {results[0]['pair']}({results[0]['composite_score']})")
@@ -583,9 +610,10 @@ class PipelineScheduler:
         """Phase 20 Job: Rebalance agent weights based on 30-day performance."""
         logger.info("[Scheduler:Job] Rebalancing agent weights...")
         try:
-            from agent_pool import AgentPool
-            pool = AgentPool()
-            pool.rebalance_weights()
+            if self._agent_pool is None:
+                from agent_pool import AgentPool
+                self._agent_pool = AgentPool()
+            self._agent_pool.rebalance_weights()
             logger.info("[Scheduler:Job] Agent weight rebalancing complete.")
         except Exception as e:
             logger.error(f"[Scheduler:Job] Agent rebalance failed: {e}")
@@ -594,10 +622,11 @@ class PipelineScheduler:
         """Phase 20 Job: Update cross-pair market intelligence."""
         logger.info("[Scheduler:Job] Updating cross-pair intelligence...")
         try:
-            from cross_pair_intel import CrossPairIntel
-            intel = CrossPairIntel()
-            intel.update()
-            latest = intel.get_latest()
+            if self._cross_pair_intel is None:
+                from cross_pair_intel import CrossPairIntel
+                self._cross_pair_intel = CrossPairIntel()
+            self._cross_pair_intel.update()
+            latest = self._cross_pair_intel.get_latest()
             bias = latest.get("market_bias", {}).get("bias", "UNKNOWN")
             funding = latest.get("funding_heatmap", {}).get("crowding", "unknown")
             logger.info(f"[Scheduler:Job] Cross-pair intel: market_bias={bias}, funding={funding}")
@@ -660,10 +689,11 @@ class PipelineScheduler:
                     # uses fresh data. Don't generate signals here — we don't have tech_data
                     # and fake current_price=1 was polluting audit logs with blind signals.
                     try:
-                        from semantic_cache import SemanticCache
-                        cache = SemanticCache()
+                        if self._semantic_cache is None:
+                            from semantic_cache import SemanticCache
+                            self._semantic_cache = SemanticCache()
                         for p in pairs:
-                            cache.invalidate(pair=p["pair"])
+                            self._semantic_cache.invalidate(pair=p["pair"])
                         logger.info(f"[Phase20:EventTrigger] Invalidated cache for {len(pairs)} pairs")
                     except Exception as e:
                         logger.debug(f"[Phase20:EventTrigger] Cache invalidation failed: {e}")
@@ -769,6 +799,23 @@ class PipelineScheduler:
             
         except Exception as e:
             logger.error(f"[Scheduler:Job] Failed to send weekly summary: {e}")
+
+    def _memory_cleanup(self):
+        """Hourly: Force garbage collection and log memory usage.
+        Prevents slow memory leak from orphaned objects."""
+        import gc
+        collected = gc.collect()
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"[Scheduler:Memory] GC collected {collected} objects. "
+                       f"RSS={mem_mb:.0f}MB, threads={process.num_threads()}")
+        except ImportError:
+            import resource
+            mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            logger.info(f"[Scheduler:Memory] GC collected {collected} objects. "
+                       f"maxRSS={mem_kb/1024:.0f}MB")
 
     def get_job_info(self) -> list:
         """Return info about all scheduled jobs."""
@@ -916,9 +963,10 @@ class PipelineScheduler:
 
             # 6. Feed results into PatternStatStore + ChromaDB
             try:
-                from backtest_embedder import BacktestEmbedder
-                embedder = BacktestEmbedder()
-                count = embedder.process_all(results_dir=bt_results_dir, enrich=True)
+                if self._backtest_embedder is None:
+                    from backtest_embedder import BacktestEmbedder
+                    self._backtest_embedder = BacktestEmbedder()
+                count = self._backtest_embedder.process_all(results_dir=bt_results_dir, enrich=True)
                 logger.info(f"[Scheduler:AutoBacktest] Bootstrap loaded {count} trades into AI pipeline")
             except Exception as e:
                 logger.error(f"[Scheduler:AutoBacktest] Bootstrap failed: {e}")
