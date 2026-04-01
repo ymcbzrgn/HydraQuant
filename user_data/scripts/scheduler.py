@@ -219,7 +219,7 @@ class PipelineScheduler:
         # Phase 20: Opportunity Scanner — pre-screen pairs before each signal cycle
         self.scheduler.add_job(
             self._opportunity_scan,
-            'interval', minutes=55,
+            'interval', minutes=15,
             id='opportunity_scan',
             name='Opportunity Scanner Wide Screening',
             max_instances=1,
@@ -656,13 +656,22 @@ class PipelineScheduler:
                     """).fetchall()
                     conn2.close()
 
+                    # Invalidate semantic cache for top pairs so next real signal cycle
+                    # uses fresh data. Don't generate signals here — we don't have tech_data
+                    # and fake current_price=1 was polluting audit logs with blind signals.
+                    try:
+                        from semantic_cache import SemanticCache
+                        cache = SemanticCache()
+                        for p in pairs:
+                            cache.invalidate(pair=p["pair"])
+                        logger.info(f"[Phase20:EventTrigger] Invalidated cache for {len(pairs)} pairs")
+                    except Exception as e:
+                        logger.debug(f"[Phase20:EventTrigger] Cache invalidation failed: {e}")
+
+                    # Log what we did (without generating fake signals)
                     for p in pairs:
-                        try:
-                            result = engine.generate_signal(p["pair"], {"current_price": 1, "_event_trigger": trigger_reason})
-                            logger.info(f"[Phase20:EventTrigger] {p['pair']} re-analyzed: "
-                                       f"{result['signal']} conf={result['confidence']:.2f}")
-                        except Exception:
-                            pass
+                        logger.info(f"[Phase20:EventTrigger] {p['pair']} cache invalidated, "
+                                   f"next real signal cycle will re-analyze")
 
                     # Send Telegram alert
                     try:

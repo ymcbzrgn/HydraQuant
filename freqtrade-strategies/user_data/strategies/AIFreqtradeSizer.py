@@ -64,7 +64,7 @@ class AIFreqtradeSizer(IStrategy):
     atr_stoploss_mult = DecimalParameter(1.5, 5.0, decimals=1, default=2.5, space='protection', optimize=True, load=True)
     fg_extreme_threshold = IntParameter(15, 30, default=20, space='buy', optimize=True, load=True)
     stale_trade_hours = IntParameter(4, 24, default=8, space='sell', optimize=True, load=True)
-    leverage_max = DecimalParameter(1.0, 5.0, decimals=1, default=2.0, space='buy', optimize=True, load=True)
+    leverage_max = DecimalParameter(1.0, 5.0, decimals=1, default=3.0, space='buy', optimize=True, load=True)
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
@@ -874,7 +874,22 @@ class AIFreqtradeSizer(IStrategy):
 
         atr = float(atr)
 
-        # Confidence-adaptive ATR multiplier
+        # ═══ BREAKEVEN CHECK (after partial profit lock) ═══
+        breakeven_active = False
+        try:
+            breakeven_active = trade.get_custom_data("breakeven_active", False)
+        except Exception:
+            pass
+
+        if breakeven_active and current_rate > 0 and trade.open_rate > 0:
+            if not trade.is_short:
+                breakeven_sl = (trade.open_rate * 0.998 / current_rate) - 1  # entry - 0.2% buffer
+            else:
+                breakeven_sl = -((trade.open_rate * 1.002 / current_rate) - 1)
+        else:
+            breakeven_sl = self.stoploss  # -0.20, won't interfere
+
+        # ═══ CONFIDENCE-ADAPTIVE ATR MULTIPLIER ═══
         ai = self.ai_signal_cache.get(pair, {})
         confidence = ai.get('confidence', 0.0)
 
@@ -885,26 +900,39 @@ class AIFreqtradeSizer(IStrategy):
         else:
             mult = 2.0   # Tight — low conviction, protect capital
 
+        # ═══ 3-TIER TRAILING: tighten as profit grows (OMEGA-inspired) ═══
+        effective_pnl = current_profit * (trade.leverage or 1.0)
+
+        if effective_pnl >= 0.15:
+            mult = min(mult, 1.0)   # Very tight — protect big profit
+        elif effective_pnl >= 0.08:
+            mult = min(mult, 1.5)   # Tight
+        elif effective_pnl >= 0.04:
+            mult = min(mult, 2.0)   # Medium
+        # else: confidence-based mult unchanged (2.0-3.0)
+
+        # ═══ CHANDELIER EXIT CALCULATION ═══
         if trade.is_short:
-            # SHORT: trailing anchor = lowest low over 14 bars
             anchor = last_candle.get('lowest_low_14')
             if not anchor or anchor != anchor:
-                anchor = current_rate  # Fallback
+                anchor = current_rate
             anchor = float(anchor)
             stop_price = anchor + (mult * atr)
-            result = -((stop_price / current_rate) - 1)
+            chandelier_result = -((stop_price / current_rate) - 1)
         else:
-            # LONG: trailing anchor = highest high over 14 bars
             anchor = last_candle.get('highest_high_14')
             if not anchor or anchor != anchor:
-                anchor = current_rate  # Fallback
+                anchor = current_rate
             anchor = float(anchor)
             stop_price = anchor - (mult * atr)
-            result = (stop_price / current_rate) - 1
+            chandelier_result = (stop_price / current_rate) - 1
 
         # Sanity: result must be negative (a loss)
-        if result >= 0:
-            return self.stoploss
+        if chandelier_result >= 0:
+            chandelier_result = self.stoploss
+
+        # Pick the TIGHTER of breakeven vs chandelier (higher value = tighter)
+        result = max(chandelier_result, breakeven_sl)
 
         # Never exceed hard stop of -0.20
         return max(result, self.stoploss)
@@ -1358,16 +1386,35 @@ class AIFreqtradeSizer(IStrategy):
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str,
                  side: str, **kwargs) -> float:
-        """Dynamic leverage by AI confidence (Phase 22 #14)."""
+        """Regime-aware + confidence-based dynamic leverage (Phase 23)."""
         ai = self.ai_signal_cache.get(pair, {})
         confidence = ai.get('confidence', 0.0)
 
-        if confidence >= 0.85:
-            lev = min(self.leverage_max.value, max_leverage)
-        elif confidence >= 0.70:
-            lev = min(self.leverage_max.value * 0.7, max_leverage)
-        elif confidence >= 0.50:
-            lev = min(self.leverage_max.value * 0.5, max_leverage)
+        # Regime-aware max leverage cap (OMEGA-inspired but safer)
+        regime_max = self.leverage_max.value  # default 3.0
+        try:
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if dataframe is not None and len(dataframe) > 0:
+                last = dataframe.iloc[-1]
+                adx = float(last.get('adx', 20))
+                ema200 = last.get('ema_200')
+                price = float(last.get('close', 0))
+                if adx > 25 and ema200 and price > float(ema200):
+                    regime_max = self.leverage_max.value       # trending_bull → full leverage
+                elif adx < 20:
+                    regime_max = min(2.0, self.leverage_max.value)  # ranging → cap 2x
+                else:
+                    regime_max = min(1.5, self.leverage_max.value)  # bear/volatile → cap 1.5x
+        except Exception:
+            regime_max = 1.0  # Error → safe
+
+        # Confidence-based within regime cap
+        if confidence >= 0.75:
+            lev = min(regime_max, max_leverage)
+        elif confidence >= 0.60:
+            lev = min(regime_max * 0.7, max_leverage)
+        elif confidence >= 0.45:
+            lev = min(regime_max * 0.5, max_leverage)
         else:
             lev = 1.0
 
@@ -1550,22 +1597,56 @@ class AIFreqtradeSizer(IStrategy):
                               current_entry_rate: float, current_exit_rate: float,
                               current_entry_profit: float, current_exit_profit: float,
                               **kwargs) -> float | None:
-        """DCA + partial exit based on AI confidence changes (Phase 22 #16)."""
+        """DCA + partial exit + staged profit lock (OMEGA-inspired Phase 23)."""
         if self.dp.runmode.value not in ('dry_run', 'live'):
             return None
         if trade.nr_of_successful_entries >= 4:
             return None
 
+        hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
+        if hours_held < 0.5:  # Wait at least 30min (was 1h)
+            return None
+
+        # ═══ STAGED PARTIAL PROFIT LOCK (OMEGA-inspired) ═══
+        # +6% effective PnL → close 25%, set breakeven flag
+        # +12% effective PnL → close 25% more, tighten SL to entry+buffer
+        # Remaining 50% → trailing stop handles it (free ride)
+        effective_pnl = current_profit * (trade.leverage or 1.0)
+        partial_1_done = trade.get_custom_data("partial_lock_1", False)
+        partial_2_done = trade.get_custom_data("partial_lock_2", False)
+
+        if not partial_1_done and effective_pnl >= 0.06:
+            close_amount = trade.stake_amount * 0.25
+            if min_stake and close_amount >= min_stake:
+                trade.set_custom_data("partial_lock_1", True)
+                try:
+                    self.dp.send_msg(
+                        f"LOCK1: {trade.pair} +{effective_pnl:.1%} eff → closing 25%, setting breakeven SL")
+                except Exception:
+                    pass
+                logger.info(f"[PartialLock] {trade.pair} LOCK1: +{effective_pnl:.1%} → close 25%")
+                return -close_amount
+
+        if partial_1_done and not partial_2_done and effective_pnl >= 0.12:
+            close_amount = trade.stake_amount * 0.25
+            if min_stake and close_amount >= min_stake:
+                trade.set_custom_data("partial_lock_2", True)
+                trade.set_custom_data("breakeven_active", True)
+                try:
+                    self.dp.send_msg(
+                        f"LOCK2: {trade.pair} +{effective_pnl:.1%} eff → closing 25% more, SL→breakeven")
+                except Exception:
+                    pass
+                logger.info(f"[PartialLock] {trade.pair} LOCK2: +{effective_pnl:.1%} → close 25% + breakeven")
+                return -close_amount
+
+        # ═══ EXISTING: AI-based DCA / Reduce / Half-exit ═══
         cached = self.ai_signal_cache.get(trade.pair, {})
         confidence = cached.get('confidence', 0.0)
         signal = cached.get('signal', 'NEUTRAL')
         entry_conf = trade.get_custom_data("ai_confidence", 0.5)
         if not isinstance(entry_conf, (int, float)):
             entry_conf = 0.5
-
-        hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
-        if hours_held < 1.0:
-            return None
 
         # PYRAMID: Confidence up + profitable
         if confidence > 0.80 and current_profit > 0.01 and confidence > entry_conf + 0.1:

@@ -61,7 +61,9 @@ class SemanticCache:
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=30000")
                 cursor = conn.cursor()
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS semantic_cache (
@@ -138,7 +140,7 @@ class SemanticCache:
         highest_sim = 0.0
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 if pair:
                     cursor.execute("SELECT query_embedding, response FROM semantic_cache WHERE pair = ?", (pair,))
@@ -191,7 +193,7 @@ class SemanticCache:
             return
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO semantic_cache 
@@ -206,7 +208,7 @@ class SemanticCache:
     def invalidate(self, pair: Optional[str] = None):
         """Invalidate cache entries for a specific pair, or all entries."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 if pair:
                     cursor.execute("DELETE FROM semantic_cache WHERE pair = ?", (pair,))
@@ -220,7 +222,7 @@ class SemanticCache:
     def cleanup_expired(self):
         """Remove expired entries based on TTL."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 # Use basic datetime comparison
                 cursor.execute("""

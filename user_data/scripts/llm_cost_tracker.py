@@ -145,7 +145,7 @@ class LLMCostTracker:
             target_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT SUM(cost_usd) FROM llm_calls 
@@ -164,7 +164,7 @@ class LLMCostTracker:
             
         summary = {"total_cost": 0.0, "total_calls": 0, "models": {}}
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT model, COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd), AVG(latency_ms)

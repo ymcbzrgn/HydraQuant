@@ -838,7 +838,9 @@ def test_requirements_pinned():
 def test_requirements_completeness():
     import os, glob, ast, sys
     scripts_dir = os.path.join(os.path.dirname(__file__), "..", "user_data", "scripts")
-    req_ai_path = os.path.join(os.path.dirname(__file__), "..", "requirements-ai.txt")
+    req_ai_path = os.path.join(os.path.dirname(__file__), "..", "requirements", "requirements-ai.txt")
+    if not os.path.exists(req_ai_path):
+        req_ai_path = os.path.join(os.path.dirname(__file__), "..", "requirements-ai.txt")
     req_path = os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
     
     req_ai_pkgs = []
