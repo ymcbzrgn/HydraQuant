@@ -20,6 +20,33 @@ except Exception as _e:
 
 logger = logging.getLogger(__name__)
 
+# Event taxonomy for Event-Driven Temporal RAG
+EVENT_TAXONOMY = {
+    "macro_fomc": ["fed", "fomc", "rate decision", "powell", "interest rate", "federal reserve"],
+    "macro_cpi": ["cpi", "inflation", "consumer price index"],
+    "macro_jobs": ["nonfarm", "unemployment", "jobs report", "employment"],
+    "crypto_halving": ["halving", "block reward", "mining reward"],
+    "crypto_hack": ["hack", "exploit", "vulnerability", "drain", "stolen", "attack"],
+    "crypto_regulatory": ["sec", "regulation", "ban", "approve", "etf", "lawsuit", "enforcement"],
+    "crypto_listing": ["listing", "delist", "binance list", "coinbase list"],
+    "crypto_whale": ["whale", "large transfer", "dormant wallet"],
+    "market_crash": ["crash", "liquidation", "black swan", "flash crash", "capitulation"],
+    "market_rally": ["rally", "breakout", "all-time high", "ath", "pump"],
+}
+
+
+def detect_event_type(text: str) -> str:
+    """Detect event type from text using keyword matching."""
+    text_lower = text.lower()
+    for event_type, keywords in EVENT_TAXONOMY.items():
+        matches = sum(1 for kw in keywords if kw in text_lower)
+        if matches >= 2:
+            return event_type
+        if matches == 1 and len(text_lower) < 300:
+            return event_type
+    return "general"
+
+
 class StreamingRAG:
     def __init__(self):
         """StreamingRAG with Hot Buffer vs. Cold Storage mechanics."""

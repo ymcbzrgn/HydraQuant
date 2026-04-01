@@ -76,12 +76,26 @@ class ContentChunker:
         return result
 
     @staticmethod
-    def construct_contextual_prompt(chunk: str, document_summary: str) -> str:
+    def construct_contextual_prompt(chunk: str, document_summary) -> str:
         """
-        Generates the string used for Contextual Chunking (Anthropic style).
-        The resulting text is embedded and sent to ChromaDB.
+        Contextual Chunking (Anthropic-style, enhanced).
+        Accepts either a string summary or a full article dict for richer context.
+        Anthropic reports 49% retrieval failure reduction with contextual prefixes.
         """
-        return f"Document context: {document_summary}\n\nExcerpt: {chunk}"
+        if isinstance(document_summary, dict):
+            # Rich context from article metadata
+            article = document_summary
+            source = article.get('source', 'Unknown')
+            date = str(article.get('published_at', ''))[:10]
+            sentiment = article.get('sentiment_score', 0.5)
+            if sentiment is None:
+                sentiment = 0.5
+            sent_label = 'Positive' if sentiment > 0.6 else 'Negative' if sentiment < 0.4 else 'Neutral'
+            title = str(article.get('title', ''))[:120]
+            return f"[{source} | {date} | {sent_label}] {title}\n\n{chunk}"
+        else:
+            # Legacy string summary (backward compatible)
+            return f"Document context: {document_summary}\n\nExcerpt: {chunk}"
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

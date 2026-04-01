@@ -152,12 +152,39 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Daily 00:05 UTC: Post-mortem analysis of yesterday's trades
+        self.scheduler.add_job(
+            self._send_daily_postmortem,
+            'cron', hour=0, minute=5,
+            id='daily_postmortem',
+            name='Daily Trade Post-Mortem (Telegram)',
+            replace_existing=True
+        )
+
         # Sunday 23:55 UTC: Send weekly Telegram summary
         self.scheduler.add_job(
             self._send_weekly_summary,
             'cron', day_of_week='sun', hour=23, minute=55,
             id='weekly_summary',
             name='Weekly Telegram Summary',
+            replace_existing=True
+        )
+
+        # Monday 06:00 UTC: RAG Quality Audit (RAGAS feedback loop)
+        self.scheduler.add_job(
+            self._rag_quality_audit,
+            'cron', day_of_week='mon', hour=6, minute=0,
+            id='rag_quality_audit',
+            name='RAG Quality Audit (weekly RAGAS)',
+            replace_existing=True
+        )
+
+        # Sunday 04:00 UTC: GraphRAG community rebuild + summarize
+        self.scheduler.add_job(
+            self._rebuild_graph_communities,
+            'cron', day_of_week='sun', hour=4, minute=0,
+            id='graph_rag_rebuild',
+            name='GraphRAG Community Rebuild',
             replace_existing=True
         )
 
@@ -289,7 +316,7 @@ class PipelineScheduler:
         )
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 23 jobs")
+        logger.info("[Scheduler] Started with 27 jobs (24 + RAGAS audit + GraphRAG + postmortem)")
         return True
 
     def stop(self):
@@ -799,6 +826,198 @@ class PipelineScheduler:
             
         except Exception as e:
             logger.error(f"[Scheduler:Job] Failed to send weekly summary: {e}")
+
+    def _send_daily_postmortem(self):
+        """Daily 00:05 UTC: Analyze yesterday's trades, categorize losses, report forgone winners.
+
+        Loss categories:
+        - SIGNAL_WRONG: Sub-scores pointed wrong direction
+        - TIMING_OFF: Right direction but MFE shows late entry (MFE > |loss|)
+        - SIZING_ISSUE: Disproportionate loss from stake asymmetry
+        - REGIME_SHIFT: Regime changed after entry
+        - EXECUTION_FAIL: Emergency exit, timeout, rejected order
+        """
+        logger.info("[Scheduler:Job] Running daily post-mortem analysis...")
+        try:
+            import sqlite3
+            from ai_config import AI_DB_PATH
+
+            # Query yesterday's closed trades from Freqtrade DB
+            trade_db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     "tradesv3.sqlite")
+            if not os.path.exists(trade_db):
+                logger.warning("[PostMortem] tradesv3.sqlite not found")
+                return
+
+            conn = sqlite3.connect(trade_db, timeout=30)
+            conn.row_factory = sqlite3.Row
+            trades = conn.execute("""
+                SELECT id, pair, close_profit as pnl_pct, close_profit_abs as pnl_abs,
+                       stake_amount, leverage, exit_reason, trade_duration,
+                       open_date, close_date, is_short
+                FROM trades
+                WHERE is_open = 0 AND close_date > datetime('now', '-1 day')
+                ORDER BY close_profit_abs ASC
+            """).fetchall()
+            conn.close()
+
+            if not trades:
+                logger.info("[PostMortem] No trades closed yesterday")
+                return
+
+            # Categorize
+            winners = [t for t in trades if t["pnl_pct"] and t["pnl_pct"] > 0]
+            losers = [t for t in trades if t["pnl_pct"] and t["pnl_pct"] <= 0]
+            total_pnl = sum(t["pnl_abs"] or 0 for t in trades)
+            win_rate = len(winners) / len(trades) * 100 if trades else 0
+
+            # Auto-tag losses
+            tagged_losses = []
+            for t in losers:
+                exit_r = t["exit_reason"] or ""
+                pnl_pct = (t["pnl_pct"] or 0) * 100
+                tag = "SIGNAL_WRONG"  # default
+
+                if "emergency" in exit_r or "timeout" in exit_r:
+                    tag = "EXECUTION_FAIL"
+                elif "first_hour" in exit_r:
+                    tag = "TIMING_OFF"
+                elif "trailing" in exit_r and pnl_pct > -2:
+                    tag = "TIMING_OFF"  # Trailing hit on small loss = late entry
+                elif "stoploss" in exit_r and abs(pnl_pct) > 10:
+                    tag = "SIZING_ISSUE"  # Big loss = possible stake problem
+                elif "regime" in exit_r or "confidence_drop" in exit_r:
+                    tag = "REGIME_SHIFT"
+
+                tagged_losses.append({
+                    "pair": t["pair"], "pnl": f"{pnl_pct:+.1f}%",
+                    "exit": exit_r, "tag": tag,
+                    "pnl_abs": f"${t['pnl_abs'] or 0:.2f}"
+                })
+
+            # Query forgone winners (shadow trades that would have been profitable)
+            forgone_text = ""
+            try:
+                ai_conn = sqlite3.connect(AI_DB_PATH, timeout=30)
+                ai_conn.row_factory = sqlite3.Row
+                forgone = ai_conn.execute("""
+                    SELECT pair, signal_type, confidence, entry_price, resolved_pnl_pct
+                    FROM forgone_profit
+                    WHERE was_executed = 0 AND resolved_pnl_pct > 2.0
+                    AND timestamp > datetime('now', '-1 day')
+                    ORDER BY resolved_pnl_pct DESC LIMIT 5
+                """).fetchall()
+                ai_conn.close()
+
+                if forgone:
+                    forgone_lines = []
+                    for f in forgone:
+                        forgone_lines.append(
+                            f"  {f['pair']} {f['signal_type']} conf={f['confidence']:.0%} → +{f['resolved_pnl_pct']:.1f}%")
+                    forgone_text = "\nForgone Winners (kacirildi):\n" + "\n".join(forgone_lines)
+            except Exception:
+                pass
+
+            # Build message
+            lines = [
+                "DAILY POST-MORTEM",
+                f"Trades: {len(trades)} ({len(winners)}W/{len(losers)}L) WR={win_rate:.0f}%",
+                f"PnL: ${total_pnl:.2f}",
+            ]
+
+            if tagged_losses:
+                lines.append(f"\nLosers ({len(tagged_losses)}):")
+                # Group by tag
+                from collections import Counter
+                tag_counts = Counter(l["tag"] for l in tagged_losses)
+                for tag, count in tag_counts.most_common():
+                    lines.append(f"  [{tag}] x{count}")
+                # Top 3 biggest losses
+                lines.append("Top losses:")
+                for l in tagged_losses[:3]:
+                    lines.append(f"  {l['pair']} {l['pnl']} ({l['pnl_abs']}) [{l['tag']}] exit={l['exit']}")
+
+            if forgone_text:
+                lines.append(forgone_text)
+
+            # Top 3 winners
+            if winners:
+                lines.append(f"\nTop winners:")
+                top_w = sorted(winners, key=lambda t: t["pnl_abs"] or 0, reverse=True)[:3]
+                for w in top_w:
+                    lines.append(f"  {w['pair']} +{(w['pnl_pct'] or 0)*100:.1f}% (${w['pnl_abs'] or 0:.2f})")
+
+            message = "\n".join(lines)
+            logger.info(f"[PostMortem] {message}")
+
+            # Send via Telegram
+            try:
+                from telegram_notifier import AITelegramNotifier
+                notifier = AITelegramNotifier()
+                notifier.send_alert(message, level="INFO")
+            except Exception as e:
+                logger.debug(f"[PostMortem] Telegram send failed: {e}")
+
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] Daily post-mortem failed: {e}")
+
+    def _rag_quality_audit(self):
+        """Weekly Monday 06:00: RAGAS quality audit — measure retrieval quality, flag bad chunks."""
+        logger.info("[Scheduler:Job] Running RAG quality audit...")
+        try:
+            from rag_evaluator import RAGQualityEvaluator
+            evaluator = RAGQualityEvaluator()
+
+            report = evaluator.get_weekly_quality_report()
+            if not report:
+                logger.info("[RAG Audit] No quality data yet")
+                return
+
+            avg_faith = report.get("avg_faithfulness", 0)
+            avg_cp = report.get("avg_context_precision", 0)
+            avg_ar = report.get("avg_answer_relevancy", 0)
+            trend = report.get("trend", "unknown")
+            n = report.get("sample_count", 0)
+
+            msg = (
+                f"RAG QUALITY AUDIT\n"
+                f"Samples: {n}\n"
+                f"Faithfulness: {avg_faith:.2f} (target: 0.90)\n"
+                f"Context Precision: {avg_cp:.2f} (target: 0.85)\n"
+                f"Answer Relevancy: {avg_ar:.2f} (target: 0.90)\n"
+                f"Trend: {trend}"
+            )
+            logger.info(f"[RAG Audit] {msg}")
+
+            try:
+                from telegram_notifier import AITelegramNotifier
+                AITelegramNotifier().send_alert(msg, level="INFO")
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.error(f"[RAG Audit] Failed: {e}")
+
+    def _rebuild_graph_communities(self):
+        """Weekly Sunday 04:00: Rebuild GraphRAG communities from knowledge graph."""
+        logger.info("[Scheduler:Job] Rebuilding GraphRAG communities...")
+        try:
+            from graph_rag import GraphRAG
+            graph = GraphRAG()
+            communities = graph.build_communities()
+            if communities:
+                # Use LLM for summarization (lazy import to avoid singleton issues)
+                try:
+                    from llm_router import LLMRouter
+                    llm = LLMRouter(temperature=0.3)
+                    graph.summarize_communities(communities, llm_router=llm)
+                except Exception:
+                    graph.summarize_communities(communities)  # No LLM = fallback text
+                logger.info(f"[GraphRAG] Rebuilt {len(communities)} communities")
+            else:
+                logger.info("[GraphRAG] No communities found (empty knowledge graph)")
+        except Exception as e:
+            logger.error(f"[GraphRAG] Rebuild failed: {e}")
 
     def _memory_cleanup(self):
         """Hourly: Force garbage collection and log memory usage.

@@ -577,10 +577,67 @@ class HybridRetriever:
         
         return results
 
+    # ═══ RAG GUARANTEE: Event search + Regime filter + Chunk boost ═══
+
+    def search_similar_events(self, event_type: str, top_k: int = 10) -> list:
+        """Event-Driven Temporal RAG: find historical chunks with same event type."""
+        if not event_type or event_type == "general":
+            return []
+        try:
+            query_text = f"Historical impact of {event_type.replace('_', ' ')} on cryptocurrency prices"
+            results = self.collection.query(
+                query_texts=[query_text],
+                where={"event_type": event_type},
+                n_results=top_k,
+            )
+            if not results or not results.get("documents") or not results["documents"][0]:
+                return []
+            return [
+                {"text": doc, "metadata": meta, "score": 1.0 / (1.0 + dist)}
+                for doc, meta, dist in zip(
+                    results["documents"][0],
+                    results["metadatas"][0],
+                    results["distances"][0]
+                )
+            ]
+        except Exception as e:
+            logger.debug(f"[EventRAG] Event search failed: {e}")
+            return []
+
+    def _build_regime_filter(self, current_regime: str = None) -> dict:
+        """Regime-Aware Filter: only retrieve chunks from compatible regimes."""
+        if not current_regime:
+            return {}
+        try:
+            return {
+                "$or": [
+                    {"market_regime": current_regime},
+                    {"market_regime": "transitional"},
+                ]
+            }
+        except Exception:
+            return {}
+
+    def _apply_chunk_boost(self, results: list) -> list:
+        """Outcome-Based Chunk Scoring: boost/penalize chunks based on trade PnL history."""
+        try:
+            from rag_feedback import RAGFeedbackLoop
+            feedback = RAGFeedbackLoop()
+            for doc in results:
+                doc_id = doc.get("id", "")
+                if doc_id:
+                    boost = feedback.get_chunk_boost(doc_id)
+                    doc["score"] = float(doc.get("score", 1.0)) * boost
+            results.sort(key=lambda x: float(x.get("score", 0)), reverse=True)
+        except Exception:
+            pass  # Feedback unavailable = no boost (neutral)
+        return results
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     retriever = HybridRetriever()
-    
+
     # Fake indexing test (We drop the table and chroma for clean test)
     # Be careful, this test adds docs on every run
     if retriever.collection.count() < 4:
