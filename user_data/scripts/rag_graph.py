@@ -1730,7 +1730,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         # for the NEXT query cycle (CoT-RAG, Bull/Bear debate, ColBERT reranking)
         def _background_madam(p, td):
             try:
-                acq = _signal_semaphore.acquire(timeout=120)  # Wait up to 2min — quality over speed
+                acq = _signal_semaphore.acquire(timeout=900)  # Wait up to 15min — MADAM ~9min/pair, quality over speed
                 if acq:
                     try:
                         # CRITICAL: Invalidate cache INSIDE semaphore so MADAM actually runs.
@@ -1746,7 +1746,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
                     finally:
                         _signal_semaphore.release()
                 else:
-                    logger.debug(f"[Phase20:BackgroundMADAM] {p} semaphore busy after 120s, skipping")
+                    logger.debug(f"[Phase20:BackgroundMADAM] {p} semaphore busy after 15min, skipping")
             except Exception as e:
                 logger.debug(f"[Phase20:BackgroundMADAM] {p} failed: {e}")
 
@@ -1947,7 +1947,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 # Concurrency limiter: max 2 coins processing the full 5-agent graph in parallel.
 # Each coin spawns 5 LLM calls (LangGraph parallel nodes). Without this,
 # 4 coins × 5 agents = 20 concurrent LLM calls exhausting all provider quotas.
-_signal_semaphore = _threading.Semaphore(1)  # 1 concurrent pair — 2 caused CPU timeout + rate limit cascade
+_signal_semaphore = _threading.Semaphore(2)  # 2 concurrent — safe now with 10 Gemini keys + ColBERT serializes in model_server
 
 _signal_executor = ThreadPoolExecutor(max_workers=4)
 
