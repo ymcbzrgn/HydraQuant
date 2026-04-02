@@ -33,8 +33,8 @@ _flashrank_model = None
 # Serialize ColBERT requests — only 1 at a time to prevent OOM from concurrent tensors
 _colbert_lock = threading.Semaphore(1)
 
-_RSS_WARN_MB = 2000   # trigger gc.collect() proactively
-_RSS_LIMIT_MB = 2500  # reject requests with 503
+_RSS_WARN_MB = 3500   # trigger gc.collect() proactively (models alone ~3.5GB)
+_RSS_LIMIT_MB = 4500  # reject requests with 503 (31GB server, 4.5GB safe for model_server)
 
 
 def _get_rss_mb() -> float:
