@@ -13,11 +13,13 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class CryptoPanicFetcher:
+    # Class-level flags survive garbage collection of instances
+    _disabled = False
+    _404_logged = False
+
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.environ.get("CRYPTOPANIC_API_KEY")
         self.base_url = "https://cryptopanic.com/api/v1/posts/"
-        self._disabled = False
-        self._404_logged = False
 
     def fetch(self, currencies: List[str] = ["BTC", "ETH"], limit: int = 20) -> List[Dict[str, Any]]:
         """

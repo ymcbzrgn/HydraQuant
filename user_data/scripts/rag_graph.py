@@ -1372,18 +1372,22 @@ CRITICAL: Use the RAW INDICATORS above to VERIFY agent claims — if an agent cl
 
 STEP 2 — CONTRADICTION DETECTION:
 Identify contradictions between agents. If 2+ agents contradict each other, confidence MUST decrease.
-If ALL agents agree unanimously — be SKEPTICAL (groupthink). Reduce confidence by 0.10.
+If ALL agents agree unanimously — apply SCRUTINY: if their shared conclusion is supported by 3+ independent RAW indicators above, this is CONVERGENCE (confidence +0.05). If unsupported by raw data, this is GROUPTHINK (confidence -0.10).
 
 STEP 3 — PRE-MORTEM:
 Assume your proposed signal FAILED and the trade lost 5% in 24h. Working backwards:
 - What market condition changed that you underweighted?
 - Which agent's evidence did you OVER-rely on?
-If the pre-mortem reveals 2+ plausible failure modes, REDUCE confidence by 0.10.
+If the pre-mortem reveals 2+ plausible failure modes AND those modes are supported by current raw indicators, REDUCE confidence by 0.10. If failure modes are purely speculative with no data backing, no adjustment.
 
 STEP 4 — STEELMAN THE LOSING SIDE:
 If leaning BULLISH: construct the STRONGEST bearish argument the Bear Researcher MISSED.
 If leaning BEARISH: construct the STRONGEST bullish argument the Bull Researcher MISSED.
-If the steelmanned counter-argument is strong (would change a reasonable person's mind), reduce confidence by 0.10.
+If the steelmanned counter-argument is strong AND backed by raw indicators, reduce confidence by 0.10. If theoretical with no data backing, no adjustment.
+
+STEP 4.5 — CONVICTION CHECK:
+If 3+ independent raw indicators converge on the SAME direction (e.g. RSI + MACD + EMA all bullish), ADD +0.05 to confidence.
+If multi-timeframe alignment is confirmed (1h + 4h agree on direction), ADD +0.03.
 
 STEP 5 — CONFIDENCE DECOMPOSITION:
 Rate each 0.0 to 1.0:
@@ -1404,7 +1408,7 @@ FINAL_CONFIDENCE = weighted average, then apply regime/pre-mortem/steelman adjus
 0.70 = Strong. 3+ independent signals converge — you MUST cite all 3.
 0.75 = Very strong. Multi-timeframe alignment + volume confirmation.
 0.80 = Extreme. Once-a-month textbook setup.
-0.85+ = Almost never. Overwhelming evidence. Your MEDIAN should be 0.55-0.62.
+0.85+ = Almost never. Overwhelming evidence. Your MEDIAN should be 0.58-0.65.
 
 === CALIBRATION EXAMPLES ===
 RSI=48, MACD slight positive, one EMA cross, neutral sentiment → BULLISH 0.52
@@ -1730,7 +1734,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         # for the NEXT query cycle (CoT-RAG, Bull/Bear debate, ColBERT reranking)
         def _background_madam(p, td):
             try:
-                acq = _signal_semaphore.acquire(timeout=900)  # Wait up to 15min — MADAM ~9min/pair, quality over speed
+                acq = _signal_semaphore.acquire(timeout=120)  # Wait up to 2min for background enrichment
                 if acq:
                     try:
                         # CRITICAL: Invalidate cache INSIDE semaphore so MADAM actually runs.
@@ -1746,7 +1750,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
                     finally:
                         _signal_semaphore.release()
                 else:
-                    logger.debug(f"[Phase20:BackgroundMADAM] {p} semaphore busy after 15min, skipping")
+                    logger.debug(f"[Phase20:BackgroundMADAM] {p} semaphore busy after 2min, skipping")
             except Exception as e:
                 logger.debug(f"[Phase20:BackgroundMADAM] {p} failed: {e}")
 
@@ -1761,7 +1765,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
 
     # Ambiguous signal (EE conf < 0.40) — try MADAM with short timeout
     # Evidence Engine is our safety net, so shorter wait is fine
-    acquired = _signal_semaphore.acquire(timeout=90)  # 90s — quality over speed, let MADAM complete
+    acquired = _signal_semaphore.acquire(timeout=30)  # 30s — within 45s outer timeout budget
     if not acquired:
         # Semaphore busy — return Evidence Engine result (not NEUTRAL 0.01!)
         logger.info(f"[Phase20:EvidenceFirst] {pair} semaphore busy → using Evidence Engine ({ee_confidence:.2f})")
@@ -1860,22 +1864,19 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
 
         logger.warning(f"[Self-RAG] Output failed critique. Retrying pipeline. Attempt {attempt+1}/{max_retries}")
 
-    # Phase 19: System health degradation — reduce confidence if system is unhealthy
+    # Phase 19/21: System health degradation — ONLY for retrieval-affecting issues (ChromaDB down)
+    # Phase 21 fix: removed blanket "degraded" penalty that was unrelated to signal quality
     try:
         from system_monitor import SystemMonitor
         _monitor = SystemMonitor()
         health = _monitor.check_health()
-        health_status = health.get("status", "ok")
-        if health_status == "critical" and confidence > 0.35:
+        checks = health.get("checks", {})
+        # Only penalize if ChromaDB (retrieval) was actually down — that makes the signal less reliable
+        if checks.get("chromadb") is False and confidence > 0.40:
             original_conf = confidence
-            confidence = max(confidence * 0.7, 0.35)  # 30% penalty, floor at fallback level
-            reasoning += f" [DEGRADED: system health critical, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
-            logger.warning(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (system critical)")
-        elif health_status == "degraded" and confidence > 0.50:
-            original_conf = confidence
-            confidence = max(confidence * 0.85, 0.50)  # 15% penalty
-            reasoning += f" [DEGRADED: system health degraded, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
-            logger.info(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (system degraded)")
+            confidence = max(confidence * 0.85, 0.40)  # 15% penalty, floor at 0.40
+            reasoning += f" [DEGRADED: ChromaDB down, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
+            logger.warning(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (ChromaDB down)")
     except Exception as e:
         logger.debug(f"[Phase19:Health] Health check skipped: {e}")
 

@@ -50,6 +50,12 @@ class PipelineScheduler:
         self._opportunity_scanner = None
         self._agent_pool = None
         self._cross_pair_intel = None
+        # Phase 21: Additional singletons to prevent memory leak (+200MB/hr)
+        self._system_monitor = None
+        self._telegram_notifier = None
+        self._bidi_rag = None
+        self._calibrator = None
+        self._forgone_engine = None
 
     def _get_pipeline(self):
         """Lazy-load DataPipeline to avoid circular imports."""
@@ -57,6 +63,13 @@ class PipelineScheduler:
             from data_pipeline import DataPipeline
             self._pipeline = DataPipeline()
         return self._pipeline
+
+    def _get_telegram_notifier(self):
+        """Lazy singleton for AITelegramNotifier."""
+        if self._telegram_notifier is None:
+            from telegram_notifier import AITelegramNotifier
+            self._telegram_notifier = AITelegramNotifier()
+        return self._telegram_notifier
 
     def start(self):
         """Initialize and start the background scheduler."""
@@ -454,8 +467,10 @@ class PipelineScheduler:
         """Job: Run system health check and record metrics."""
         logger.info("[Scheduler:Job] Running health check...")
         try:
-            from system_monitor import SystemMonitor
-            monitor = SystemMonitor()
+            if self._system_monitor is None:
+                from system_monitor import SystemMonitor
+                self._system_monitor = SystemMonitor()
+            monitor = self._system_monitor
             health = monitor.check_health()
             # Record scheduler heartbeat metric
             monitor.record_metric("scheduler_job", 1.0, {"job": "health_check"})
@@ -469,9 +484,10 @@ class PipelineScheduler:
         """Job: Write back AI trade evaluation lessons into Vector DB."""
         logger.info("[Scheduler:Job] Embedding Bidirectional RAG lessons...")
         try:
-            from bidirectional_rag import BidirectionalRAG
-            bidi_rag = BidirectionalRAG()
-            lessons = bidi_rag.get_unembedded_lessons()
+            if self._bidi_rag is None:
+                from bidirectional_rag import BidirectionalRAG
+                self._bidi_rag = BidirectionalRAG()
+            lessons = self._bidi_rag.get_unembedded_lessons()
             if not lessons:
                 return
 
@@ -494,7 +510,7 @@ class PipelineScheduler:
             retriever.add_documents(documents=docs, metadatas=metas, ids=ids)
             
             # Mark as embedded
-            bidi_rag.mark_lessons_embedded([l['id'] for l in lessons])
+            self._bidi_rag.mark_lessons_embedded([l['id'] for l in lessons])
             logger.info(f"[Scheduler:Job] Successfully integrated {len(lessons)} Bidirectional lessons.")
             
         except Exception as e:
@@ -504,10 +520,12 @@ class PipelineScheduler:
         """Job: Re-fit Platt scaling on latest trade outcomes for confidence calibration."""
         logger.info("[Scheduler:Job] Re-fitting confidence calibrator...")
         try:
-            from confidence_calibrator import ConfidenceCalibrator
-            calibrator = ConfidenceCalibrator()
-            calibrator.fit_platt_scaling()
-            report = calibrator.report()
+            if self._calibrator is None:
+                from confidence_calibrator import ConfidenceCalibrator
+                self._calibrator = ConfidenceCalibrator()
+            self._calibrator._brier_disabled = False  # Reset so re-fit can re-evaluate
+            self._calibrator.fit_platt_scaling()
+            report = self._calibrator.report()
             logger.info(f"[Scheduler:Job] Calibrator re-fit complete.\n{report}")
         except Exception as e:
             logger.error(f"[Scheduler:Job] Calibrator re-fit failed: {e}")
@@ -520,9 +538,10 @@ class PipelineScheduler:
         """
         logger.info("[Scheduler:Job] Analyzing forgone vs executed P&L...")
         try:
-            from forgone_pnl_engine import ForgonePnLEngine
-            engine = ForgonePnLEngine()
-            summary = engine.weekly_summary()
+            if self._forgone_engine is None:
+                from forgone_pnl_engine import ForgonePnLEngine
+                self._forgone_engine = ForgonePnLEngine()
+            summary = self._forgone_engine.weekly_summary()
 
             forgone_trades = summary.get("forgone_trades", {})
             executed_trades = summary.get("executed_trades", {})
@@ -545,7 +564,7 @@ class PipelineScheduler:
                 # Send Telegram alert about missed opportunity
                 try:
                     from telegram_notifier import AITelegramNotifier
-                    notifier = AITelegramNotifier()
+                    notifier = self._get_telegram_notifier()
                     notifier.send_alert(
                         f"📊 Forgone P&L Alert: Blocked signals would have earned {forgone_pnl:+.2f}% "
                         f"vs executed {executed_pnl:+.2f}% (gap: {gap:.2f}%). "
@@ -598,6 +617,9 @@ class PipelineScheduler:
                 from backtest_embedder import BacktestEmbedder
                 self._backtest_embedder = BacktestEmbedder()
             count = self._backtest_embedder.process_all(enrich=True)
+            # Clear OHLCV cache to prevent memory growth in singleton
+            if hasattr(self._backtest_embedder, '_ohlcv_cache'):
+                self._backtest_embedder._ohlcv_cache.clear()
             if count > 0:
                 logger.info(f"[Scheduler:Job] Processed {count} new backtest trades into RAG pipeline.")
             else:
@@ -668,41 +690,42 @@ class PipelineScheduler:
             import sqlite3
             from ai_config import AI_DB_PATH
             conn = sqlite3.connect(AI_DB_PATH, timeout=10)
-            conn.row_factory = sqlite3.Row
+            try:
+                conn.row_factory = sqlite3.Row
 
-            triggered = False
-            trigger_reason = ""
+                triggered = False
+                trigger_reason = ""
 
-            # Check Fear & Greed for extreme values
-            # Smart throttle: only trigger if F&G CHANGED since last check
-            # (same F&G = same analysis needed, no point re-invalidating)
-            fng_row = conn.execute(
-                "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
-            ).fetchone()
-            if fng_row:
-                fng = int(fng_row["value"])
-                if fng < 15 or fng > 85:
-                    _prev_fng = getattr(self, '_last_event_fng', None)
-                    _fng_bucket = fng // 5  # Group by 5-point bands (0-4, 5-9, 10-14...)
-                    _prev_bucket = (_prev_fng // 5) if _prev_fng is not None else None
-                    if _fng_bucket != _prev_bucket:
+                # Check Fear & Greed for extreme values
+                # Smart throttle: only trigger if F&G CHANGED since last check
+                # (same F&G = same analysis needed, no point re-invalidating)
+                fng_row = conn.execute(
+                    "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
+                ).fetchone()
+                if fng_row:
+                    fng = int(fng_row["value"])
+                    if fng < 15 or fng > 85:
+                        _prev_fng = getattr(self, '_last_event_fng', None)
+                        _fng_bucket = fng // 5  # Group by 5-point bands (0-4, 5-9, 10-14...)
+                        _prev_bucket = (_prev_fng // 5) if _prev_fng is not None else None
+                        if _fng_bucket != _prev_bucket:
+                            triggered = True
+                            trigger_reason = f"F&G extreme: {fng} (was {_prev_fng})"
+                        self._last_event_fng = fng
+
+                # Check for extreme funding rates (any pair)
+                if not triggered:
+                    extreme_funding = conn.execute("""
+                        SELECT pair, funding_rate FROM derivatives_data
+                        WHERE ABS(funding_rate) > 0.001
+                        AND timestamp > datetime('now', '-15 minutes')
+                        ORDER BY ABS(funding_rate) DESC LIMIT 1
+                    """).fetchone()
+                    if extreme_funding:
                         triggered = True
-                        trigger_reason = f"F&G extreme: {fng} (was {_prev_fng})"
-                    self._last_event_fng = fng
-
-            # Check for extreme funding rates (any pair)
-            if not triggered:
-                extreme_funding = conn.execute("""
-                    SELECT pair, funding_rate FROM derivatives_data
-                    WHERE ABS(funding_rate) > 0.001
-                    AND timestamp > datetime('now', '-15 minutes')
-                    ORDER BY ABS(funding_rate) DESC LIMIT 1
-                """).fetchone()
-                if extreme_funding:
-                    triggered = True
-                    trigger_reason = f"Funding spike: {extreme_funding['pair']} {float(extreme_funding['funding_rate'])*100:.3f}%"
-
-            conn.close()
+                        trigger_reason = f"Funding spike: {extreme_funding['pair']} {float(extreme_funding['funding_rate'])*100:.3f}%"
+            finally:
+                conn.close()
 
             if triggered:
                 logger.warning(f"[Phase20:EventTrigger] {trigger_reason} → forcing Evidence Engine re-analysis")
@@ -711,13 +734,15 @@ class PipelineScheduler:
                     engine = EvidenceEngine()
                     # Re-analyze top pairs from opportunity_scores
                     conn2 = sqlite3.connect(AI_DB_PATH, timeout=10)
-                    conn2.row_factory = sqlite3.Row
-                    pairs = conn2.execute("""
-                        SELECT pair FROM opportunity_scores
-                        WHERE id IN (SELECT MAX(id) FROM opportunity_scores GROUP BY pair)
-                        ORDER BY composite_score DESC LIMIT 10
-                    """).fetchall()
-                    conn2.close()
+                    try:
+                        conn2.row_factory = sqlite3.Row
+                        pairs = conn2.execute("""
+                            SELECT pair FROM opportunity_scores
+                            WHERE id IN (SELECT MAX(id) FROM opportunity_scores GROUP BY pair)
+                            ORDER BY composite_score DESC LIMIT 10
+                        """).fetchall()
+                    finally:
+                        conn2.close()
 
                     # Invalidate semantic cache for top pairs so next real signal cycle
                     # uses fresh data. Don't generate signals here — we don't have tech_data
@@ -740,7 +765,7 @@ class PipelineScheduler:
                     # Send Telegram alert
                     try:
                         from telegram_notifier import AITelegramNotifier
-                        notifier = AITelegramNotifier()
+                        notifier = self._get_telegram_notifier()
                         notifier.send_alert(
                             f"Event Trigger: {trigger_reason}. Re-analyzed top 10 pairs.",
                             level="WARNING"
@@ -795,14 +820,16 @@ class PipelineScheduler:
             except Exception:
                 pass
             
-            forgone_engine = ForgonePnLEngine()
-            f_summary = forgone_engine.weekly_summary()
+            if self._forgone_engine is None:
+                from forgone_pnl_engine import ForgonePnLEngine
+                self._forgone_engine = ForgonePnLEngine()
+            f_summary = self._forgone_engine.weekly_summary()
             stats["forgone_pnl"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
 
             # $100 Hypothetical Portfolio
-            stats["hypothetical"] = forgone_engine.get_hypothetical_balance()
+            stats["hypothetical"] = self._forgone_engine.get_hypothetical_balance()
 
-            notifier = AITelegramNotifier()
+            notifier = self._get_telegram_notifier()
             notifier.send_daily_summary(stats)
             
         except Exception as e:
@@ -821,14 +848,16 @@ class PipelineScheduler:
                 "max_drawdown": 0.0
             }
             
-            forgone_engine = ForgonePnLEngine()
-            f_summary = forgone_engine.weekly_summary()
+            if self._forgone_engine is None:
+                from forgone_pnl_engine import ForgonePnLEngine
+                self._forgone_engine = ForgonePnLEngine()
+            f_summary = self._forgone_engine.weekly_summary()
             stats["forgone_pnl_total"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
 
             # $100 Hypothetical Portfolio
-            stats["hypothetical"] = forgone_engine.get_hypothetical_balance()
+            stats["hypothetical"] = self._forgone_engine.get_hypothetical_balance()
 
-            notifier = AITelegramNotifier()
+            notifier = self._get_telegram_notifier()
             notifier.send_weekly_summary(stats)
             
         except Exception as e:
@@ -860,7 +889,8 @@ class PipelineScheduler:
             conn.row_factory = sqlite3.Row
             trades = conn.execute("""
                 SELECT id, pair, close_profit as pnl_pct, close_profit_abs as pnl_abs,
-                       stake_amount, leverage, exit_reason, trade_duration,
+                       stake_amount, leverage, exit_reason,
+                       CAST((julianday(close_date) - julianday(open_date)) * 1440 AS INTEGER) as trade_duration,
                        open_date, close_date, is_short
                 FROM trades
                 WHERE is_open = 0 AND close_date > datetime('now', '-1 day')
@@ -960,7 +990,7 @@ class PipelineScheduler:
             # Send via Telegram
             try:
                 from telegram_notifier import AITelegramNotifier
-                notifier = AITelegramNotifier()
+                notifier = self._get_telegram_notifier()
                 notifier.send_alert(message, level="INFO")
             except Exception as e:
                 logger.debug(f"[PostMortem] Telegram send failed: {e}")
@@ -998,7 +1028,7 @@ class PipelineScheduler:
 
             try:
                 from telegram_notifier import AITelegramNotifier
-                AITelegramNotifier().send_alert(msg, level="INFO")
+                self._get_telegram_notifier().send_alert(msg, level="INFO")
             except Exception:
                 pass
 
@@ -1193,6 +1223,8 @@ class PipelineScheduler:
                     from backtest_embedder import BacktestEmbedder
                     self._backtest_embedder = BacktestEmbedder()
                 count = self._backtest_embedder.process_all(results_dir=bt_results_dir, enrich=True)
+                if hasattr(self._backtest_embedder, '_ohlcv_cache'):
+                    self._backtest_embedder._ohlcv_cache.clear()
                 logger.info(f"[Scheduler:AutoBacktest] Bootstrap loaded {count} trades into AI pipeline")
             except Exception as e:
                 logger.error(f"[Scheduler:AutoBacktest] Bootstrap failed: {e}")

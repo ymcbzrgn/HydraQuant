@@ -273,12 +273,12 @@ class AIFreqtradeSizer(IStrategy):
                 xl = latest.get('exit_long', 'N/A')
                 es = latest.get('enter_short', 'N/A')
                 xs = latest.get('exit_short', 'N/A')
-                logger.warning(
+                logger.debug(
                     f"[ENTRY-SIGNAL] {pair}: NO SIGNAL! "
                     f"enter_long={el} exit_long={xl} enter_short={es} exit_short={xs}"
                 )
             else:
-                logger.warning(f"[ENTRY-SIGNAL] {pair}: EMPTY DATAFRAME!")
+                logger.debug(f"[ENTRY-SIGNAL] {pair}: EMPTY DATAFRAME!")
         return signal, tag
 
     # Class-level HTTP session — connection pooling prevents Errno 24 (Too many open files)
@@ -781,7 +781,7 @@ class AIFreqtradeSizer(IStrategy):
             # Logging <0.30 = "look how bad this was" is just as valuable as "look how good".
             # Shadow data proves: conf 0.30+ = +7.88% avg PnL, %83 win rate
             # Lowered from 0.55 to 0.40 — sweet spot between fee break-even and missed alpha
-            REAL_TRADE_THRESHOLD = 0.40
+            REAL_TRADE_THRESHOLD = float(self.confidence_threshold.value)
 
             # Determine execution mode for logging
             if confidence >= REAL_TRADE_THRESHOLD and signal_type != 'NEUTRAL':
@@ -1017,7 +1017,7 @@ class AIFreqtradeSizer(IStrategy):
         CORE PRINCIPLE: TRADE-FIRST AUTONOMY (Sizing not blocking).
         Instead of blocking a trade, we scale the size based on FreqAI confidence/market regime.
         """
-        logger.warning(
+        logger.info(
             f"[TRADE-ATTEMPT] custom_stake_amount CALLED: {pair} side={side} "
             f"proposed={proposed_stake:.4f} min={min_stake:.4f} max={max_stake:.4f}"
         )
@@ -1027,28 +1027,8 @@ class AIFreqtradeSizer(IStrategy):
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
 
-        # Base multiplier
-        multiplier = 1.0
-        
-        # Scale based on sentiment & F&G
-        if '%-fng_index' in last_candle:
-            fng = last_candle['%-fng_index']
-            # If Extreme Greed (> 80) or Extreme Fear (< 20), we reduce stake (contrarian caution)
-            if fng > 80 or fng < 20:
-                multiplier *= 0.5
-                
-        if '%-sentiment_24h' in last_candle:
-            sent_24h = last_candle['%-sentiment_24h']
-            # Positive sentiment gives slight sizing boost
-            if sent_24h > 0.5:
-                multiplier *= 1.2
-            elif sent_24h < -0.5:
-                # Still trade, but 70% smaller
-                multiplier *= 0.3
-                
-        # Final Position Sizing math
-        # We start with Kelly/Base Stake
-        final_stake = proposed_stake * multiplier
+        # Sentiment/F&G already reflected in AI confidence — no separate multiplier (Phase 21: removed double-counting)
+        final_stake = proposed_stake
         
         if self.dp.runmode.value in ('dry_run', 'live'):
             # Modulate stake heavily based on RAG Brain's LLM Confidence (Phase 3.5.2 logic)
@@ -1078,14 +1058,16 @@ class AIFreqtradeSizer(IStrategy):
             if autonomy_cap is not None:
                 final_stake = min(final_stake, autonomy_cap)
 
-            # Phase 22: Funding rate check — extreme funding = reduce position
+            # Phase 22: Funding rate check — extreme funding = cap position (not multiply)
             try:
                 funding = self.dp.funding_rate(pair)
                 if funding and isinstance(funding, dict):
                     fr = funding.get('fundingRate', 0)
                     if fr and abs(fr) > 0.0005:  # >0.05% funding = extreme
-                        final_stake *= 0.5  # Halve position on extreme funding
-                        logger.info(f"[FundingRate] {pair} extreme funding {fr:.4%}, halving stake")
+                        funding_cap = autonomy_cap * 0.5 if autonomy_cap else final_stake * 0.5
+                        if final_stake > funding_cap:
+                            logger.info(f"[FundingRate] {pair} extreme funding {fr:.4%}, capping stake ${final_stake:.2f}→${funding_cap:.2f}")
+                            final_stake = funding_cap
             except Exception:
                 pass
 
@@ -1124,15 +1106,8 @@ class AIFreqtradeSizer(IStrategy):
             # Consume budget for this trade
             self.risk_budget.consume_budget(final_stake, atr_volatility, confidence)
 
-        # Graduated Kelly: confidence determines fraction of Kelly
-        # Cold-start phase: conservative sizing until calibrator matures
-        # conf 0.55-0.65 → quarter Kelly, 0.65-0.80 → half Kelly, 0.80+ → full Kelly
-        if self.dp.runmode.value in ('dry_run', 'live') and confidence < 0.80:
-            if confidence < 0.65:
-                final_stake *= 0.25   # Quarter Kelly — cautious, still learning
-            elif confidence < 0.80:
-                final_stake *= 0.50   # Half Kelly — proven track record
-            # conf >= 0.80: full Kelly (no reduction)
+        # Phase 21: Removed Graduated Kelly — PositionSizer already applies confidence^1.5 curve.
+        # Double confidence reduction was destroying stake sizes ($50→$0.02).
 
         # Min stake floor: only enforce for real trades that passed the threshold
         if final_stake < min_stake:
@@ -1144,7 +1119,7 @@ class AIFreqtradeSizer(IStrategy):
                             time_in_force: str, current_time: datetime, entry_tag: str,
                             side: str, **kwargs) -> bool:
         """Pre-trade validation + AI metadata storage."""
-        logger.warning(
+        logger.info(
             f"[TRADE-ATTEMPT] confirm_trade_entry CALLED: {pair} side={side} "
             f"rate={rate:.6f} stake=${amount*rate:.2f}"
         )

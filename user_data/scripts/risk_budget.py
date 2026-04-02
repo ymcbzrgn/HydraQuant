@@ -142,20 +142,18 @@ class RiskBudgetManager:
 
     def scale_position(self, proposed_stake: float) -> float:
         """
-        Scale a proposed position based on remaining budget.
-        If >75% budget used, start shrinking. If 100% used, shrink to 10% (never block).
+        Cap position based on remaining budget (Phase 21: cap, not multiplier).
+        Small stakes pass through unchanged. Only large stakes get capped.
+        Trade-First: never block, never crush already-small stakes.
         """
-        utilization = self.budget_utilization()
+        remaining = self.remaining_budget()
+        if remaining <= 0:
+            # Budget exhausted — allow dust trades only (never block)
+            return min(proposed_stake, max(self.daily_budget * 0.01, 1.0))
 
-        if utilization < 0.75:
-            return proposed_stake  # Full position
-        elif utilization < 1.0:
-            # Linear scale-down from 100% to 25% between 75%-100% utilization
-            fraction = 1.0 - 3.0 * (utilization - 0.75)  # 1.0 → 0.25
-            return proposed_stake * max(fraction, 0.25)
-        else:
-            # Budget exceeded — shrink to 10% (dust position, never block)
-            return proposed_stake * 0.10
+        # Cap at 25% of remaining budget — prevents one trade from eating the rest
+        budget_cap = remaining * 0.25
+        return min(proposed_stake, budget_cap)
 
     def weekly_adjust(self, weekly_pnl_pct: float):
         """

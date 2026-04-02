@@ -119,11 +119,11 @@ class PositionSizer:
     """
     def __init__(self, 
                  max_portfolio_risk_per_trade: float = 0.05,
-                 confidence_exponent: float = 2.0):
+                 confidence_exponent: float = 1.5):
         """
         Args:
             max_portfolio_risk_per_trade: Maximum fraction of the portfolio allowed on a single maximum-conviction trade (e.g. 5%)
-            confidence_exponent: The power to raise confidence to. (confidence^2) severely reduces the size of 0.5 confidence trades compared to 0.9.
+            confidence_exponent: The power to raise confidence to. (confidence^1.5) reduces the size of 0.5 confidence trades compared to 0.9.
         """
         self.max_risk = max_portfolio_risk_per_trade
         self.exponent = confidence_exponent
