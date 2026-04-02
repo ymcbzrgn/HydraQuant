@@ -31,6 +31,7 @@ class ConfidenceCalibrator:
         self._platt_a = 0.0  # Platt scaling parameter A
         self._platt_b = 0.0  # Platt scaling parameter B
         self._calibrated = False
+        self._brier_disabled = False  # Phase 21: prevent fit-disable-fit cycle
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -121,7 +122,7 @@ class ConfidenceCalibrator:
         Fit Platt scaling parameters using logistic regression.
         P(y=1|f) = 1 / (1 + exp(A*f + B))
         """
-        history = self._get_history(min_trades=30)
+        history = self._get_history(min_trades=20)
         if not history:
             logger.warning("[Calibrator] Not enough data for Platt scaling.")
             return
@@ -152,13 +153,25 @@ class ConfidenceCalibrator:
     def adjust_confidence(self, raw_confidence: float) -> float:
         """
         Calibrate raw AI confidence using Platt scaling.
-        If not calibrated yet, returns raw confidence unchanged.
+        If not calibrated yet or Brier >= 0.25, returns raw confidence unchanged.
         """
+        # Phase 21: If Brier check already disabled calibration, pass through without re-fitting
+        if self._brier_disabled:
+            return raw_confidence
+
         if not self._calibrated:
             self.fit_platt_scaling()
 
         if not self._calibrated:
             return raw_confidence  # Still no data → pass through
+
+        # Brier safety guard: if calibration is WORSE than random, disable until next explicit re-fit
+        brier = self.brier_score(min_trades=20)
+        if brier >= 0.25:
+            self._calibrated = False
+            self._brier_disabled = True  # Prevent fit-disable-fit cycle
+            logger.warning(f"[Calibrator] Brier {brier:.4f} >= 0.25 (worse than random), disabling until re-fit")
+            return raw_confidence
 
         z = self._platt_a * raw_confidence + self._platt_b
         try:
