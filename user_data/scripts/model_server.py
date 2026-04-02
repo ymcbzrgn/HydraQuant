@@ -237,4 +237,4 @@ def startup():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8895, limit_concurrency=4)
+    uvicorn.run(app, host="127.0.0.1", port=8895, limit_concurrency=2)
