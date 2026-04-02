@@ -1,11 +1,25 @@
-import os
-import logging
-import threading
-from typing import Any, Dict, List, Optional
-from dotenv import load_dotenv
+"""
+Phase 22: Self-Learning Adaptive LLM Router with Thompson Sampling
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableWithFallbacks
+Replaces static priority failover with a quality-driven multi-armed bandit.
+Each model+key combo is a "slot" with a Beta distribution that learns from outcomes.
+Models that produce quality responses rise; models that fail sink — automatically.
+
+Philosophy: Quality > Speed. A fast but dumb model is a FAILURE.
+"""
+import os
+import re
+import time
+import random
+import logging
+import sqlite3
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -15,353 +29,481 @@ import httpx
 from google.api_core import exceptions as google_exc
 import openai
 import groq
-import time
-import re
 
-# google.genai SDK (langchain-google-genai v4+) throws its own exceptions
 try:
     from google.genai import errors as genai_errors
     _GENAI_FAILOVER = (genai_errors.ClientError, genai_errors.ServerError)
 except ImportError:
     _GENAI_FAILOVER = ()
 
-# Global dictionary to store API Keys currently in Penalty Box: {api_key: unlock_timestamp}
-KEY_COOLDOWNS: Dict[str, float] = {}
-GEMINI_COOLDOWN_DURATION = 90.0  # Gemini: daily quota takes minutes to reset (was 60, still too fast)
-FALLBACK_COOLDOWN_DURATION = 45.0  # Non-Gemini providers: 45s cooldown (was 15, caused 5393× 429 in 3 days)
-_COOLDOWN_LOCK = threading.Lock()  # Thread-safe access to KEY_COOLDOWNS
-
-# Module-level model discovery cache — shared across ALL LLMRouter instances
-_GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
-_OPENROUTER_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
-_MODEL_CACHE_TTL = 600.0  # 10 minutes
-
-# Per-model penalty box: "api_key:model_name" → unlock_timestamp
-# Gemini quotas are PER-MODEL PER-PROJECT — one model's 429 doesn't affect others on the same key
-MODEL_COOLDOWNS: Dict[str, float] = {}
-
-# Gemini-wide circuit breaker: after N consecutive Gemini failures, skip ALL Gemini for a cooldown.
-# This prevents wasting 140 API calls (10 keys × 14 models) when Gemini is globally rate-limited.
-_GEMINI_CIRCUIT_OPEN_UNTIL: float = 0.0
-_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive Gemini 429s to trip the breaker
-_CIRCUIT_BREAKER_DURATION = 120.0  # 2 minutes — give Gemini quotas time to recover
-
-# Exceptions that CANNOT be recovered by failover — bugs in OUR code
-# NOTE: ValueError/TypeError removed — they can be triggered by legitimate empty/malformed
-# API responses (e.g. json.loads("") → ValueError, float(None) → TypeError).
-# These should failover to next model, not crash the pipeline.
-_HARD_CRASH_EXCEPTIONS = (KeyError, AttributeError, SyntaxError)
-
-# Everything else = failover. This list is for penalty-box logic (rate limit detection).
-FAILOVER_EXCEPTIONS = (
-    *_GENAI_FAILOVER,
-    google_exc.NotFound,
-    google_exc.TooManyRequests,
-    google_exc.ResourceExhausted,
-    google_exc.ServiceUnavailable,
-    google_exc.InternalServerError,
-    google_exc.DeadlineExceeded,
-    google_exc.Unauthenticated,
-    google_exc.PermissionDenied,
-    openai.RateLimitError,
-    openai.InternalServerError,
-    openai.APIConnectionError,
-    openai.APITimeoutError,
-    openai.AuthenticationError,
-    openai.PermissionDeniedError,
-    groq.RateLimitError,
-    groq.InternalServerError,
-    groq.APIConnectionError,
-    groq.APITimeoutError,
-    groq.AuthenticationError,
-    groq.PermissionDeniedError,
-    httpx.TimeoutException,
-    httpx.NetworkError,
-)
-
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 logger = logging.getLogger(__name__)
 
+# Module-level model discovery cache (shared across instances)
+_GEMINI_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
+_OPENROUTER_MODEL_CACHE: Dict[str, Any] = {"models": None, "timestamp": 0.0}
+_MODEL_CACHE_TTL = 600.0
+
+# Exceptions that indicate OUR code bugs — raise immediately, never failover
+_HARD_CRASH = (KeyError, AttributeError, SyntaxError)
+
+# ─── RPM Limits (free tier, per model per key) ───────────────────────
+RPM_LIMITS = {
+    "gemini-2.5-flash-lite": 15, "gemini-3.1-flash-lite": 15,
+    "gemini-2.5-flash": 10, "gemini-3-flash": 5, "gemini-3.1-flash": 5,
+    "gemini-2.5-pro": 2, "gemini-3.1-pro": 2,
+    "llama-3.3-70b-versatile": 30, "llama-3.1-8b-instant": 30,
+    "qwen/qwen3-32b": 60, "meta-llama/llama-4-scout": 30,
+    "moonshotai/kimi-k2": 30, "openai/gpt-oss-20b": 15, "openai/gpt-oss-120b": 15,
+    "qwen-3-235b": 30, "llama3.1-8b": 30,
+    "Meta-Llama-3.3-70B": 20, "Meta-Llama-3.1-8B": 30,
+    "mistral-large": 2, "mistral-small": 2,
+}
+
+def _lookup_rpm(model_name: str) -> int:
+    """Substring match RPM limit. Default 10 for unknowns."""
+    for prefix, limit in RPM_LIMITS.items():
+        if prefix in model_name:
+            return limit
+    return 10
+
+# ─── Error Taxonomy ──────────────────────────────────────────────────
+PENALTY_CONFIG = {
+    "rate_limit":        {"base": 30.0, "exp": True,  "max": 300.0},
+    "timeout":           {"base": 15.0, "exp": False, "max": 15.0},
+    "overloaded":        {"base": 45.0, "exp": False, "max": 45.0},
+    "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},   # skip, not penalize
+    "auth":              {"base": 0.0,  "exp": False, "max": 0.0},   # permanent disable
+    "empty":             {"base": 30.0, "exp": False, "max": 30.0},
+    "other":             {"base": 30.0, "exp": False, "max": 60.0},
+}
+
+def classify_error(e: Exception) -> str:
+    """Classify exception into error taxonomy category."""
+    err = str(e).upper()
+    if "RESOURCE_EXHAUSTED" in err or "429" in err or "TOO_MANY_REQUESTS" in err:
+        return "rate_limit"
+    if "DEADLINE_EXCEEDED" in err or "504" in err or isinstance(e, (httpx.TimeoutException,)):
+        return "timeout"
+    if "503" in err or "SERVICE_UNAVAILABLE" in err or "UNAVAILABLE" in err:
+        return "overloaded"
+    if ("CONTEXT" in err and "LENGTH" in err) or ("TOKEN" in err and ("LIMIT" in err or "EXCEED" in err)):
+        return "context_overflow"
+    if "UNAUTHENTICATED" in err or "PERMISSION_DENIED" in err or "401" in err:
+        return "auth"
+    return "other"
+
+
+# ─── ModelSlot ───────────────────────────────────────────────────────
+@dataclass
+class ModelSlot:
+    """A single model+key combination with Thompson Sampling state."""
+    provider: str
+    model_name: str
+    model_obj: Any
+    api_key: str
+    alpha: float = 1.0          # Beta dist success param
+    beta_param: float = 1.0     # Beta dist failure param
+    rpm_limit: int = 10
+    rpm_window: deque = field(default_factory=lambda: deque(maxlen=120))
+    penalty_until: float = 0.0
+    backoff_level: int = 0
+    consecutive_fails: int = 0
+    total_calls: int = 0
+    success_count: int = 0
+    quality_pass_count: int = 0
+    disabled: bool = False
+    max_context: int = 1_000_000
+
+    def sample(self, exploit: bool = False) -> float:
+        """Thompson Sampling draw. exploit=True returns mean (no randomness)."""
+        if exploit:
+            return self.alpha / (self.alpha + self.beta_param)
+        return random.betavariate(max(self.alpha, 0.01), max(self.beta_param, 0.01))
+
+    def is_available(self, now: float) -> bool:
+        if self.disabled:
+            return False
+        if now < self.penalty_until:
+            return False
+        return self._rpm_ok(now)
+
+    def _rpm_ok(self, now: float) -> bool:
+        """Check if sending would exceed 80% of RPM limit."""
+        cutoff = now - 60.0
+        recent = sum(1 for ts in self.rpm_window if ts > cutoff)
+        return recent < self.rpm_limit * 0.8
+
+    def record_success(self, quality: bool = True):
+        self.alpha += 1.0 if quality else 0.5
+        self.consecutive_fails = 0
+        self.backoff_level = 0
+        self.total_calls += 1
+        self.success_count += 1
+        if quality:
+            self.quality_pass_count += 1
+        self.rpm_window.append(time.time())
+
+    def record_failure(self, error_type: str):
+        self.beta_param += 1.0
+        self.total_calls += 1
+        self.consecutive_fails += 1
+        self.rpm_window.append(time.time())
+
+        if error_type == "auth":
+            self.disabled = True
+            return
+
+        cfg = PENALTY_CONFIG.get(error_type, PENALTY_CONFIG["other"])
+        if cfg["base"] <= 0:
+            return  # context_overflow: no time penalty
+
+        if cfg["exp"]:
+            penalty = min(cfg["base"] * (2 ** min(self.backoff_level, 6)), cfg["max"])
+            self.backoff_level += 1
+        else:
+            penalty = cfg["base"]
+
+        self.penalty_until = time.time() + penalty
+        if penalty >= 60:
+            logger.warning(f"[Penalize] {self.model_name} penalized {penalty:.0f}s "
+                           f"(type={error_type}, backoff_level={self.backoff_level})")
+
+    @property
+    def slot_id(self) -> str:
+        return f"{self.provider}:{self.model_name}:{self.api_key[-4:]}"
+
+
+# ─── Global Circuit Breaker (Gemini) ─────────────────────────────────
+class GeminiCircuitBreaker:
+    """Sliding-window circuit breaker with hysteresis to prevent flapping."""
+
+    def __init__(self, threshold: int = 10, window_s: float = 60.0,
+                 min_open_s: float = 30.0, close_after: int = 3):
+        self._lock = threading.Lock()
+        self._failures: deque = deque()
+        self._open_until: float = 0.0
+        self._consecutive_ok: int = 0
+        self.threshold = threshold
+        self.window_s = window_s
+        self.min_open_s = min_open_s
+        self.close_after = close_after
+
+    def record_failure(self):
+        now = time.time()
+        with self._lock:
+            self._failures.append(now)
+            self._consecutive_ok = 0
+            # Prune old
+            cutoff = now - self.window_s
+            while self._failures and self._failures[0] < cutoff:
+                self._failures.popleft()
+            if len(self._failures) >= self.threshold and now >= self._open_until:
+                self._open_until = now + self.min_open_s
+                logger.warning(f"[CircuitBreaker] {len(self._failures)} Gemini failures in {self.window_s}s — OPEN for {self.min_open_s}s")
+
+    def record_success(self):
+        with self._lock:
+            self._consecutive_ok += 1
+            if self._consecutive_ok >= self.close_after and time.time() >= self._open_until:
+                if self._open_until > 0:
+                    logger.info(f"[CircuitBreaker] {self._consecutive_ok} consecutive successes — CLOSED")
+                self._open_until = 0.0
+                self._failures.clear()
+
+    def is_open(self) -> bool:
+        return time.time() < self._open_until
+
+
+# ─── SQLite Persistence for Thompson Sampling ────────────────────────
+class SlotPersistence:
+    """Persist Thompson Sampling state across restarts."""
+
+    def __init__(self):
+        try:
+            from ai_config import AI_DB_PATH
+            self.db_path = AI_DB_PATH
+        except ImportError:
+            self.db_path = os.path.join(os.path.dirname(__file__), "ai_trading.db")
+        self._ensure_table()
+
+    def _ensure_table(self):
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn.execute("""CREATE TABLE IF NOT EXISTS model_slot_stats (
+                slot_id TEXT PRIMARY KEY,
+                alpha REAL DEFAULT 1.0,
+                beta_param REAL DEFAULT 1.0,
+                total_calls INTEGER DEFAULT 0,
+                success_count INTEGER DEFAULT 0,
+                quality_pass_count INTEGER DEFAULT 0,
+                last_updated TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )""")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[SlotPersistence] Table init skipped: {e}")
+
+    def load_all(self) -> Dict[str, dict]:
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM model_slot_stats").fetchall()
+            conn.close()
+            return {r["slot_id"]: dict(r) for r in rows}
+        except Exception:
+            return {}
+
+    def save_batch(self, slots: List[ModelSlot]):
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=10)
+            for s in slots:
+                conn.execute("""INSERT OR REPLACE INTO model_slot_stats
+                    (slot_id, alpha, beta_param, total_calls, success_count, quality_pass_count, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                    (s.slot_id, s.alpha, s.beta_param, s.total_calls, s.success_count, s.quality_pass_count))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[SlotPersistence] Save failed: {e}")
+
+
+# ─── Informative Priors (Cold Start) ─────────────────────────────────
+def _cold_start_alpha(provider: str, model_name: str) -> float:
+    """Higher alpha = more trusted initially."""
+    mn = model_name.lower()
+    if "pro" in mn or "70b" in mn or "235b" in mn or "120b" in mn:
+        return 3.0  # Large proven models
+    if "flash" in mn or "32b" in mn or "20b" in mn:
+        return 2.5  # Mid-range workhorses
+    if "8b" in mn or "3b" in mn or "small" in mn:
+        return 2.0  # Small but fast
+    return 2.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LLMRouter — Drop-in replacement with Thompson Sampling
+# ═══════════════════════════════════════════════════════════════════════
 class LLMRouter:
     """
-    Phase 5.3: Bulletproof LLM Router with Dynamic Load Balancing
-    Routes requests to Gemini Flash first. If it rate-limits or fails, 
-    seamlessly falls back to other Gemini keys chronologically (Round-Robin),
-    then falls back to Groq Llama-3, then OpenRouter models.
+    Phase 22: Self-Learning Adaptive LLM Router
+    - Thompson Sampling picks the best model based on quality history
+    - Sliding window RPM tracking prevents 429s proactively
+    - Error taxonomy applies different penalties per error type
+    - Global circuit breaker with hysteresis prevents Gemini cascade
+    - SQLite persistence survives restarts
     """
-    
+
     def __init__(self, temperature: float = 0.0, request_timeout: int = 30,
                  fallback_timeout: int = 15):
         self.temperature = temperature
         self.request_timeout = request_timeout
-        self.fallback_timeout = fallback_timeout  # Shorter timeout for non-Gemini providers
+        self.fallback_timeout = fallback_timeout
         self.cost_tracker = LLMCostTracker()
-        self._key_lock = threading.Lock()  # Thread-safe key rotation
-        self._provider_map = {}  # id(model) → provider name for cost tracking
-        self._model_by_name: Dict[str, Any] = {}  # model_name → model object (for priority routing)
+        self._state_lock = threading.Lock()
+        self._provider_map: Dict[int, str] = {}
 
-        # 1. Primary Models (Provider-Internal Failover): Gemini
-        # We handle multiple API keys dynamically.
-        self.gemini_keys = []
-        
-        # Support comma-separated keys in GEMINI_API_KEYS
+        # ── Core state ──
+        self.slots: List[ModelSlot] = []
+        self.gemini_circuit = GeminiCircuitBreaker()
+        self._persistence = SlotPersistence()
+        self._call_counter = 0
+        self._last_persist = time.time()
+        self._last_decay = time.time()
+
+        # ── Build all provider models → slots ──
+        self.gemini_keys: List[str] = []
+        self.gemini_models_by_key: Dict[str, list] = {}
+
+        # Collect Gemini keys
         keys_str = os.environ.get("GEMINI_API_KEYS", "")
         if keys_str:
             self.gemini_keys.extend([k.strip() for k in keys_str.split(",") if k.strip()])
-            
-        # Support GEMINI_API_KEY and numbered variants (1-10)
         single_key = os.environ.get("GEMINI_API_KEY")
         if single_key and single_key not in self.gemini_keys:
             self.gemini_keys.append(single_key)
-            
         for i in range(1, 11):
             k = os.environ.get(f"GEMINI_API_KEY_{i}")
             if k and k not in self.gemini_keys:
                 self.gemini_keys.append(k)
-                
-        # Deduplicate keys just in case
         self.gemini_keys = list(dict.fromkeys(self.gemini_keys))
 
-        self.gemini_models_by_key = {}
+        # Create Gemini slots
         if self.gemini_keys:
-            # Dynamic model discovery — fetch real available models from Gemini API
             gemini_model_names = self._discover_gemini_models(self.gemini_keys[0])
-
-            # Group initialized models by their key
             for key in self.gemini_keys:
                 models_for_key = []
-                for m_name in gemini_model_names:
+                for mn in gemini_model_names:
                     m = ChatGoogleGenerativeAI(
-                        model=m_name,
-                        api_key=key,
-                        temperature=self.temperature,
-                        timeout=self.request_timeout,
-                        max_retries=1  # MUST be 1 not 0: SDK bug treats 0 as "use default 5 retries"
-                    )
+                        model=mn, api_key=key, temperature=self.temperature,
+                        timeout=self.request_timeout, max_retries=1)
                     models_for_key.append(m)
                     self._provider_map[id(m)] = "gemini"
+                    self.slots.append(ModelSlot(
+                        provider="gemini", model_name=mn, model_obj=m, api_key=key,
+                        rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("gemini", mn)))
                 self.gemini_models_by_key[key] = models_for_key
-
             logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys × {len(gemini_model_names)} models. "
-                         f"Models: {gemini_model_names}")
-            
-        # 2. First Fallback: Groq (multiple models — each has INDEPENDENT rate limits)
-        # Round-robin across 4 models = 4× throughput on free tier (~120 RPM total)
-        # Ordered: smartest → dumbest for best trade signal quality
+                        f"Models: {gemini_model_names}")
+
+        # Groq
         self.groq_key = os.environ.get("GROQ_API_KEY")
         self.groq_models = []
-        self.fallback_1 = None  # Keep for backward compat checks
+        self.fallback_1 = None
         if self.groq_key:
-            groq_model_names = [
-                # Tier A: Reliable (higher RPM/RPD on free tier)
-                "llama-3.3-70b-versatile",          # 30 RPM, 1K RPD, solid workhorse
-                "llama-3.1-8b-instant",            # 14.4K RPD, most free usage (fast failover)
-                # Tier B: Mid-range
-                "qwen/qwen3-32b",                   # 60 RPM, dual-mode, 535 t/s
-                "meta-llama/llama-4-scout-17b-16e-instruct",  # 30 RPM, multimodal
-                "moonshotai/kimi-k2-instruct",      # 1T MoE, 256K context
-                # Tier C: gpt-oss (smart but VERY low RPM on free tier — last resort)
-                "openai/gpt-oss-20b",              # Low RPM, penalized often — keep as backup
-                "openai/gpt-oss-120b",              # Same issue — keep as last resort only
-            ]
-            for m_name in groq_model_names:
-                m = ChatGroq(
-                    model=m_name,
-                    api_key=self.groq_key,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            for mn in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b",
+                        "meta-llama/llama-4-scout-17b-16e-instruct", "moonshotai/kimi-k2-instruct",
+                        "openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
+                m = ChatGroq(model=mn, api_key=self.groq_key, temperature=self.temperature,
+                             timeout=self.fallback_timeout, max_retries=0)
                 self.groq_models.append(m)
                 self._provider_map[id(m)] = "groq"
-                self._model_by_name[m_name] = m
-            self.fallback_1 = self.groq_models[0]  # backward compat
-            logger.info(f"Loaded {len(self.groq_models)} Groq models: {groq_model_names}")
+                self.slots.append(ModelSlot(
+                    provider="groq", model_name=mn, model_obj=m, api_key=self.groq_key,
+                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("groq", mn)))
+            self.fallback_1 = self.groq_models[0]
+            logger.info(f"Loaded {len(self.groq_models)} Groq models")
 
-        # 3. Cerebras (OpenAI-compatible, 30 RPM, 1M tokens/day, ultra-fast inference)
-        # Ordered: smartest → dumbest. Cerebras free tier: Qwen3-235B + Llama 3.1-8B
+        # Cerebras
         self.cerebras_key = os.environ.get("CEREBRAS_API_KEY")
         self.cerebras_models = []
         if self.cerebras_key:
-            cerebras_model_names = [
-                "qwen-3-235b-a22b-instruct-2507",  # 235B params, strongest on Cerebras free tier
-                "llama3.1-8b",                       # 8B params, fastest but smallest
-            ]
-            for m_name in cerebras_model_names:
-                m = ChatOpenAI(
-                    base_url="https://api.cerebras.ai/v1",
-                    api_key=self.cerebras_key,
-                    model=m_name,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            for mn in ["qwen-3-235b-a22b-instruct-2507", "llama3.1-8b"]:
+                m = ChatOpenAI(base_url="https://api.cerebras.ai/v1", api_key=self.cerebras_key,
+                               model=mn, temperature=self.temperature, timeout=self.fallback_timeout, max_retries=0)
                 self.cerebras_models.append(m)
                 self._provider_map[id(m)] = "cerebras"
-                self._model_by_name[m_name] = m
-            logger.info(f"Loaded {len(self.cerebras_models)} Cerebras models: {cerebras_model_names}")
+                ctx = 8192 if "8b" in mn else 32768
+                self.slots.append(ModelSlot(
+                    provider="cerebras", model_name=mn, model_obj=m, api_key=self.cerebras_key,
+                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("cerebras", mn), max_context=ctx))
+            logger.info(f"Loaded {len(self.cerebras_models)} Cerebras models")
 
-        # 4. DeepSeek (OpenAI-compatible, 5M free tokens on signup)
+        # DeepSeek
         self.deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
         self.deepseek_models = []
         if self.deepseek_key:
-            deepseek_model_names = ["deepseek-chat"]  # DeepSeek V3.2
-            for m_name in deepseek_model_names:
-                m = ChatOpenAI(
-                    base_url="https://api.deepseek.com/v1",
-                    api_key=self.deepseek_key,
-                    model=m_name,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            for mn in ["deepseek-chat"]:
+                m = ChatOpenAI(base_url="https://api.deepseek.com/v1", api_key=self.deepseek_key,
+                               model=mn, temperature=self.temperature, timeout=self.fallback_timeout, max_retries=0)
                 self.deepseek_models.append(m)
                 self._provider_map[id(m)] = "deepseek"
-                self._model_by_name[m_name] = m
-            logger.info(f"Loaded {len(self.deepseek_models)} DeepSeek models: {deepseek_model_names}")
+                self.slots.append(ModelSlot(
+                    provider="deepseek", model_name=mn, model_obj=m, api_key=self.deepseek_key,
+                    rpm_limit=10, alpha=_cold_start_alpha("deepseek", mn)))
+            logger.info(f"Loaded {len(self.deepseek_models)} DeepSeek models")
 
-        # 5. SambaNova (OpenAI-compatible, 200K tokens/day free, Llama 405B access)
+        # SambaNova
         self.sambanova_key = os.environ.get("SAMBANOVA_API_KEY")
         self.sambanova_models = []
         if self.sambanova_key:
-            sambanova_model_names = [
-                "Meta-Llama-3.3-70B-Instruct",   # 20 RPM
-                "Meta-Llama-3.1-8B-Instruct",     # 30 RPM
-            ]
-            for m_name in sambanova_model_names:
-                m = ChatOpenAI(
-                    base_url="https://api.sambanova.ai/v1",
-                    api_key=self.sambanova_key,
-                    model=m_name,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            for mn in ["Meta-Llama-3.3-70B-Instruct", "Meta-Llama-3.1-8B-Instruct"]:
+                m = ChatOpenAI(base_url="https://api.sambanova.ai/v1", api_key=self.sambanova_key,
+                               model=mn, temperature=self.temperature, timeout=self.fallback_timeout, max_retries=0)
                 self.sambanova_models.append(m)
                 self._provider_map[id(m)] = "sambanova"
-                self._model_by_name[m_name] = m
-            logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models: {sambanova_model_names}")
+                self.slots.append(ModelSlot(
+                    provider="sambanova", model_name=mn, model_obj=m, api_key=self.sambanova_key,
+                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("sambanova", mn)))
+            logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models")
 
-        # 6. Mistral (OpenAI-compatible, 2 RPM experiment plan, 1B tokens/month)
-        # Ordered: smartest → dumbest (large = 90% frontier perf at 8x less cost)
+        # Mistral
         self.mistral_key = os.environ.get("MISTRAL_API_KEY")
         self.mistral_models = []
         if self.mistral_key:
-            mistral_model_names = [
-                "mistral-large-latest",    # Best quality, frontier-class
-                "mistral-small-latest",    # Fast, good quality
-            ]
-            for m_name in mistral_model_names:
-                m = ChatOpenAI(
-                    base_url="https://api.mistral.ai/v1",
-                    api_key=self.mistral_key,
-                    model=m_name,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            for mn in ["mistral-large-latest", "mistral-small-latest"]:
+                m = ChatOpenAI(base_url="https://api.mistral.ai/v1", api_key=self.mistral_key,
+                               model=mn, temperature=self.temperature, timeout=self.fallback_timeout, max_retries=0)
                 self.mistral_models.append(m)
                 self._provider_map[id(m)] = "mistral"
-                self._model_by_name[m_name] = m
-            logger.info(f"Loaded {len(self.mistral_models)} Mistral models: {mistral_model_names}")
+                self.slots.append(ModelSlot(
+                    provider="mistral", model_name=mn, model_obj=m, api_key=self.mistral_key,
+                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("mistral", mn)))
+            logger.info(f"Loaded {len(self.mistral_models)} Mistral models")
 
-        # 7. OpenRouter (dynamic free models — ultimate fallback)
+        # OpenRouter
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         self.openrouter_models = []
-        self.fallback_2 = None  # Keep for backward compat checks
+        self.fallback_2 = None
         if self.openrouter_key:
-            openrouter_model_names = self._discover_openrouter_free_models(self.openrouter_key)
-            for m_name in openrouter_model_names:
-                m = ChatOpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=self.openrouter_key,
-                    model=m_name,
-                    temperature=self.temperature,
-                    timeout=self.fallback_timeout,
-                    max_retries=0
-                )
+            or_names = self._discover_openrouter_free_models(self.openrouter_key)
+            for mn in or_names:
+                m = ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=self.openrouter_key,
+                               model=mn, temperature=self.temperature, timeout=self.fallback_timeout, max_retries=0)
                 self.openrouter_models.append(m)
                 self._provider_map[id(m)] = "openrouter"
-                self._model_by_name[m_name] = m
+                self.slots.append(ModelSlot(
+                    provider="openrouter", model_name=mn, model_obj=m, api_key=self.openrouter_key,
+                    rpm_limit=10, alpha=_cold_start_alpha("openrouter", mn)))
             if self.openrouter_models:
-                self.fallback_2 = self.openrouter_models[0]  # backward compat
-            logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter free models: {openrouter_model_names}")
-        
+                self.fallback_2 = self.openrouter_models[0]
+            logger.info(f"Loaded {len(self.openrouter_models)} OpenRouter free models")
+
+        # ── Restore learned state from SQLite ──
+        saved = self._persistence.load_all()
+        restored = 0
+        for slot in self.slots:
+            if slot.slot_id in saved:
+                d = saved[slot.slot_id]
+                slot.alpha = max(d.get("alpha", 1.0), 1.0)
+                slot.beta_param = max(d.get("beta_param", 1.0), 1.0)
+                slot.total_calls = d.get("total_calls", 0)
+                slot.success_count = d.get("success_count", 0)
+                slot.quality_pass_count = d.get("quality_pass_count", 0)
+                restored += 1
+        if restored:
+            logger.info(f"[Thompson] Restored learning state for {restored}/{len(self.slots)} slots from SQLite")
+
+    # ── Model Discovery (unchanged from Phase 5.3) ────────────────────
+
     @staticmethod
     def _discover_gemini_models(api_key: str) -> list:
         """Discover available Gemini chat models from API. Cached for 10 minutes."""
-        FALLBACK_MODELS = [
-            "models/gemini-2.5-flash",
-            "models/gemini-2.5-flash-lite-preview-06-17",
-        ]
-
-        # Return cached result if fresh
+        FALLBACK_MODELS = ["models/gemini-2.5-flash", "models/gemini-2.5-flash-lite-preview-06-17"]
         now = time.time()
         if _GEMINI_MODEL_CACHE["models"] and (now - _GEMINI_MODEL_CACHE["timestamp"]) < _MODEL_CACHE_TTL:
             logger.info(f"Using cached model list ({len(_GEMINI_MODEL_CACHE['models'])} models)")
             return _GEMINI_MODEL_CACHE["models"]
-
         client = None
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
-
             discovered = []
             for m in client.models.list():
                 name = m.name if hasattr(m, 'name') else str(m)
                 actions = m.supported_actions if hasattr(m, 'supported_actions') else []
-
                 if 'generateContent' not in (actions or []):
                     continue
-
-                # Only keep actual Gemini chat models — filter out gemma, nano, robotics, tts, etc.
-                # name format: "models/gemini-2.5-flash" or "models/gemini-3-pro-preview"
                 model_short = name.replace("models/", "")
                 if not model_short.startswith("gemini-"):
                     continue
                 if any(skip in model_short for skip in ['tts', 'robotics', 'image', 'embedding', 'vision', 'audio', 'computer-use']):
                     continue
-
                 discovered.append(name)
-
             if discovered:
-                # Sort: flash-lite first (cheapest/fastest), then flash, then pro last
-                def _model_priority(name):
+                def _prio(name):
                     short = name.replace("models/", "")
                     if "flash-lite" in short: return (0, short)
-                    if "flash" in short:      return (1, short)
-                    if "lite" in short:       return (2, short)
-                    if "pro" in short:        return (3, short)
+                    if "flash" in short: return (1, short)
+                    if "lite" in short: return (2, short)
+                    if "pro" in short: return (3, short)
                     return (4, short)
-                discovered.sort(key=_model_priority)
-                # Deduplicate: remove aliases and variants that share rate limits
+                discovered.sort(key=_prio)
                 all_shorts = {n.replace("models/", "") for n in discovered}
                 deduped = []
                 for name in discovered:
                     short = name.replace("models/", "")
-                    # Skip versioned variants (gemini-2.5-flash-001 shares quota with gemini-2.5-flash)
                     base = re.sub(r'-\d{3}$', '', short)
                     if base != short and base in all_shorts:
                         continue
-                    # Skip -latest aliases (share rate limits with the model they point to)
-                    if short.endswith("-latest"):
+                    if short.endswith("-latest") or "-customtools" in short:
                         continue
-                    # Skip -customtools variants (same model, same rate limit bucket)
-                    if "-customtools" in short:
+                    if short == "gemini-3-pro-preview" or short.startswith("gemini-2.0-"):
                         continue
-                    # Skip dead/shutdown/deprecated models
-                    if short == "gemini-3-pro-preview":  # Shut down March 9, 2026
-                        continue
-                    if short.startswith("gemini-2.0-"):  # Deprecated June 1, 2026
-                        continue
-                    # Skip preview models with old dates (deprecated by Google)
-                    # Pattern: gemini-X.X-*-preview-MM-YYYY or gemini-X.X-*-preview-09-2025
-                    import re as _re
-                    _preview_date = _re.search(r'-preview-(\d{2})-(\d{4})$', short)
-                    if _preview_date:
-                        _month, _year = int(_preview_date.group(1)), int(_preview_date.group(2))
-                        if _year < 2026 or (_year == 2026 and _month < 2):
-                            logger.info(f"[ModelDiscovery] Skipping deprecated preview: {short}")
+                    _pd = re.search(r'-preview-(\d{2})-(\d{4})$', short)
+                    if _pd:
+                        _mo, _yr = int(_pd.group(1)), int(_pd.group(2))
+                        if _yr < 2026 or (_yr == 2026 and _mo < 2):
                             continue
                     deduped.append(name)
                 discovered = deduped
@@ -370,13 +512,12 @@ class LLMRouter:
                 _GEMINI_MODEL_CACHE["timestamp"] = now
                 return discovered
             else:
-                logger.warning("No Gemini chat models discovered. Using fallback list.")
+                logger.warning("No Gemini chat models discovered. Using fallback.")
                 return FALLBACK_MODELS
         except Exception as e:
-            logger.warning(f"Model discovery failed: {e}. Using fallback list.")
+            logger.warning(f"Model discovery failed: {e}. Using fallback.")
             return FALLBACK_MODELS
         finally:
-            # Close throwaway client to prevent httpx connection pool leak
             if client and hasattr(client, '_api_client'):
                 try:
                     client._api_client.close()
@@ -386,625 +527,265 @@ class LLMRouter:
     @staticmethod
     def _discover_openrouter_free_models(api_key: str) -> list:
         """Discover currently free models from OpenRouter API. Cached for 10 minutes."""
-        FALLBACK_MODELS = [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "deepseek/deepseek-chat-v3-0324:free",
-            "qwen/qwen3-32b:free",
-        ]
-
+        FALLBACK = ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3-0324:free", "qwen/qwen3-32b:free"]
         now = time.time()
         if _OPENROUTER_MODEL_CACHE["models"] and (now - _OPENROUTER_MODEL_CACHE["timestamp"]) < _MODEL_CACHE_TTL:
             logger.info(f"Using cached OpenRouter free model list ({len(_OPENROUTER_MODEL_CACHE['models'])} models)")
             return _OPENROUTER_MODEL_CACHE["models"]
-
         try:
-            resp = httpx.get(
-                "https://openrouter.ai/api/v1/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=15
-            )
+            resp = httpx.get("https://openrouter.ai/api/v1/models",
+                             headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
             resp.raise_for_status()
-            data = resp.json().get("data", [])
-
-            free_models = []
-            for m in data:
-                pricing = m.get("pricing", {})
+            free = []
+            for m in resp.json().get("data", []):
+                p = m.get("pricing", {})
                 try:
-                    prompt_free = float(pricing.get("prompt", "1")) == 0
-                    completion_free = float(pricing.get("completion", "1")) == 0
+                    if float(p.get("prompt", "1")) == 0 and float(p.get("completion", "1")) == 0:
+                        mid = m.get("id", "")
+                        if mid:
+                            free.append(mid)
                 except (ValueError, TypeError):
                     continue
-                if prompt_free and completion_free:
-                    model_id = m.get("id", "")
-                    if model_id:
-                        free_models.append(model_id)
-
-            if free_models:
-                # Prioritize well-known, high-quality model families
-                priority_keywords = ["deepseek", "llama", "qwen", "nvidia", "gemini", "mistral", "step"]
-                def _sort_key(mid):
-                    for i, kw in enumerate(priority_keywords):
-                        if kw in mid.lower():
-                            return (i, mid)
-                    return (len(priority_keywords), mid)
-                free_models.sort(key=_sort_key)
-                free_models = free_models[:6]  # Cap at 6 to avoid excessive retries (was 12, caused 1221x 429)
-
-                logger.info(f"Discovered {len(free_models)} free OpenRouter models: {free_models}")
-                _OPENROUTER_MODEL_CACHE["models"] = free_models
+            if free:
+                kw = ["deepseek", "llama", "qwen", "nvidia", "gemini", "mistral", "step"]
+                free.sort(key=lambda mid: next((i for i, k in enumerate(kw) if k in mid.lower()), len(kw)))
+                free = free[:6]
+                logger.info(f"Discovered {len(free)} free OpenRouter models: {free}")
+                _OPENROUTER_MODEL_CACHE["models"] = free
                 _OPENROUTER_MODEL_CACHE["timestamp"] = now
-                return free_models
-
-            logger.warning("No free models found on OpenRouter. Using fallback list.")
-            return FALLBACK_MODELS
+                return free
+            logger.warning("No free OpenRouter models found. Using fallback.")
+            return FALLBACK
         except Exception as e:
-            logger.warning(f"OpenRouter model discovery failed: {e}. Using fallback list.")
-            return FALLBACK_MODELS
+            logger.warning(f"OpenRouter discovery failed: {e}. Using fallback.")
+            return FALLBACK
 
-    # Provider ordering per priority level — ALL models always included, only ORDER changes
-    _PROVIDER_ORDER = {
-        "critical": [
-            # Finance reasoning accuracy: reliable models first, gpt-oss last (low RPM)
-            ("cerebras", None),
-            ("groq", ["llama-3.3-70b-versatile", "qwen/qwen3-32b",
-                      "moonshotai/kimi-k2-instruct",
-                      "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "llama-3.1-8b-instant",
-                      "openai/gpt-oss-120b", "openai/gpt-oss-20b"]),
-            ("deepseek", None),
-            ("mistral", None),
-            ("sambanova", None),
-            ("openrouter", None),
-        ],
-        "high": [
-            # Gemini already at front (added by caller), then reliable Groq models
-            ("groq", ["llama-3.3-70b-versatile", "qwen/qwen3-32b",
-                      "moonshotai/kimi-k2-instruct",
-                      "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "llama-3.1-8b-instant",
-                      "openai/gpt-oss-120b", "openai/gpt-oss-20b"]),
-            ("cerebras", None),
-            ("deepseek", None),
-            ("mistral", None),
-            ("sambanova", None),
-            ("openrouter", None),
-        ],
-        "medium": [
-            # Speed + quality balance: reliable fast models first
-            ("groq", ["llama-3.1-8b-instant", "qwen/qwen3-32b",
-                      "llama-3.3-70b-versatile",
-                      "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "moonshotai/kimi-k2-instruct",
-                      "openai/gpt-oss-20b", "openai/gpt-oss-120b"]),
-            ("cerebras", None),
-            ("deepseek", None),
-            ("sambanova", None),
-            ("mistral", None),
-            ("openrouter", None),
-        ],
-        "low": [
-            # Cheapest/fastest first: high-RPD models, gpt-oss absolute last
-            ("groq", ["llama-3.1-8b-instant", "qwen/qwen3-32b",
-                      "meta-llama/llama-4-scout-17b-16e-instruct",
-                      "llama-3.3-70b-versatile", "moonshotai/kimi-k2-instruct",
-                      "openai/gpt-oss-20b", "openai/gpt-oss-120b"]),
-            ("cerebras", ["llama3.1-8b", "qwen-3-235b-a22b-instruct-2507"]),
-            ("sambanova", ["Meta-Llama-3.1-8B-Instruct", "Meta-Llama-3.3-70B-Instruct"]),
-            ("deepseek", None),
-            ("mistral", ["mistral-small-latest", "mistral-large-latest"]),
-            ("openrouter", None),
-        ],
-    }
+    # ── Thompson Sampling Selection ───────────────────────────────────
 
-    def _build_priority_chain(self, priority: str) -> List[Any]:
-        """Build non-Gemini chain ordered by priority. INVARIANT: all models always included."""
-        order = self._PROVIDER_ORDER.get(priority, self._PROVIDER_ORDER["high"])
-        chain: List[Any] = []
-        seen: set = set()
-
-        provider_lists = {
-            "groq": self.groq_models,
-            "cerebras": self.cerebras_models,
-            "deepseek": self.deepseek_models,
-            "mistral": self.mistral_models,
-            "sambanova": self.sambanova_models,
-            "openrouter": self.openrouter_models,
-        }
-
-        for provider_name, model_order in order:
-            models = provider_lists.get(provider_name, [])
-            if model_order is None:
-                # All models in their default order
-                for m in models:
-                    if id(m) not in seen:
-                        chain.append(m)
-                        seen.add(id(m))
-            else:
-                # Specific order from priority config
-                for m_name in model_order:
-                    m = self._model_by_name.get(m_name)
-                    if m is not None and id(m) not in seen:
-                        chain.append(m)
-                        seen.add(id(m))
-
-        # INVARIANT: append any remaining models not yet in chain (dynamic discovery, etc.)
-        all_non_gemini = (self.deepseek_models + self.mistral_models +
-                          self.cerebras_models + self.groq_models +
-                          self.sambanova_models + self.openrouter_models)
-        for m in all_non_gemini:
-            if id(m) not in seen:
-                chain.append(m)
-                seen.add(id(m))
-
-        return chain
-
-    def _get_chain(self, priority: Optional[str] = None) -> List[Any]:
-        """Constructs and returns the active LangChain fallbacks without rate-limited keys/models.
-
-        Args:
-            priority: Route priority ("critical", "high", "medium", "low") or None for default.
-        """
-        chain: List[Any] = []
-        gemini_chain: List[Any] = []
-        current_time = time.time()
-
-        # Circuit breaker: if Gemini is globally down, skip ALL Gemini models entirely
-        gemini_circuit_open = current_time < _GEMINI_CIRCUIT_OPEN_UNTIL
-
-        if self.gemini_keys and not gemini_circuit_open:
-            # Thread-safe rotation: Move first key to the back for Round-Robin
-            with self._key_lock:
-                first_key = self.gemini_keys.pop(0)
-                self.gemini_keys.append(first_key)
-                keys_snapshot = list(self.gemini_keys)  # Work on a snapshot
-
-            for key in keys_snapshot:
-                # Check if this Gemini key is currently in the Penalty Box
-                with _COOLDOWN_LOCK:
-                    unlock_time = KEY_COOLDOWNS.get(key, 0)
-                if current_time < unlock_time:
-                    continue # Skip this key, it's exhausted!
-
-                # Filter out individually penalized models — don't add dead weight to chain
-                active_models = [m for m in self.gemini_models_by_key[key]
-                                 if not self._is_model_penalized(m)]
-                gemini_chain.extend(active_models)
-
-        elif gemini_circuit_open:
-            remaining = _GEMINI_CIRCUIT_OPEN_UNTIL - current_time
-            logger.info(f"[CircuitBreaker] Gemini circuit OPEN — skipping all Gemini models. "
-                        f"Closes in {remaining:.0f}s.")
-
-        # Build non-Gemini chain based on priority
-        if priority is None:
-            # Backward compat: original ordering
-            non_gemini = (self.deepseek_models + self.mistral_models +
-                          self.cerebras_models + self.groq_models +
-                          self.sambanova_models + self.openrouter_models)
-        else:
-            non_gemini = self._build_priority_chain(priority)
-
-        # Gemini placement depends on priority
-        if priority == "critical":
-            # CRITICAL: Smartest non-Gemini first, Gemini in middle
-            # Finance benchmarks: Cerebras Qwen3-235B and GPT-OSS-120B beat Gemini Flash
-            gemini_reversed = list(reversed(gemini_chain))  # pro first if available
-            chain = non_gemini[:3] + gemini_reversed + non_gemini[3:]
-        elif priority == "low":
-            # LOW: Fastest/cheapest first, Gemini after initial fast models
-            chain = non_gemini[:5] + gemini_chain + non_gemini[5:]
-        else:
-            # HIGH, MEDIUM, None: Gemini first (fastest, most reliable JSON)
-            chain = gemini_chain + non_gemini
-
-        if not chain:
-            raise ValueError("All API keys are exhausted or unavailable.")
-
-        return chain
-
-    def is_any_provider_available(self) -> bool:
-        """Quick check: is at least one provider not rate-limited?
-        Callers can use this to skip LLM work entirely when all providers are exhausted."""
-        try:
-            chain = self._get_chain()
-            # Check if any model in the chain is actually available (not penalized)
-            for model in chain:
-                if not self._is_key_penalized(model) and not self._is_model_penalized(model):
-                    return True
-            return False
-        except ValueError:
-            return False
-
-    def _cooldown_for(self, model) -> float:
-        """Return the appropriate cooldown duration based on provider type."""
-        if isinstance(model, ChatGoogleGenerativeAI):
-            return GEMINI_COOLDOWN_DURATION
-        return FALLBACK_COOLDOWN_DURATION
-
-    def _penalize_key(self, model):
-        """Put a Gemini API key into the penalty box if the model has one."""
-        if hasattr(model, "google_api_key") and model.google_api_key is not None:
-            failed_key = getattr(model, "google_api_key")
-            if hasattr(failed_key, "get_secret_value"):
-                failed_key = failed_key.get_secret_value()
-            duration = self._cooldown_for(model)
-            with _COOLDOWN_LOCK:
-                if failed_key not in KEY_COOLDOWNS or time.time() > KEY_COOLDOWNS[failed_key]:
-                    KEY_COOLDOWNS[failed_key] = time.time() + duration
-                    logger.warning(f"Key penalized for {duration}s.")
-
-    def _is_key_penalized(self, model) -> bool:
-        """Check if this model's API key is in the penalty box (auth/connection errors)."""
-        if hasattr(model, "google_api_key"):
-            key = getattr(model, "google_api_key")
-            if hasattr(key, "get_secret_value"):
-                key = key.get_secret_value()
-            with _COOLDOWN_LOCK:
-                return time.time() < KEY_COOLDOWNS.get(key, 0)
-        return False
-
-    def _penalize_model(self, model):
-        """Put a specific (key, model) combo into penalty box. Other models on same key stay active."""
-        api_key = ""
-        if hasattr(model, "google_api_key") and model.google_api_key is not None:
-            api_key = getattr(model, "google_api_key")
-            if hasattr(api_key, "get_secret_value"):
-                api_key = api_key.get_secret_value()
-        m_name = getattr(model, "model_name", getattr(model, "model", "unknown"))
-        penalty_key = f"{api_key}:{m_name}"
-        duration = self._cooldown_for(model)
-        with _COOLDOWN_LOCK:
-            if penalty_key not in MODEL_COOLDOWNS or time.time() > MODEL_COOLDOWNS[penalty_key]:
-                MODEL_COOLDOWNS[penalty_key] = time.time() + duration
-                logger.warning(f"[Penalize] {m_name} penalized {duration}s. Other models on this key still active.")
-
-    def _is_model_penalized(self, model) -> bool:
-        """Check if this specific (key, model) combo is rate-limited."""
-        api_key = ""
-        if hasattr(model, "google_api_key"):
-            api_key = getattr(model, "google_api_key")
-            if hasattr(api_key, "get_secret_value"):
-                api_key = api_key.get_secret_value()
-        m_name = getattr(model, "model_name", getattr(model, "model", "unknown"))
-        penalty_key = f"{api_key}:{m_name}"
-        with _COOLDOWN_LOCK:
-            return time.time() < MODEL_COOLDOWNS.get(penalty_key, 0)
-
-    def _check_key_cascade(self, model):
-        """If ALL models on a key are penalized, penalize the KEY too.
-        This lets _get_chain() skip the entire key instead of iterating through dead models."""
-        if not hasattr(model, "google_api_key") or model.google_api_key is None:
-            return
-        key_val = model.google_api_key
-        if hasattr(key_val, "get_secret_value"):
-            key_val = key_val.get_secret_value()
-        if key_val not in self.gemini_models_by_key:
-            return
+    def _select_slots(self, priority: Optional[str] = None,
+                      estimated_tokens: int = 0) -> List[ModelSlot]:
+        """Build ranked candidate list using Thompson Sampling."""
         now = time.time()
-        with _COOLDOWN_LOCK:
-            all_penalized = all(
-                now < MODEL_COOLDOWNS.get(
-                    f"{key_val}:{getattr(m, 'model_name', getattr(m, 'model', 'unknown'))}", 0
-                )
-                for m in self.gemini_models_by_key[key_val]
-            )
-            if all_penalized and (key_val not in KEY_COOLDOWNS or now > KEY_COOLDOWNS[key_val]):
-                duration = self._cooldown_for(model)
-                KEY_COOLDOWNS[key_val] = now + duration
-                logger.warning(f"[KeyCascade] All models on key ...{key_val[-4:]} exhausted. "
-                               f"Key penalized for {duration}s.")
+
+        # Hourly decay: adapt to changing conditions
+        if now - self._last_decay > 3600:
+            with self._state_lock:
+                for s in self.slots:
+                    s.alpha = max(s.alpha * 0.99, 1.0)
+                    s.beta_param = max(s.beta_param * 0.99, 1.0)
+                self._last_decay = now
+
+        # Filter to available slots
+        circuit_open = self.gemini_circuit.is_open()
+        eligible = []
+        for s in self.slots:
+            if not s.is_available(now):
+                continue
+            if s.provider == "gemini" and circuit_open:
+                continue
+            if estimated_tokens > 0 and estimated_tokens > s.max_context:
+                continue
+            eligible.append(s)
+
+        if not eligible:
+            skipped_rpm = sum(1 for s in self.slots if not s.disabled and now >= s.penalty_until and not s._rpm_ok(now))
+            skipped_penalty = sum(1 for s in self.slots if not s.disabled and now < s.penalty_until)
+            logger.error(f"[SelectSlots] All {len(self.slots)} slots exhausted "
+                         f"(penalty={skipped_penalty}, rpm_limit={skipped_rpm}, "
+                         f"circuit={'OPEN' if circuit_open else 'closed'})")
+            raise ValueError("All providers exhausted (all slots penalized or rate-limited).")
+
+        # Score each slot via Thompson Sampling
+        scored = []
+        for s in eligible:
+            if priority == "critical":
+                score = s.sample(exploit=True)   # Best known quality
+            elif priority == "low":
+                score = s.sample(exploit=False)   # Pure exploration
+            else:
+                mean = s.alpha / (s.alpha + s.beta_param)
+                samp = s.sample(exploit=False)
+                score = 0.3 * mean + 0.7 * samp  # Balanced
+            scored.append((score, s))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [s for _, s in scored]
+
+    # ── Core Model Call ───────────────────────────────────────────────
+
+    def _try_model(self, slot: ModelSlot, messages: List[Any],
+                   temperature: Optional[float], **kwargs) -> Tuple[Optional[Any], Optional[str]]:
+        """Try a single model. Returns (response, None) on success or (None, error_type) on failure."""
+        model = slot.model_obj
+        try:
+            if temperature is not None:
+                if isinstance(model, ChatGoogleGenerativeAI):
+                    target = model.bind(generation_config={"temperature": temperature})
+                else:
+                    target = model.bind(temperature=temperature)
+            else:
+                target = model
+
+            start = time.time()
+            response = target.invoke(messages, **kwargs)
+            latency_ms = (time.time() - start) * 1000
+
+            # Validate non-empty content
+            content = getattr(response, 'content', None)
+            if content is None or (isinstance(content, str) and not content.strip()):
+                return None, "empty"
+
+            # Normalize Gemini list content → string
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and "text" in block:
+                        parts.append(block["text"])
+                    elif isinstance(block, str):
+                        parts.append(block)
+                    else:
+                        parts.append(str(block))
+                normalized = "".join(parts)
+                try:
+                    response.content = normalized
+                except (AttributeError, TypeError):
+                    response = AIMessage(content=normalized,
+                                         response_metadata=getattr(response, 'response_metadata', {}))
+
+            # Cost tracking
+            in_tok = out_tok = 0
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                in_tok = response.usage_metadata.get('input_tokens', 0)
+                out_tok = response.usage_metadata.get('output_tokens', 0)
+            provider = self._provider_map.get(id(model), "unknown")
+            cost = self.cost_tracker.calculate_cost(slot.model_name, in_tok, out_tok, provider)
+            self.cost_tracker.log_call(slot.model_name, provider, in_tok, out_tok, cost, latency_ms)
+
+            return response, None
+
+        except _HARD_CRASH as e:
+            logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
+            raise
+        except Exception as e:
+            error_type = classify_error(e)
+            tag = "[RateLimit]" if error_type == "rate_limit" else "[Failover]"
+            if error_type == "rate_limit":
+                logger.info(f"{tag} {slot.model_name} quota exhausted. Other models on same key still OK.")
+            elif error_type != "timeout":  # Don't spam logs for timeouts
+                logger.warning(f"{tag} {slot.model_name} → {type(e).__name__}: {str(e)[:120]}. Next model...")
+            return None, error_type
+
+    # ── Main Invoke ───────────────────────────────────────────────────
 
     def invoke(self, messages: List[Any], temperature: Optional[float] = None,
-              max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
-        """Synchronously invokes the custom failover loop with Cooldown tracking.
+               max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
+        """Route LLM request using Thompson Sampling. Drop-in compatible."""
+        estimated_tokens = sum(len(str(getattr(m, "content", ""))) for m in messages) // 3
+        candidates = self._select_slots(priority, estimated_tokens)
 
-        Args:
-            temperature: Optional per-call temperature override. Uses model.bind()
-                         which creates a lightweight wrapper (no new connections).
-            max_wall_time: Maximum total seconds for the entire failover chain (default 90s).
-            priority: Route priority ("critical", "high", "medium", "low") or None for default.
-        """
-        global _GEMINI_CIRCUIT_OPEN_UNTIL
-        chain = self._get_chain(priority=priority)
-
-        # Fast-fail: if ALL models in the chain are already penalized from prior calls,
-        # raise immediately instead of looping through skip checks for up to 90s.
-        active_count = sum(
-            1 for m in chain
-            if not self._is_key_penalized(m) and not self._is_model_penalized(m)
-        )
-        if active_count == 0:
-            logger.error("[FastFail] All providers are rate-limited from prior calls. Raising immediately.")
-            raise ValueError("All providers exhausted (all models in penalty box).")
-
-        last_exception: Optional[Exception] = None
-        gemini_consecutive_fails = 0
         wall_start = time.time()
+        last_exception = None
 
-        for model in chain:
-            # Wall-time budget: abort failover if total time exceeds limit
-            if time.time() - wall_start > max_wall_time:
-                logger.warning(f"[WallTime] Exceeded {max_wall_time}s total across failover chain. Aborting.")
+        for slot in candidates:
+            elapsed = time.time() - wall_start
+            if elapsed > max_wall_time:
+                logger.warning(f"[WallTime] Exceeded {max_wall_time}s across failover chain. Aborting.")
                 break
 
-            # Skip if key is dead (auth/conn) or this specific model is rate-limited
-            if self._is_key_penalized(model) or self._is_model_penalized(model):
+            # Re-check availability (may have been penalized during earlier iteration)
+            if not slot.is_available(time.time()):
                 continue
 
-            is_gemini = isinstance(model, ChatGoogleGenerativeAI)
+            response, error_type = self._try_model(slot, messages, temperature, **kwargs)
 
-            # Circuit breaker: too many consecutive Gemini failures in THIS call → skip remaining
-            if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
-                continue
-
-            # Token pre-check: skip Groq free-tier models if prompt is too large
-            # Groq limits: qwen3-32b=6000 TPM, llama-3.1-8b-instant=6000 TPM
-            _m_name_check = str(getattr(model, "model_name", getattr(model, "model", "")))
-            _is_groq = any(g in _m_name_check for g in ["qwen3-32b", "llama-3.1-8b", "llama-3.3-70b", "gemma2"])
-            if _is_groq:
-                prompt_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
-                est_tokens = prompt_chars // 3  # conservative (1 token ~ 3 chars)
-                if est_tokens > 4500:
-                    logger.debug(f"[TokenPreCheck] Skipping {_m_name_check}: ~{est_tokens} tokens > 4500 Groq limit")
-                    continue
-
-            try:
-                # Per-call temperature override via LangChain bind() — thread-safe, zero allocation
-                # Use generation_config for Gemini models (ChatGoogleGenerativeAI)
-                # Use temperature kwarg for Groq/OpenRouter (ChatGroq/ChatOpenAI)
-                if temperature is not None:
-                    if isinstance(model, ChatGoogleGenerativeAI):
-                        target = model.bind(generation_config={"temperature": temperature})
-                    else:
-                        target = model.bind(temperature=temperature)
-                else:
-                    target = model
-                start_time = time.time()
-                response = target.invoke(messages, **kwargs)
-                latency_ms = (time.time() - start_time) * 1000
-
-                # Validate response has actual content — empty responses should failover
-                content = getattr(response, 'content', None)
-                if content is None or (isinstance(content, str) and not content.strip()):
-                    m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                    logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
-                    self._penalize_model(model)
-                    self._check_key_cascade(model)  # Cascade if all models on key return empty
-                    if is_gemini:
-                        gemini_consecutive_fails += 1
-                    continue
-
-                # Normalize content: Gemini v1 output_version returns list of content blocks
-                # instead of a plain string. Unwrap here so ALL callers receive a string.
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and "text" in block:
-                            text_parts.append(block["text"])
-                        elif isinstance(block, str):
-                            text_parts.append(block)
-                        else:
-                            text_parts.append(str(block))
-                    normalized = "".join(text_parts)
-                    try:
-                        response.content = normalized
-                    except (AttributeError, TypeError):
-                        # Some LangChain message types have read-only content;
-                        # wrap in a simple AIMessage as fallback.
-                        from langchain_core.messages import AIMessage
-                        response = AIMessage(content=normalized, response_metadata=getattr(response, 'response_metadata', {}))
-                        if hasattr(response, 'usage_metadata'):
-                            response.usage_metadata = getattr(response, 'usage_metadata', None)
-
-                in_tok = 0
-                out_tok = 0
-                if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                    in_tok = response.usage_metadata.get('input_tokens', 0)
-                    out_tok = response.usage_metadata.get('output_tokens', 0)
-
-                m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
-                provider = self._provider_map.get(id(model), "unknown")
-                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok, provider)
-                self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
-
-                # Success — reset circuit breaker if Gemini recovered
-                if is_gemini and _GEMINI_CIRCUIT_OPEN_UNTIL > 0:
-                    _GEMINI_CIRCUIT_OPEN_UNTIL = 0.0
-                    logger.info("[CircuitBreaker] Gemini success — circuit CLOSED.")
-
+            if response is not None:
+                with self._state_lock:
+                    slot.record_success(quality=True)
+                if slot.provider == "gemini":
+                    self.gemini_circuit.record_success()
+                self._maybe_persist()
                 return response
-            except _HARD_CRASH_EXCEPTIONS as e:
-                logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
-                raise
-            except Exception as e:
-                last_exception = e
-                m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                err_upper = str(e).upper()
-                if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
-                    # Rate limit: only THIS model's quota is exhausted
-                    self._penalize_model(model)
-                    self._check_key_cascade(model)
-                    logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
-                elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
-                    # Auth error: entire key is broken
-                    self._penalize_key(model)
-                    logger.warning(f"[AuthError] {m_name} → {type(e).__name__}. Penalizing entire key.")
-                else:
-                    # Unknown/other error: penalize model only (don't kill working models on same key)
-                    self._penalize_model(model)
-                    logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
 
-                if is_gemini:
-                    gemini_consecutive_fails += 1
-                    # Trip circuit breaker for ALL subsequent invoke() calls too
-                    if gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD and _GEMINI_CIRCUIT_OPEN_UNTIL < time.time():
-                        _GEMINI_CIRCUIT_OPEN_UNTIL = time.time() + _CIRCUIT_BREAKER_DURATION
-                        logger.warning(f"[CircuitBreaker] {gemini_consecutive_fails} consecutive Gemini failures — "
-                                       f"circuit OPEN for {_CIRCUIT_BREAKER_DURATION}s. Skipping to fallbacks.")
-                continue
+            # Failure path
+            with self._state_lock:
+                slot.record_failure(error_type)
+            if slot.provider == "gemini":
+                self.gemini_circuit.record_failure()
+            last_exception = ValueError(f"{slot.model_name}: {error_type}")
 
-        logger.error(f"Complete LLM Failure (All Fallbacks Exhausted)")
+        logger.error("Complete LLM Failure (All Fallbacks Exhausted)")
         if last_exception:
             raise last_exception
         raise ValueError("No fallbacks available.")
 
     async def ainvoke(self, messages: List[Any], temperature: Optional[float] = None,
                       max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
-        """Asynchronously invokes the custom failover loop with Cooldown tracking."""
-        global _GEMINI_CIRCUIT_OPEN_UNTIL
-        chain = self._get_chain(priority=priority)
+        """Async wrapper — delegates to sync invoke via executor."""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.invoke(messages, temperature=temperature,
+                                      max_wall_time=max_wall_time, priority=priority, **kwargs))
 
-        # Fast-fail: if ALL models are penalized, raise immediately
-        active_count = sum(
-            1 for m in chain
-            if not self._is_key_penalized(m) and not self._is_model_penalized(m)
-        )
-        if active_count == 0:
-            logger.error("[FastFail] All providers rate-limited. Raising immediately (async).")
-            raise ValueError("All providers exhausted (all models in penalty box).")
+    # ── Public API ────────────────────────────────────────────────────
 
-        last_exception: Optional[Exception] = None
-        gemini_consecutive_fails = 0
-        wall_start = time.time()
+    def is_any_provider_available(self) -> bool:
+        now = time.time()
+        return any(s.is_available(now) for s in self.slots)
 
-        for model in chain:
-            # Wall-time budget: abort failover if total time exceeds limit
-            if time.time() - wall_start > max_wall_time:
-                logger.warning(f"[WallTime] Exceeded {max_wall_time}s total across failover chain. Aborting.")
-                break
-
-            # Skip if key is dead (auth/conn) or this specific model is rate-limited
-            if self._is_key_penalized(model) or self._is_model_penalized(model):
-                continue
-
-            is_gemini = isinstance(model, ChatGoogleGenerativeAI)
-
-            # Circuit breaker: too many consecutive Gemini failures in THIS call → skip remaining
-            if is_gemini and gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD:
-                continue
-
-            try:
-                if temperature is not None:
-                    if isinstance(model, ChatGoogleGenerativeAI):
-                        target = model.bind(generation_config={"temperature": temperature})
+    def report_quality(self, model_name: str, quality_pass: bool):
+        """Optional: external callers report whether LLM output was actually useful."""
+        with self._state_lock:
+            for s in self.slots:
+                if s.model_name == model_name or model_name in s.model_name:
+                    if quality_pass:
+                        s.alpha += 0.5
+                        s.quality_pass_count += 1
                     else:
-                        target = model.bind(temperature=temperature)
-                else:
-                    target = model
-                start_time = time.time()
-                response = await target.ainvoke(messages, **kwargs)
-                latency_ms = (time.time() - start_time) * 1000
+                        s.beta_param += 0.5
+                    break
 
-                # Validate response has actual content — empty responses should failover
-                content = getattr(response, 'content', None)
-                if content is None or (isinstance(content, str) and not content.strip()):
-                    m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                    logger.warning(f"[EmptyResponse] {m_name} returned empty content. Trying next model...")
-                    self._penalize_model(model)
-                    self._check_key_cascade(model)
-                    if is_gemini:
-                        gemini_consecutive_fails += 1
-                    continue
+    def _maybe_persist(self):
+        self._call_counter += 1
+        now = time.time()
+        if self._call_counter >= 100 or (now - self._last_persist) >= 300:
+            self._persistence.save_batch(self.slots)
+            self._call_counter = 0
+            self._last_persist = now
 
-                # Normalize content: Gemini v1 content blocks → string
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and "text" in block:
-                            text_parts.append(block["text"])
-                        elif isinstance(block, str):
-                            text_parts.append(block)
-                        else:
-                            text_parts.append(str(block))
-                    normalized = "".join(text_parts)
-                    try:
-                        response.content = normalized
-                    except (AttributeError, TypeError):
-                        from langchain_core.messages import AIMessage
-                        response = AIMessage(content=normalized, response_metadata=getattr(response, 'response_metadata', {}))
+    def get_slot_stats(self) -> List[dict]:
+        """Return stats for all slots (for monitoring/debugging)."""
+        return [{"slot_id": s.slot_id, "alpha": round(s.alpha, 2), "beta": round(s.beta_param, 2),
+                 "mean": round(s.alpha / (s.alpha + s.beta_param), 3),
+                 "calls": s.total_calls, "ok": s.success_count, "quality": s.quality_pass_count,
+                 "disabled": s.disabled, "available": s.is_available(time.time())}
+                for s in self.slots]
 
-                in_tok = 0
-                out_tok = 0
-                if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                    in_tok = response.usage_metadata.get('input_tokens', 0)
-                    out_tok = response.usage_metadata.get('output_tokens', 0)
 
-                m_name = getattr(model, "model_name", getattr(model, "model", "unknown_model"))
-                provider = self._provider_map.get(id(model), "unknown")
-                cost = self.cost_tracker.calculate_cost(m_name, in_tok, out_tok, provider)
-                self.cost_tracker.log_call(m_name, provider, in_tok, out_tok, cost, latency_ms)
-
-                # Success — reset circuit breaker if Gemini recovered
-                if is_gemini and _GEMINI_CIRCUIT_OPEN_UNTIL > 0:
-                    _GEMINI_CIRCUIT_OPEN_UNTIL = 0.0
-                    logger.info("[CircuitBreaker] Gemini success — circuit CLOSED.")
-
-                return response
-            except _HARD_CRASH_EXCEPTIONS as e:
-                logger.error(f"Code bug in async LLM pipeline: {type(e).__name__}: {e}")
-                raise
-            except Exception as e:
-                last_exception = e
-                m_name = getattr(model, "model_name", getattr(model, "model", "?"))
-                err_upper = str(e).upper()
-                if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "TOO_MANY_REQUESTS" in err_upper:
-                    self._penalize_model(model)
-                    self._check_key_cascade(model)
-                    logger.info(f"[RateLimit] {m_name} quota exhausted. Other models on same key still OK.")
-                elif "UNAUTHENTICATED" in err_upper or "PERMISSION_DENIED" in err_upper:
-                    self._penalize_key(model)
-                    logger.warning(f"[AuthError] {m_name} → {type(e).__name__}. Penalizing entire key.")
-                else:
-                    self._penalize_model(model)
-                    logger.warning(f"[Failover] {m_name} → {type(e).__name__}: {e}. Next model...")
-
-                if is_gemini:
-                    gemini_consecutive_fails += 1
-                    if gemini_consecutive_fails >= _CIRCUIT_BREAKER_THRESHOLD and _GEMINI_CIRCUIT_OPEN_UNTIL < time.time():
-                        _GEMINI_CIRCUIT_OPEN_UNTIL = time.time() + _CIRCUIT_BREAKER_DURATION
-                        logger.warning(f"[CircuitBreaker] {gemini_consecutive_fails} consecutive Gemini failures — "
-                                       f"circuit OPEN for {_CIRCUIT_BREAKER_DURATION}s. Skipping to fallbacks.")
-                continue
-
-        logger.error(f"Complete LLM Async Failure (All Fallbacks Exhausted)")
-        if last_exception:
-            raise last_exception
-        raise ValueError("No fallbacks available.")
-
+# ── Self-test ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Testing LLM Failover Router...")
-    
-    router = LLMRouter()
-    
-    # 1. Normal Test (Should hit Gemini)
-    logger.info("Testing prompt (Expect Gemini):")
-    res = router.invoke([HumanMessage(content="Say 'Gemini Online' if you are gemini. Otherwise say your model name.")])
-    print(res.content)
-    
-    # 2. Forced Failover Test
-    # We deliberately break Gemini by overriding its model name to a non-existent one
-    logger.info("\nSimulating Gemini API Outage (Expect Fallback to Groq/OpenRouter)...")
-    if router.gemini_models_by_key:
-        # Break all primary Gemini models temporarily
-        original_models = {}
-        for key, models in router.gemini_models_by_key.items():
-            original_models[key] = []
-            for m in models:
-                original_models[key].append(m.model)
-                m.model = "models/non-existent-broken-model"
-        
-        try:
-            res_failover = router.invoke([HumanMessage(content="Say which alternative model you are. Start with 'I am'")])
-            print("Fallback Success Answer:", res_failover.content)
-        except Exception as e:
-            print(f"Fallback didn't trigger correctly: {e}")
-            
-        # Restore for normal operation
-        for key, models in router.gemini_models_by_key.items():
-            for i, m in enumerate(models):
-                if hasattr(m, 'model'):
-                    m.model = original_models[key][i]
-    else:
-        logger.info("Only one LLM key is configured. Cannot test fallbacks properly.")
+    logger.info("Testing Self-Learning Adaptive LLM Router...")
 
+    router = LLMRouter()
+    logger.info(f"Total slots: {len(router.slots)}")
+    logger.info(f"Gemini keys: {len(router.gemini_keys)}")
+
+    # Test Thompson Sampling selection
+    try:
+        candidates = router._select_slots(priority="medium")
+        logger.info(f"Thompson selected top 3: {[s.model_name for s in candidates[:3]]}")
+    except ValueError as e:
+        logger.warning(f"No slots available: {e}")
+
+    # Test invoke
+    logger.info("Testing invoke (expect any model):")
+    try:
+        res = router.invoke([HumanMessage(content="Say your model name in one word.")])
+        logger.info(f"Response: {res.content[:100]}")
+    except Exception as e:
+        logger.error(f"Invoke failed: {e}")
+
+    # Show slot stats
+    for stat in router.get_slot_stats()[:5]:
+        logger.info(f"  {stat}")
