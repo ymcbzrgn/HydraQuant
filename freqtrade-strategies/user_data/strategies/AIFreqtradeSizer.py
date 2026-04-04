@@ -6,7 +6,7 @@ import sys
 import pandas as pd
 import numpy as np
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from freqtrade.strategy import IStrategy
 from freqtrade.persistence import Trade
 from freqtrade.strategy import CategoricalParameter, DecimalParameter, IntParameter
@@ -786,7 +786,7 @@ class AIFreqtradeSizer(IStrategy):
             # Determine execution mode for logging
             if confidence >= REAL_TRADE_THRESHOLD and signal_type != 'NEUTRAL':
                 exec_mode = "REAL"
-            elif confidence >= 0.30:
+            elif confidence >= _np("strategy.stoploss_floor", 0.30) if '_np' in dir() else confidence >= 0.30:
                 exec_mode = "SHADOW"      # Decent signal, paper trade it
             else:
                 exec_mode = "SHADOW_WEAK"  # Garbage signal, still log for learning
@@ -887,35 +887,40 @@ class AIFreqtradeSizer(IStrategy):
         except Exception:
             pass
 
+        # Phase 25: All stoploss/trailing params from Neural Organism
+        try:
+            from neural_organism import _p as _np
+        except ImportError:
+            def _np(pid, fb=0.5, regime="_global"): return fb
+
         if breakeven_active and current_rate > 0 and trade.open_rate > 0:
             if not trade.is_short:
-                breakeven_sl = (trade.open_rate * 0.998 / current_rate) - 1  # entry - 0.2% buffer
+                breakeven_sl = (trade.open_rate * _np("strategy.breakeven_long", 0.998) / current_rate) - 1
             else:
-                breakeven_sl = -((trade.open_rate * 1.002 / current_rate) - 1)
+                breakeven_sl = -((trade.open_rate * _np("strategy.breakeven_short", 1.002) / current_rate) - 1)
         else:
-            breakeven_sl = self.stoploss  # -0.20, won't interfere
+            breakeven_sl = self.stoploss
 
-        # ═══ CONFIDENCE-ADAPTIVE ATR MULTIPLIER ═══
+        # ═══ CONFIDENCE-ADAPTIVE ATR MULTIPLIER (Phase 25: adaptive) ═══
         ai = self.ai_signal_cache.get(pair, {})
         confidence = ai.get('confidence', 0.0)
 
-        if confidence >= 0.80:
-            mult = 3.0   # Wide — high conviction, let it run
-        elif confidence >= 0.60:
-            mult = 2.5   # Normal — default Chandelier
+        if confidence >= _np("strategy.chandelier_high_conf", 0.80):
+            mult = _np("strategy.chandelier_atr_high", 3.0)
+        elif confidence >= _np("strategy.chandelier_med_conf", 0.60):
+            mult = _np("strategy.chandelier_atr_med", 2.5)
         else:
-            mult = 2.0   # Tight — low conviction, protect capital
+            mult = _np("strategy.chandelier_atr_low", 2.0)
 
-        # ═══ 3-TIER TRAILING: tighten as profit grows (OMEGA-inspired) ═══
+        # ═══ 3-TIER TRAILING (Phase 25: adaptive PnL tiers + ATR caps) ═══
         effective_pnl = current_profit * (trade.leverage or 1.0)
 
-        if effective_pnl >= 0.15:
-            mult = min(mult, 1.0)   # Very tight — protect big profit
-        elif effective_pnl >= 0.08:
-            mult = min(mult, 1.5)   # Tight
-        elif effective_pnl >= 0.04:
-            mult = min(mult, 2.0)   # Medium
-        # else: confidence-based mult unchanged (2.0-3.0)
+        if effective_pnl >= _np("strategy.trailing_pnl_high", 0.15):
+            mult = min(mult, _np("strategy.trailing_atr_high", 1.0))
+        elif effective_pnl >= _np("strategy.trailing_pnl_med", 0.08):
+            mult = min(mult, _np("strategy.trailing_atr_med", 1.5))
+        elif effective_pnl >= _np("strategy.trailing_pnl_low", 0.04):
+            mult = min(mult, _np("strategy.trailing_atr_low", 2.0))
 
         # ═══ CHANDELIER EXIT CALCULATION ═══
         if trade.is_short:
@@ -1302,6 +1307,46 @@ class AIFreqtradeSizer(IStrategy):
         except Exception as e:
             logger.debug(f"[LiveFeedback:AgentPool] {pair} agent update failed: {e}")
 
+        # 6. Phase 24: Neural Organism — adaptive parameter update + pair ban
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            # Gather context for the update cycle
+            fng_val = None
+            adx_val = 20.0
+            funding_val = 0.0
+            try:
+                fng_val = int(ai_meta.get('fng')) if ai_meta.get('fng') is not None else None
+            except (ValueError, TypeError):
+                pass
+            balance = self.risk_budget.portfolio_value if hasattr(self, 'risk_budget') else 10000
+            peak = balance  # simplified: balance_vs_peak
+
+            result = organism.update_cycle(
+                pair=pair, pnl_pct=trade_pnl_pct,
+                regime=str(ai_meta.get('regime', 'transitional')),
+                confidence=float(ai_meta.get('confidence', 0.5)) if ai_meta.get('confidence') else 0.5,
+                exit_reason=exit_reason,
+                duration_hours=round((current_time - trade.open_date).total_seconds() / 3600, 2) if trade.open_date else 1.0,
+                stake_amount=trade.stake_amount,
+                fng=fng_val,
+                adx=adx_val,
+                funding_rate=funding_val,
+                balance_vs_peak=min(1.0, balance / max(peak, 1.0)),
+            )
+            # Apply pair ban if organism recommends it
+            ban_minutes = result.get("ban_minutes", 0)
+            if ban_minutes > 0:
+                ban_until = current_time + timedelta(minutes=ban_minutes)
+                self.lock_pair(pair, ban_until,
+                               reason=f"NeuralOrganism:loss={trade_pnl_pct:+.1f}%,fear={result.get('fear_tier','normal')}")
+                logger.info(f"[NeuralOrganism:PairBan] {pair} locked {ban_minutes:.0f}min "
+                           f"(loss={trade_pnl_pct:+.1f}%, fear={result.get('fear_tier')})")
+            logger.info(f"[LiveFeedback:NeuralOrganism] {pair} updated: phase={result.get('phase')} "
+                       f"overrides={len(result.get('overrides', []))}")
+        except Exception as e:
+            logger.debug(f"[LiveFeedback:NeuralOrganism] {pair} update failed: {e}")
+
         # Phase 22: Notify exit via strategy message
         try:
             self.dp.send_msg(
@@ -1425,13 +1470,17 @@ class AIFreqtradeSizer(IStrategy):
         # Effective cap = minimum of regime, ATR safety, and exchange max
         effective_max = min(regime_max, atr_safe_max, max_leverage)
 
-        # Confidence-based within effective cap
-        if confidence >= 0.75:
-            lev = effective_max
-        elif confidence >= 0.60:
+        # Confidence-based within effective cap (Phase 25: adaptive)
+        try:
+            from neural_organism import _p as _np
+        except ImportError:
+            def _np(pid, fb=0.5, regime="_global"): return fb
+        if confidence >= _np("strategy.leverage_conf_high", 0.75):
+            lev = effective_max * _np("strategy.leverage_mult_high", 1.0)
+        elif confidence >= _np("strategy.leverage_conf_med", 0.60):
             lev = effective_max * 0.7
-        elif confidence >= 0.45:
-            lev = effective_max * 0.5
+        elif confidence >= _np("strategy.leverage_conf_low", 0.45):
+            lev = effective_max * _np("strategy.leverage_mult_low", 0.5)
         else:
             lev = 1.0
 
@@ -1454,9 +1503,10 @@ class AIFreqtradeSizer(IStrategy):
         signal = cached.get('signal', 'NEUTRAL')
         confidence = cached.get('confidence', 0.0)
 
-        if not trade.is_short and signal == 'BEARISH' and confidence >= 0.55:
+        _flip_conf = _np("strategy.flip_exit_conf", 0.55) if '_np' in dir() else 0.55
+        if not trade.is_short and signal == 'BEARISH' and confidence >= _flip_conf:
             return f"ai_flip_bearish_{confidence:.0%}"
-        if trade.is_short and signal == 'BULLISH' and confidence >= 0.55:
+        if trade.is_short and signal == 'BULLISH' and confidence >= _flip_conf:
             return f"ai_flip_bullish_{confidence:.0%}"
 
         # 3. CONFIDENCE DEGRADATION — exit if confidence dropped significantly
@@ -1525,7 +1575,8 @@ class AIFreqtradeSizer(IStrategy):
         cached = self.ai_signal_cache.get(pair, {})
         confidence = cached.get('confidence', 0.0)
 
-        if confidence >= 0.80:
+        _roi_hi_conf = _np("strategy.chandelier_high_conf", 0.80) if '_np' in dir() else 0.80
+        if confidence >= _roi_hi_conf:
             if trade_duration < 120:
                 return 0.20
             if trade_duration < 360:
@@ -1632,8 +1683,8 @@ class AIFreqtradeSizer(IStrategy):
         partial_1_done = trade.get_custom_data("partial_lock_1", False)
         partial_2_done = trade.get_custom_data("partial_lock_2", False)
 
-        if not partial_1_done and effective_pnl >= 0.06:
-            close_amount = trade.stake_amount * 0.25
+        if not partial_1_done and effective_pnl >= _np("strategy.dca_lock1_pnl", 0.06):
+            close_amount = trade.stake_amount * _np("strategy.dca_lock_pct", 0.25)
             if min_stake and close_amount >= min_stake:
                 trade.set_custom_data("partial_lock_1", True)
                 try:
@@ -1644,8 +1695,8 @@ class AIFreqtradeSizer(IStrategy):
                 logger.info(f"[PartialLock] {trade.pair} LOCK1: +{effective_pnl:.1%} → close 25%")
                 return -close_amount
 
-        if partial_1_done and not partial_2_done and effective_pnl >= 0.12:
-            close_amount = trade.stake_amount * 0.25
+        if partial_1_done and not partial_2_done and effective_pnl >= _np("strategy.dca_lock2_pnl", 0.12):
+            close_amount = trade.stake_amount * _np("strategy.dca_lock_pct", 0.25)
             if min_stake and close_amount >= min_stake:
                 trade.set_custom_data("partial_lock_2", True)
                 trade.set_custom_data("breakeven_active", True)

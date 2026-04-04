@@ -29,6 +29,13 @@ sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -239,7 +246,8 @@ class AgentPool:
                 win_rate = perf.get("win_rate", 0.50)
                 n_signals = perf.get("n_signals", 0)
                 # Performance score: favors proven agents but gives newcomers a chance
-                perf_score = win_rate * 0.60 + min(n_signals / 50, 1.0) * 0.40
+                perf_score = (win_rate * _p("agent.perf_wr_weight", 0.60) +
+                             min(n_signals / _p("agent.perf_exp_normalizer", 50), 1.0) * _p("agent.perf_exp_weight", 0.40))
                 candidates.append((name, perf_score))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -517,7 +525,7 @@ class AgentPool:
             # Weight = base 1.0 × performance modifier
             weight = 1.0
             if perf["n_signals"] >= 10:
-                weight = 0.8 + (perf["win_rate"] * 0.4)  # Range: 0.8-1.2
+                weight = _p("agent.vote_weight_base", 0.8) + (perf["win_rate"] * _p("agent.vote_weight_scale", 0.4))
 
             direction = pos.get("direction", "NEUTRAL")
             # Use round2 revised direction if available

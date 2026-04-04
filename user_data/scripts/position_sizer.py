@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 
 class BayesianKelly:
     """
@@ -108,7 +115,7 @@ class BayesianKelly:
         q = 1.0 - p
         b = max(self.avg_win_loss_ratio, 0.01)  # Prevent division by zero
         f = (b * p - q) / b
-        return max(0.0, min(f, 0.25))  # Cap at 25% Kelly
+        return max(0.0, min(f, _p("sizing.kelly_cap", 0.25)))  # Phase 24: adaptive Kelly cap
 
 class PositionSizer:
     """
@@ -117,7 +124,7 @@ class PositionSizer:
     Uses a fractional Kelly-inspired Beta distribution approach to heavily 
     penalize low confidence and reward high conviction.
     """
-    def __init__(self, 
+    def __init__(self,
                  max_portfolio_risk_per_trade: float = 0.05,
                  confidence_exponent: float = 1.5):
         """
@@ -125,8 +132,9 @@ class PositionSizer:
             max_portfolio_risk_per_trade: Maximum fraction of the portfolio allowed on a single maximum-conviction trade (e.g. 5%)
             confidence_exponent: The power to raise confidence to. (confidence^1.5) reduces the size of 0.5 confidence trades compared to 0.9.
         """
-        self.max_risk = max_portfolio_risk_per_trade
-        self.exponent = confidence_exponent
+        # Phase 24: Read from Neural Organism (adaptive), fallback to constructor args
+        self.max_risk = _p("sizing.max_risk", max_portfolio_risk_per_trade)
+        self.exponent = _p("sizing.confidence_exponent", confidence_exponent)
         
         # Phase 3.5.4: Autonomy level controls Kelly fraction cap
         self.autonomy = AutonomyManager()
@@ -166,13 +174,12 @@ class PositionSizer:
         effective_risk = self._effective_max_risk()
         fraction = effective_risk * trust_curve_multiplier * current_regime_modifier
 
-        # 4. Trade-First floor: ALWAYS trade, even at dust size.
-        # Confidence modulates SIZE, never PERMISSION.
-        min_fraction = effective_risk * 0.01  # 1% of effective risk = dust trade
+        # 4. Trade-First floor (Phase 24: adaptive)
+        min_fraction = effective_risk * _p("sizing.min_fraction_mult", 0.01)
         fraction = max(fraction, min_fraction)
 
-        # 5. Cap at Absolute Maximum Risk (Safety Net)
-        final_fraction = min(fraction, effective_risk * 1.5)
+        # 5. Cap at Absolute Maximum Risk (Phase 24: adaptive)
+        final_fraction = min(fraction, effective_risk * _p("sizing.max_fraction_mult", 1.5))
 
         return round(final_fraction, 4)
 

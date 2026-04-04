@@ -34,6 +34,13 @@ sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -231,41 +238,39 @@ class OpportunityScanner:
         if price and ema9 and ema20 and ema50 and ema200:
             p, e9, e20, e50, e200 = float(price), float(ema9), float(ema20), float(ema50), float(ema200)
             if p > e9 > e20 > e50 > e200:
-                score += 40    # Full bullish alignment
+                score += _p("opp.momentum.ema_full_bull", 40)
             elif p > e20 > e50 > e200:
-                score += 30
+                score += _p("opp.momentum.ema_partial_1", 30)
             elif p > e50 > e200:
-                score += 20
+                score += _p("opp.momentum.ema_partial_2", 20)
             elif p > e200:
-                score += 10
-            # Bearish alignment also counts (for shorts)
+                score += _p("opp.momentum.ema_above_200", 10)
             elif p < e9 < e20 < e50 < e200:
-                score += 35    # Full bearish alignment (slightly less because shorts are riskier)
+                score += _p("opp.momentum.ema_full_bear", 35)
             elif p < e20 < e50 < e200:
-                score += 25
+                score += _p("opp.momentum.ema_partial_bear", 25)
 
-        # ADX strength (0-30 points)
+        # ADX strength (Phase 24: adaptive)
         adx = td.get("adx_14") or td.get("adx")
         if adx:
             adx = float(adx)
-            if adx > 35:
-                score += 30
+            if adx > _p("opp.momentum.adx_strong", 35):
+                score += _p("opp.momentum.adx_score_strong", 30)
             elif adx > 25:
-                score += 20
+                score += _p("opp.momentum.adx_score_med", 20)
             elif adx > 20:
-                score += 10
-            # ADX < 20 = ranging, no momentum opportunity
+                score += _p("opp.momentum.adx_score_low", 10)
 
-        # Volume confirmation (0-30 points)
+        # Volume confirmation (Phase 24: adaptive)
         vol = td.get("volume", {}) if isinstance(td.get("volume"), dict) else {}
         vol_ratio = vol.get("ratio", 1.0)
         if isinstance(vol_ratio, (int, float)):
-            if vol_ratio > 2.0:
-                score += 30
+            if vol_ratio > _p("opp.momentum.vol_extreme", 2.0):
+                score += _p("opp.momentum.vol_score_hi", 30)
             elif vol_ratio > 1.5:
-                score += 20
+                score += _p("opp.momentum.vol_score_med", 20)
             elif vol_ratio > 1.2:
-                score += 10
+                score += _p("opp.momentum.vol_score_low", 10)
 
         return min(100.0, score)
 
@@ -279,11 +284,11 @@ class OpportunityScanner:
         if rsi:
             rsi = float(rsi)
             if rsi < 20 or rsi > 80:
-                score += 35    # Very extreme
+                score += _p("opp.reversion.rsi_extreme", 35)
             elif rsi < 25 or rsi > 75:
-                score += 25    # Extreme
+                score += _p("opp.reversion.rsi_moderate", 25)
             elif rsi < 30 or rsi > 70:
-                score += 15    # Moderate extreme
+                score += _p("opp.reversion.rsi_mild", 15)
 
         # Bollinger Band touch (0-30 points)
         bb_lower = td.get("bb_lower")
@@ -291,26 +296,26 @@ class OpportunityScanner:
         if price and bb_lower and bb_upper:
             p, bbl, bbu = float(price), float(bb_lower), float(bb_upper)
             if p <= bbl:
-                score += 30    # Below lower band
+                score += _p("opp.reversion.bb_touch", 30)
             elif p >= bbu:
-                score += 30    # Above upper band
+                score += _p("opp.reversion.bb_touch", 30)
             else:
-                # How close to a band?
                 bb_range = bbu - bbl
                 if bb_range > 0:
                     dist_lower = (p - bbl) / bb_range
                     dist_upper = (bbu - p) / bb_range
                     if dist_lower < 0.10 or dist_upper < 0.10:
-                        score += 20  # Within 10% of a band
+                        score += _p("opp.reversion.bb_near", 20)
 
         # Fear & Greed extreme (0-35 points)
         if fng is not None:
-            if fng < 15 or fng > 85:
-                score += 35    # Extreme — strong contrarian signal
+            fng_ext = int(_p("opp.reversion.fng_extreme_thr", 15))
+            if fng < fng_ext or fng > (100 - fng_ext):
+                score += _p("opp.reversion.fng_extreme", 35)
             elif fng < 25 or fng > 75:
-                score += 20    # Notable
+                score += _p("opp.reversion.fng_moderate", 20)
             elif fng < 30 or fng > 70:
-                score += 10    # Mild
+                score += _p("opp.reversion.fng_mild", 10)
 
         return min(100.0, score)
 
@@ -325,24 +330,24 @@ class OpportunityScanner:
         fr = derivatives.get("funding_rate")
         if fr is not None:
             fr = abs(float(fr))
-            if fr > 0.001:       # >0.1% — very extreme
-                score += 60
-            elif fr > 0.0005:    # >0.05% — extreme
-                score += 40
-            elif fr > 0.0003:    # >0.03% — notable
-                score += 20
+            if fr > 0.001:
+                score += _p("opp.funding.fr_very_extreme", 60)
+            elif fr > 0.0005:
+                score += _p("opp.funding.fr_extreme", 40)
+            elif fr > 0.0003:
+                score += _p("opp.funding.fr_notable", 20)
 
-        # L/S ratio extremity (0-40 points)
+        # L/S ratio extremity (Phase 24: adaptive)
         ls = derivatives.get("long_short_ratio")
         if ls is not None:
             ls = float(ls)
-            deviation = abs(ls - 1.0)  # Distance from balanced (1.0)
-            if deviation > 0.8:       # Very unbalanced (>1.8 or <0.2)
-                score += 40
-            elif deviation > 0.5:     # Unbalanced (>1.5 or <0.5)
-                score += 25
-            elif deviation > 0.3:     # Notably skewed
-                score += 10
+            deviation = abs(ls - 1.0)
+            if deviation > 0.8:
+                score += _p("opp.funding.ls_very_unbalanced", 40)
+            elif deviation > 0.5:
+                score += _p("opp.funding.ls_unbalanced", 25)
+            elif deviation > 0.3:
+                score += _p("opp.funding.ls_skewed", 10)
 
         return min(100.0, score)
 
@@ -356,35 +361,31 @@ class OpportunityScanner:
 
         adx = float(adx)
 
-        # ADX in the transition zone (20-30) = potential breakout
+        # ADX in the transition zone (20-30) = potential breakout (Phase 25: adaptive scores)
         if 20 <= adx <= 30:
-            score += 40    # In the sweet spot
+            score += _p("opp.regime.sweet_spot", 40)
 
-            # MACD histogram just turned (crossed zero recently)
             macd_hist = td.get("macd_histogram") or td.get("macd_hist")
             if macd_hist is not None:
                 mh = float(macd_hist)
-                if abs(mh) < 0.5:  # Very close to zero = recent cross
-                    score += 20
+                if abs(mh) < 0.5:
+                    score += _p("opp.regime.macd_cross", 20)
 
-            # Price just crossed EMA (within 1% of EMA)
             price = td.get("current_price", 0)
             ema50 = td.get("ema_50") or td.get("ema50")
             if price and ema50:
                 dist_pct = abs(float(price) - float(ema50)) / float(ema50) * 100
                 if dist_pct < 1.0:
-                    score += 25  # Just crossed EMA50
+                    score += _p("opp.regime.ema_close", 25)
                 elif dist_pct < 2.0:
-                    score += 15  # Near EMA50
+                    score += _p("opp.regime.ema_near", 15)
 
-            # Volume picking up
             vol = td.get("volume", {}) if isinstance(td.get("volume"), dict) else {}
             if vol.get("trend") == "rising":
-                score += 15
+                score += _p("opp.regime.vol_rising", 15)
 
         elif adx < 20:
-            # Still ranging but might be building up
-            score += 10
+            score += _p("opp.regime.pre_transition", 10)
 
         return min(100.0, score)
 
@@ -399,30 +400,43 @@ class OpportunityScanner:
 
         price_change_1h = td.get("price_change_1h_pct", 0) or 0
 
-        # High volume (0-50 points)
+        # High volume (Phase 25: adaptive scoring)
         if vol_ratio > 5.0:
-            score += 50
+            score += _p("opp.volume.extreme_score", 50)
         elif vol_ratio > 3.0:
-            score += 35
+            score += _p("opp.volume.high_score", 35)
         elif vol_ratio > 2.0:
-            score += 20
+            score += _p("opp.volume.moderate_score", 20)
 
-        # Low price move despite high volume = accumulation/distribution (0-50 points)
+        # Low price move despite high volume = accumulation/distribution
         if vol_ratio > 2.0 and abs(price_change_1h) < 1.0:
-            score += 50    # Big volume, tiny price move = stealth accumulation
+            score += _p("opp.volume.stealth_extreme", 50)
         elif vol_ratio > 2.0 and abs(price_change_1h) < 2.0:
-            score += 30
+            score += _p("opp.volume.stealth_high", 30)
         elif vol_ratio > 1.5 and abs(price_change_1h) < 0.5:
-            score += 20
+            score += _p("opp.volume.stealth_moderate", 20)
 
         return min(100.0, score)
 
     def _compute_composite(self, scores: Dict[str, float]) -> float:
-        """Compute weighted composite score from individual opportunity scores.
+        """Compute weighted composite score from individual opportunity scores (Phase 24: adaptive weights).
         Includes cross-sectional return as a tiebreaker (+/- up to 10 points)."""
+        # Phase 24: Read weights from Neural Organism
+        adaptive_weights = {
+            "momentum_breakout": _p("opp.weight.momentum", 0.25),
+            "mean_reversion": _p("opp.weight.reversion", 0.25),
+            "funding_contrarian": _p("opp.weight.funding", 0.20),
+            "regime_shift": _p("opp.weight.regime_shift", 0.15),
+            "volume_anomaly": _p("opp.weight.volume", 0.15),
+        }
+        # Normalize weights to sum=1.0
+        w_total = sum(adaptive_weights.values())
+        if w_total > 0:
+            adaptive_weights = {k: v / w_total for k, v in adaptive_weights.items()}
+
         composite = 0.0
-        for opp_type, config in self.OPPORTUNITY_TYPES.items():
-            composite += scores.get(opp_type, 0) * config["weight"]
+        for opp_type in self.OPPORTUNITY_TYPES:
+            composite += scores.get(opp_type, 0) * adaptive_weights.get(opp_type, 0.2)
         # Cross-sectional momentum tiebreaker: absolute 7d return adds differentiation
         ret7d = scores.get("_return_7d_abs", 0)
         if ret7d > 10:

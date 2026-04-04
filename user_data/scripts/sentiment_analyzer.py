@@ -10,6 +10,13 @@ from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 ONNX_DIR = os.path.join(MODELS_DIR, "onnx")
 PT_DIR = os.path.join(MODELS_DIR, "pytorch")
@@ -84,7 +91,9 @@ def _get_sentiment_router():
     global _sentiment_router
     if _sentiment_router is None:
         from llm_router import LLMRouter
-        _sentiment_router = LLMRouter(temperature=0.1, request_timeout=30)
+        _sentiment_router = LLMRouter(
+            temperature=_p("sentiment.llm_temperature", 0.1),
+            request_timeout=int(_p("sentiment.llm_timeout", 30)))
     return _sentiment_router
 
 

@@ -13,6 +13,13 @@ import os
 import sys
 import json
 import sqlite3
+
+# Phase 25: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
 import logging
 from datetime import datetime, timezone
 
@@ -328,8 +335,22 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Phase 24+25: Neural Organism — 6 jobs (hourly decay, daily habits, daily DMN+cerebellum, weekly sleep+evolution)
+        self.scheduler.add_job(self._organism_hourly_decay, 'interval', minutes=60,
+            id='organism_decay', name='Neural Organism Hourly Decay', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._organism_habit_check, 'cron', hour=5, minute=15,
+            id='organism_habits', name='Neural Organism Habit Consolidation', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._organism_sleep, 'cron', day_of_week='sun', hour=3, minute=30,
+            id='organism_sleep', name='Neural Organism Sleep Consolidation', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._organism_dmn, 'cron', hour=4, minute=0,
+            id='organism_dmn', name='Neural Organism DMN Idle Processing', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._organism_evolution, 'cron', day_of_week='sun', hour=4, minute=0,
+            id='organism_evolution', name='Neural Organism NeuroEvolution', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._organism_cerebellum, 'cron', hour=0, minute=10,
+            id='organism_cerebellum', name='Neural Organism Cerebellum Daily', max_instances=1, replace_existing=True)
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 27 jobs (24 + RAGAS audit + GraphRAG + postmortem)")
+        logger.info("[Scheduler] Started with 33 jobs (27 + 6 organism jobs)")
         return True
 
     def stop(self):
@@ -704,7 +725,7 @@ class PipelineScheduler:
                 ).fetchone()
                 if fng_row:
                     fng = int(fng_row["value"])
-                    if fng < 15 or fng > 85:
+                    if fng < int(_p("scheduler.fng_extreme_low", 15)) or fng > int(_p("scheduler.fng_extreme_high", 85)):
                         _prev_fng = getattr(self, '_last_event_fng', None)
                         _fng_bucket = fng // 5  # Group by 5-point bands (0-4, 5-9, 10-14...)
                         _prev_bucket = (_prev_fng // 5) if _prev_fng is not None else None
@@ -715,12 +736,13 @@ class PipelineScheduler:
 
                 # Check for extreme funding rates (any pair)
                 if not triggered:
+                    _extreme_fr = _p("scheduler.extreme_funding", 0.001)
                     extreme_funding = conn.execute("""
                         SELECT pair, funding_rate FROM derivatives_data
-                        WHERE ABS(funding_rate) > 0.001
+                        WHERE ABS(funding_rate) > ?
                         AND timestamp > datetime('now', '-15 minutes')
                         ORDER BY ABS(funding_rate) DESC LIMIT 1
-                    """).fetchone()
+                    """, (_extreme_fr,)).fetchone()
                     if extreme_funding:
                         triggered = True
                         trigger_reason = f"Funding spike: {extreme_funding['pair']} {float(extreme_funding['funding_rate'])*100:.3f}%"
@@ -1278,6 +1300,91 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[Scheduler:AutoBacktest] Could not get top pairs: {e}")
             return []
+
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 24: Neural Organism Jobs
+    # ═══════════════════════════════════════════════════════════
+
+    def _organism_hourly_decay(self):
+        """Hourly: decay all neuron beliefs (metabolic clock)."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            # Detect current regime for regime-specific decay rate
+            regime = "_global"
+            try:
+                from regime_classifier import RegimeClassifier
+                rc = RegimeClassifier()
+                # Use BTC as proxy for market regime
+                regime = rc.classify({}).get("regime", "_global")
+            except Exception:
+                pass
+            organism.decay_all(regime)
+            logger.info(f"[Scheduler:Organism] Hourly decay completed (regime={regime})")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] Decay failed: {e}")
+
+    def _organism_habit_check(self):
+        """Daily 05:15: Check all neurons for habit consolidation."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            consolidated = 0
+            for key, neuron in organism._neurons.items():
+                old_strength = neuron.prior_strength
+                organism.ganglia.check_consolidation(neuron)
+                if neuron.prior_strength > old_strength:
+                    consolidated += 1
+            if consolidated:
+                organism._persist_batch(list(organism._neurons.values()))
+            logger.info(f"[Scheduler:Organism] Habit check: {consolidated} neurons consolidated")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] Habit check failed: {e}")
+
+    def _organism_sleep(self):
+        """Weekly Sunday 03:30: Sleep consolidation — replay + prune + counterfactual."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            result = organism.sleep.run_consolidation(
+                organism._neurons, organism.synapses, organism.ganglia, organism.hippocampus)
+            organism._persist_batch(list(organism._neurons.values()))
+            logger.info(f"[Scheduler:Organism] Sleep consolidation: {result}")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] Sleep consolidation failed: {e}")
+
+    def _organism_dmn(self):
+        """Daily 04:00: Default Mode Network — idle background processing."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            result = organism.dmn.run_idle_cycle(organism._neurons, organism.hippocampus)
+            logger.info(f"[Scheduler:Organism] DMN idle: {len(result.get('counterfactuals', []))} counterfactuals, "
+                       f"{len(result.get('discoveries', []))} synapse candidates")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] DMN failed: {e}")
+
+    def _organism_evolution(self):
+        """Weekly Sunday 04:00: NeuroEvolution — population tournament."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            organism.evolution.run_tournament(organism._neurons, organism._cumulative_pnl)
+            organism._persist_batch(list(organism._neurons.values()))
+            logger.info(f"[Scheduler:Organism] NeuroEvolution tournament completed")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] NeuroEvolution failed: {e}")
+
+    def _organism_cerebellum(self):
+        """Daily 00:10: Log cerebellum best trading hours."""
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            best = organism.cerebellum.get_best_hours(6)
+            logger.info(f"[Scheduler:Organism] Cerebellum best hours (UTC): {best}")
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] Cerebellum failed: {e}")
 
 
 if __name__ == "__main__":

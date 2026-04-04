@@ -16,6 +16,13 @@ Regimes:
 import logging
 from typing import Dict, Any, Optional
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,17 +72,17 @@ class RegimeClassifier:
         # Step 1: Check high volatility first (overrides everything)
         if atr and atr_sma and float(atr_sma) > 0:
             atr_ratio = float(atr) / float(atr_sma)
-            if atr_ratio > 2.0:
+            if atr_ratio > _p("regime.atr_high_vol", 2.0):
                 logger.info(f"[RegimeClassifier] HIGH_VOLATILITY: ATR ratio {atr_ratio:.2f}x")
                 return RegimeClassifier.HIGH_VOLATILITY
 
-        # Step 2: Ranging market
-        if adx < 20:
+        # Step 2: Ranging market (Phase 24: adaptive ADX threshold)
+        if adx < _p("regime.adx_ranging", 20):
             logger.info(f"[RegimeClassifier] RANGING: ADX={adx:.1f}")
             return RegimeClassifier.RANGING
 
         # Step 3: Transitional
-        if adx < 25:
+        if adx < _p("regime.adx_trending", 25):
             logger.info(f"[RegimeClassifier] TRANSITIONAL: ADX={adx:.1f}")
             return RegimeClassifier.TRANSITIONAL
 
@@ -117,10 +124,10 @@ class RegimeClassifier:
         Ranging and volatile regimes reduce confidence.
         """
         modifiers = {
-            RegimeClassifier.TRENDING_BULL: 1.0,     # Full confidence in trends
-            RegimeClassifier.TRENDING_BEAR: 1.0,     # Full confidence in trends
-            RegimeClassifier.RANGING: 0.80,           # 20% penalty — signals unreliable
-            RegimeClassifier.HIGH_VOLATILITY: 0.75,   # 25% penalty — unpredictable
-            RegimeClassifier.TRANSITIONAL: 0.90,      # 10% penalty — changing regime
+            RegimeClassifier.TRENDING_BULL: 1.0,
+            RegimeClassifier.TRENDING_BEAR: 1.0,
+            RegimeClassifier.RANGING: _p("regime.mod_ranging", 0.80),
+            RegimeClassifier.HIGH_VOLATILITY: _p("regime.mod_high_vol", 0.75),
+            RegimeClassifier.TRANSITIONAL: 0.90,
         }
         return modifiers.get(regime, 0.90)

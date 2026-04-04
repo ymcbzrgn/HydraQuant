@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 
 class RiskBudgetManager:
     """
@@ -148,11 +155,13 @@ class RiskBudgetManager:
         """
         remaining = self.remaining_budget()
         if remaining <= 0:
-            # Budget exhausted — allow dust trades only (never block)
-            return min(proposed_stake, max(self.daily_budget * 0.01, 1.0))
+            # Budget exhausted — allow dust trades only (Phase 24: adaptive)
+            dust_frac = _p("risk.dust_fraction", 0.01)
+            dust_min = _p("risk.dust_min_usd", 1.0)
+            return min(proposed_stake, max(self.daily_budget * dust_frac, dust_min))
 
-        # Cap at 25% of remaining budget — prevents one trade from eating the rest
-        budget_cap = remaining * 0.25
+        # Cap at fraction of remaining budget (Phase 24: adaptive)
+        budget_cap = remaining * _p("risk.budget_cap_fraction", 0.25)
         return min(proposed_stake, budget_cap)
 
     def weekly_adjust(self, weekly_pnl_pct: float):
@@ -162,11 +171,14 @@ class RiskBudgetManager:
         Losing week → decrease budget (min 0.5x).
         """
         if weekly_pnl_pct > 0:
-            self._multiplier = min(2.0, self._multiplier * 1.1)
+            self._multiplier = min(_p("risk.weekly_mult_max", 2.0),
+                                   self._multiplier * _p("risk.weekly_win_mult", 1.1))
         elif weekly_pnl_pct < -2.0:
-            self._multiplier = max(0.5, self._multiplier * 0.8)
+            self._multiplier = max(_p("risk.weekly_mult_min", 0.5),
+                                   self._multiplier * _p("risk.weekly_loss_mult", 0.8))
         else:
-            self._multiplier = max(0.5, self._multiplier * 0.95)
+            self._multiplier = max(_p("risk.weekly_mult_min", 0.5),
+                                   self._multiplier * 0.95)
 
         logger.info(f"[RiskBudget] Weekly adjust: PnL={weekly_pnl_pct:.2f}%, new multiplier={self._multiplier:.2f}")
 

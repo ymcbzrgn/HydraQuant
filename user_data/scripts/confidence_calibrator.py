@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 
 class ConfidenceCalibrator:
     """
@@ -166,11 +173,12 @@ class ConfidenceCalibrator:
             return raw_confidence  # Still no data → pass through
 
         # Brier safety guard: if calibration is WORSE than random, disable until next explicit re-fit
-        brier = self.brier_score(min_trades=20)
-        if brier >= 0.25:
+        brier_thr = _p("calibrator.brier_threshold", 0.25)
+        brier = self.brier_score(min_trades=int(_p("calibrator.min_trades", 20)))
+        if brier >= brier_thr:
             self._calibrated = False
             self._brier_disabled = True  # Prevent fit-disable-fit cycle
-            logger.warning(f"[Calibrator] Brier {brier:.4f} >= 0.25 (worse than random), disabling until re-fit")
+            logger.warning(f"[Calibrator] Brier {brier:.4f} >= {brier_thr} (worse than random), disabling until re-fit")
             return raw_confidence
 
         z = self._platt_a * raw_confidence + self._platt_b
