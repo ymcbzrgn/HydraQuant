@@ -27,6 +27,13 @@ sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,16 +90,16 @@ class CrossPairIntel:
         if total == 0:
             bias = "NEUTRAL"
             strength = 0.0
-        elif bullish / total >= 0.70:
+        elif bullish / total >= _p("cross_pair.strong_bias", 0.70):
             bias = "BULLISH"
             strength = bullish / total
-        elif bearish / total >= 0.70:
+        elif bearish / total >= _p("cross_pair.strong_bias", 0.70):
             bias = "BEARISH"
             strength = bearish / total
-        elif bullish > bearish and bullish / total >= 0.55:
+        elif bullish > bearish and bullish / total >= _p("cross_pair.mild_bias", 0.55):
             bias = "MILD_BULLISH"
             strength = bullish / total * 0.5
-        elif bearish > bullish and bearish / total >= 0.55:
+        elif bearish > bullish and bearish / total >= _p("cross_pair.mild_bias", 0.55):
             bias = "MILD_BEARISH"
             strength = bearish / total * 0.5
         else:
@@ -261,9 +268,9 @@ class CrossPairIntel:
         bias_strength = bias.get("strength", 0)
 
         if bias_dir in ("BEARISH", "MILD_BEARISH"):
-            adjustment -= 0.05 * bias_strength  # Market-wide weakness
+            adjustment -= _p("cross_pair.bearish_penalty", 0.05) * bias_strength
         elif bias_dir in ("BULLISH", "MILD_BULLISH"):
-            adjustment += 0.03 * bias_strength  # Slight boost in bullish market
+            adjustment += _p("cross_pair.bullish_boost", 0.03) * bias_strength
 
         # BTC lead overlay (for altcoins only)
         btc_lead = self._latest.get("btc_lead", {})
@@ -273,9 +280,9 @@ class CrossPairIntel:
         # Funding crowding overlay
         funding = self._latest.get("funding_heatmap", {})
         if funding.get("crowding") == "crowded_long":
-            adjustment -= 0.03  # Market-wide crowding = reduce bullish confidence
+            adjustment -= _p("cross_pair.bullish_boost", 0.03)
         elif funding.get("crowding") == "crowded_short":
-            adjustment += 0.03
+            adjustment += _p("cross_pair.bullish_boost", 0.03)
 
         return round(adjustment, 3)
 

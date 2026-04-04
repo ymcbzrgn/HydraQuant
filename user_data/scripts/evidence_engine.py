@@ -41,6 +41,13 @@ from ai_config import AI_DB_PATH
 
 logger = logging.getLogger(__name__)
 
+# Phase 24: Neural Organism — adaptive parameters replace hardcoded values
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 
 # ═══════════════════════════════════════════════════════════════
 # Data containers for pipeline phases
@@ -557,19 +564,20 @@ class EvidenceEngine:
 
         adx_val = float(adx) if adx else 20
 
-        # Score mapping
-        if ema_align == "full_bullish" and adx_val > 25:
-            score = 0.85
+        # Score mapping (Phase 24: adaptive via Neural Organism)
+        adx_strong = _p("evidence.q1.adx_strong_threshold", 25)
+        if ema_align == "full_bullish" and adx_val > adx_strong:
+            score = _p("evidence.q1.full_bullish_strong", 0.85)
         elif ema_align == "full_bullish":
-            score = 0.70
-        elif ema_align == "full_bearish" and adx_val > 25:
-            score = 0.15
+            score = _p("evidence.q1.full_bullish", 0.70)
+        elif ema_align == "full_bearish" and adx_val > adx_strong:
+            score = _p("evidence.q1.full_bearish_strong", 0.15)
         elif ema_align == "full_bearish":
-            score = 0.30
+            score = _p("evidence.q1.full_bearish", 0.30)
         elif ema_align == "above_200":
-            score = 0.62
+            score = _p("evidence.q1.above_200", 0.62)
         elif ema_align == "below_200":
-            score = 0.38
+            score = _p("evidence.q1.below_200", 0.38)
         else:
             score = 0.50
 
@@ -582,92 +590,96 @@ class EvidenceEngine:
         htf = td.get("htf", {}) if isinstance(td.get("htf"), dict) else {}
         htf_rsi = htf.get("rsi_4h")
 
-        # RSI scoring: RSI>50 momentum zone is 2.8x better than RSI<30 oversold
+        # RSI scoring (Phase 24: adaptive)
         if rsi is not None:
             rsi = float(rsi)
             if 50 < rsi <= 70:
-                rsi_score = 0.75    # Momentum zone — RESEARCH: 2.8x better
+                rsi_score = _p("evidence.q2.rsi_momentum_zone", 0.75)
             elif rsi > 70:
-                rsi_score = 0.30    # Overbought risk
+                rsi_score = _p("evidence.q2.rsi_overbought", 0.30)
             elif 30 <= rsi <= 50:
-                rsi_score = 0.42    # Weak/uncertain
+                rsi_score = _p("evidence.q2.rsi_weak", 0.42)
             elif rsi < 30:
-                rsi_score = 0.55    # Oversold (slight bounce potential, but NOT as strong as >50)
+                rsi_score = _p("evidence.q2.rsi_oversold", 0.55)
             else:
                 rsi_score = 0.50
         else:
             rsi_score = 0.50
 
-        # MACD histogram direction
+        # MACD histogram direction (Phase 24: adaptive)
         if macd_hist is not None:
             macd_hist = float(macd_hist)
             if macd_hist > 0:
-                macd_score = 0.65
+                macd_score = _p("evidence.q2.macd_bullish", 0.65)
             else:
-                macd_score = 0.35
+                macd_score = _p("evidence.q2.macd_bearish", 0.35)
         else:
             macd_score = 0.50
 
-        # Higher timeframe RSI confirmation
+        # Higher timeframe RSI confirmation (Phase 24: adaptive)
         if htf_rsi is not None and rsi is not None:
             htf_rsi = float(htf_rsi)
-            # Both above 50 or both below 50 = aligned
             aligned = (rsi > 50 and htf_rsi > 50) or (rsi < 50 and htf_rsi < 50)
-            htf_score = 0.70 if aligned else 0.35
+            htf_score = _p("evidence.q2.htf_aligned", 0.70) if aligned else (1.0 - _p("evidence.q2.htf_aligned", 0.70))
         else:
             htf_score = 0.50
 
-        # Weighted combination
-        momentum_score = rsi_score * 0.50 + macd_score * 0.30 + htf_score * 0.20
+        # Weighted combination (Phase 24: adaptive blend weight)
+        rsi_w = _p("evidence.q2.blend_rsi_w", 0.50)
+        macd_w = (1.0 - rsi_w) * 0.6  # MACD gets 60% of remaining
+        htf_w = (1.0 - rsi_w) * 0.4   # HTF gets 40% of remaining
+        momentum_score = rsi_score * rsi_w + macd_score * macd_w + htf_score * htf_w
         return max(0.0, min(1.0, momentum_score))
 
     def _score_q3_crowd(self, gather: GatherResult) -> float:
         """Q3: Crowd Positioning — CONTRARIAN (F&G, funding rate, L/S ratio)."""
         score = 0.50  # neutral baseline
 
-        # Fear & Greed contrarian (Research: 70-80% accuracy at extremes, threshold <20 validated)
+        # Fear & Greed contrarian (Phase 24: ALL thresholds adaptive)
         if gather.fng is not None:
             fng = gather.fng
-            if fng < 10:
-                score += 0.22       # Extreme fear → strong contrarian BULLISH
-            elif fng < 20:
-                score += 0.15       # Fear → contrarian bullish (research-validated threshold)
-            elif fng < 30:
-                score += 0.06       # Mild fear → slight bullish
-            elif fng > 85:
-                score -= 0.22       # Extreme greed → strong contrarian BEARISH
-            elif fng > 75:
-                score -= 0.15       # Greed → contrarian bearish
-            elif fng > 65:
-                score -= 0.06       # Mild greed → slight bearish
-            # 30-65: neutral zone, no adjustment
+            if fng < _p("evidence.q3.fng_extreme_low", 10):
+                score += _p("evidence.q3.fng_adj_extreme", 0.22)
+            elif fng < _p("evidence.q3.fng_fear", 20):
+                score += _p("evidence.q3.fng_adj_fear", 0.15)
+            elif fng < _p("evidence.q3.fng_mild_fear", 30):
+                score += _p("evidence.q3.fng_adj_mild", 0.06)
+            elif fng > _p("evidence.q3.fng_extreme_high", 85):
+                score -= _p("evidence.q3.fng_adj_extreme", 0.22)
+            elif fng > _p("evidence.q3.fng_greed", 75):
+                score -= _p("evidence.q3.fng_adj_fear", 0.15)
+            elif fng > _p("evidence.q3.fng_mild_greed", 65):
+                score -= _p("evidence.q3.fng_adj_mild", 0.06)
 
-        # Funding rate contrarian (Research: strong microstructure signal for crowding detection)
+        # Funding rate contrarian (Phase 24: adaptive thresholds — fixes scheduler/cross_pair inconsistency)
         if gather.derivatives:
             fr = gather.derivatives.get("funding_rate")
             if fr is not None:
                 fr = float(fr)
-                if fr > 0.001:          # >0.1% — truly extreme crowded long
-                    score -= 0.18
-                elif fr > 0.0005:       # >0.05% — extreme crowded long
-                    score -= 0.12
-                elif fr > 0.0003:       # >0.03% — crowded long
-                    score -= 0.06
-                elif fr < -0.001:       # <-0.1% — truly extreme crowded short
-                    score += 0.18
-                elif fr < -0.0005:      # <-0.05% — extreme crowded short
-                    score += 0.12
-                elif fr < -0.0003:      # <-0.03% — crowded short
-                    score += 0.06
+                fr_extreme = _p("evidence.q3.funding_extreme", 0.001)
+                fr_high = _p("evidence.q3.funding_high", 0.0005)
+                fr_mod = _p("evidence.q3.funding_moderate", 0.0003)
+                if fr > fr_extreme:
+                    score -= _p("evidence.q3.funding_adj_extreme", 0.18)
+                elif fr > fr_high:
+                    score -= _p("evidence.q3.funding_adj_high", 0.12)
+                elif fr > fr_mod:
+                    score -= _p("evidence.q3.funding_adj_mod", 0.06)
+                elif fr < -fr_extreme:
+                    score += _p("evidence.q3.funding_adj_extreme", 0.18)
+                elif fr < -fr_high:
+                    score += _p("evidence.q3.funding_adj_high", 0.12)
+                elif fr < -fr_mod:
+                    score += _p("evidence.q3.funding_adj_mod", 0.06)
 
-            # Long/Short ratio
+            # Long/Short ratio (Phase 24: adaptive)
             ls = gather.derivatives.get("long_short_ratio")
             if ls is not None:
                 ls = float(ls)
-                if ls > 1.5:            # Too many longs
-                    score -= 0.08
-                elif ls < 0.7:          # Too many shorts
-                    score += 0.08
+                if ls > _p("evidence.q3.ls_crowded_long", 1.5):
+                    score -= _p("evidence.q3.ls_adj", 0.08)
+                elif ls < _p("evidence.q3.ls_crowded_short", 0.7):
+                    score += _p("evidence.q3.ls_adj", 0.08)
 
         return max(0.0, min(1.0, score))
 
@@ -675,52 +687,51 @@ class EvidenceEngine:
         """Q4: Historical Evidence — k-NN + backtest stats + OHLCV + ensemble."""
         score = 0.50  # neutral baseline
 
-        # k-NN results
+        # k-NN results (Phase 24: adaptive thresholds + adjustments)
         if patterns.knn and not patterns.knn.get("insufficient_data"):
             knn_wr = patterns.knn.get("knn_win_rate", 0.5)
-            if knn_wr > 0.65:
-                score += 0.15
-            elif knn_wr > 0.55:
-                score += 0.07
-            elif knn_wr < 0.35:
-                score -= 0.15
-            elif knn_wr < 0.45:
-                score -= 0.07
+            if knn_wr > _p("evidence.q4.knn_strong_bull", 0.65):
+                score += _p("evidence.q4.knn_adj_strong", 0.15)
+            elif knn_wr > _p("evidence.q4.knn_mild_bull", 0.55):
+                score += _p("evidence.q4.knn_adj_mild", 0.07)
+            elif knn_wr < _p("evidence.q4.knn_strong_bear", 0.35):
+                score -= _p("evidence.q4.knn_adj_strong", 0.15)
+            elif knn_wr < _p("evidence.q4.knn_mild_bear", 0.45):
+                score -= _p("evidence.q4.knn_adj_mild", 0.07)
 
-            # Distance bonus: very similar matches are more reliable
             avg_dist = patterns.knn.get("avg_distance", 1.0)
             if avg_dist < 0.3:
-                score += 0.05  # High similarity = high confidence in k-NN
+                score += _p("evidence.q4.knn_dist_bonus", 0.05)
 
-        # Backtest stats
+        # Backtest stats (Phase 24: adaptive)
         if patterns.stats and not patterns.stats.get("insufficient_data"):
             wr = patterns.stats.get("win_rate", 0.5)
             pf = patterns.stats.get("profit_factor", 1.0)
-            if wr > 0.60:
-                score += 0.12
-            elif wr < 0.40:
-                score -= 0.12
-            if pf > 2.0:
-                score += 0.08
-            elif pf < 0.5:
-                score -= 0.08
+            if wr > _p("evidence.q4.bt_wr_good", 0.60):
+                score += _p("evidence.q4.bt_adj", 0.12)
+            elif wr < _p("evidence.q4.bt_wr_bad", 0.40):
+                score -= _p("evidence.q4.bt_adj", 0.12)
+            if pf > _p("evidence.q4.pf_good", 2.0):
+                score += _p("evidence.q4.pf_adj", 0.08)
+            elif pf < 1.0 / max(_p("evidence.q4.pf_good", 2.0), 0.1):
+                score -= _p("evidence.q4.pf_adj", 0.08)
 
-        # OHLCV pattern match
+        # OHLCV pattern match (Phase 24: adaptive)
         if patterns.ohlcv and not patterns.ohlcv.get("insufficient_data"):
             pred_4h = patterns.ohlcv.get("predicted_4h", 0)
             if pred_4h > 1.0:
-                score += 0.08
+                score += _p("evidence.q4.pf_adj", 0.08)
             elif pred_4h < -1.0:
-                score -= 0.08
+                score -= _p("evidence.q4.pf_adj", 0.08)
 
-        # Ensemble consensus
+        # Ensemble consensus (Phase 24: adaptive)
         if patterns.ensemble and patterns.ensemble.get("total_strategies", 0) >= 2:
             consensus = patterns.ensemble.get("consensus", "NEUTRAL")
             strength = patterns.ensemble.get("consensus_strength", 0)
             if consensus == "LONG":
-                score += 0.05 * strength
+                score += _p("evidence.q4.knn_dist_bonus", 0.05) * strength
             elif consensus == "SHORT":
-                score -= 0.05 * strength
+                score -= _p("evidence.q4.knn_dist_bonus", 0.05) * strength
 
         return max(0.0, min(1.0, score))
 
@@ -735,32 +746,32 @@ class EvidenceEngine:
                 dxy_change = dxy_data.get("change_pct")
                 if dxy_change is not None:
                     dxy_change = float(dxy_change)
-                    if dxy_change < -0.3:
-                        score += 0.10   # Weak dollar = bullish crypto
-                    elif dxy_change > 0.3:
-                        score -= 0.10   # Strong dollar = bearish crypto
+                    dxy_thr = _p("evidence.q5.dxy_threshold", 0.3)
+                    dxy_adj = _p("evidence.q5.dxy_adj", 0.10)
+                    if dxy_change < -dxy_thr:
+                        score += dxy_adj
+                    elif dxy_change > dxy_thr:
+                        score -= dxy_adj
 
-            # VIX: high fear in TradFi = usually bad for crypto too
+            # VIX (Phase 24: adaptive)
             vix_data = gather.macro.get("vix")
             if isinstance(vix_data, dict):
                 vix_val = vix_data.get("value")
                 if vix_val is not None:
                     vix_val = float(vix_val)
-                    if vix_val > 30:
-                        score -= 0.08
-                    elif vix_val < 15:
-                        score += 0.05
+                    if vix_val > _p("evidence.q5.vix_high", 30):
+                        score -= _p("evidence.q5.vix_adj_high", 0.08)
+                    elif vix_val < _p("evidence.q5.vix_low", 15):
+                        score += _p("evidence.q5.vix_adj_low", 0.05)
 
-        # BTC dominance
+        # BTC dominance (Phase 24: adaptive)
         if gather.btc_dom is not None:
             is_btc = pair.upper().startswith("BTC")
             btc_dom = float(gather.btc_dom)
-            if btc_dom > 58:
-                # Money fleeing to BTC — good for BTC, bad for alts
-                score += 0.08 if is_btc else -0.08
-            elif btc_dom < 45:
-                # Alt season — bad for BTC, good for alts
-                score += -0.05 if is_btc else 0.08
+            if btc_dom > _p("evidence.q5.btcdom_high", 58):
+                score += _p("evidence.q5.dxy_adj", 0.10) if is_btc else -_p("evidence.q5.dxy_adj", 0.10)
+            elif btc_dom < _p("evidence.q5.btcdom_low", 45):
+                score += -_p("evidence.q5.vix_adj_low", 0.05) if is_btc else _p("evidence.q5.dxy_adj", 0.10)
 
         return max(0.0, min(1.0, score))
 
@@ -771,30 +782,30 @@ class EvidenceEngine:
         price = td.get("current_price", 0)
         atr = td.get("atr_14") or td.get("atr")
 
-        # ATR as % of price (volatility proxy)
+        # ATR as % of price (Phase 24: adaptive thresholds)
         if price and atr:
             atr_pct = float(atr) / float(price) * 100
-            if atr_pct > 4.0:
-                score -= 0.15       # Very high volatility
-            elif atr_pct > 3.0:
-                score -= 0.08       # High volatility
-            elif atr_pct < 1.5:
-                score += 0.08       # Low volatility = cleaner signals
+            if atr_pct > _p("evidence.q6.atr_very_high", 4.0):
+                score -= _p("evidence.q6.atr_adj_high", 0.15)
+            elif atr_pct > _p("evidence.q6.atr_high", 3.0):
+                score -= _p("evidence.q6.atr_adj_high", 0.15) * 0.53  # proportional
+            elif atr_pct < _p("evidence.q6.atr_low", 1.5):
+                score += _p("evidence.q6.atr_adj_high", 0.15) * 0.53
 
-        # k-NN worst case
+        # k-NN worst case (Phase 24: adaptive)
         if patterns.knn and not patterns.knn.get("insufficient_data"):
             knn_worst = patterns.knn.get("knn_worst", 0)
-            if knn_worst < -5.0:
-                score -= 0.10       # Worst similar case was ugly
+            if knn_worst < _p("evidence.q6.knn_worst_thr", -5.0):
+                score -= _p("evidence.q6.vol_adj", 0.05) * 2.0
 
-        # Volume confirmation
+        # Volume confirmation (Phase 24: adaptive)
         vol = td.get("volume", {}) if isinstance(td.get("volume"), dict) else {}
         vol_ratio = vol.get("ratio", 1.0)
         if isinstance(vol_ratio, (int, float)):
             if vol_ratio > 1.5:
-                score += 0.05       # Strong volume confirms
+                score += _p("evidence.q6.vol_adj", 0.05)
             elif vol_ratio < 0.5:
-                score -= 0.05       # Thin volume = unreliable
+                score -= _p("evidence.q6.vol_adj", 0.05)
 
         return max(0.0, min(1.0, score))
 
@@ -807,36 +818,40 @@ class EvidenceEngine:
         """Detect conflicting signals between sub-questions. MiroFish reflection pattern."""
         contradictions = []
 
-        # 1. Trend bullish BUT crowd crowded long → who is left to buy?
-        if scores["q1_trend"] > 0.65 and scores["q3_crowd"] < 0.35:
+        # 1. Trend bullish BUT crowd crowded long (Phase 24: adaptive thresholds)
+        bull_thr = _p("evidence.contradiction.bullish_thr", 0.65)
+        bear_thr = _p("evidence.contradiction.bearish_thr", 0.35)
+        if scores["q1_trend"] > bull_thr and scores["q3_crowd"] < bear_thr:
             contradictions.append(
                 "Trend bullish but crowd already crowded long (extreme funding/greed) — buyers exhausted")
 
         # 2. Momentum bullish BUT historical evidence bearish
-        if scores["q2_momentum"] > 0.65 and scores["q4_evidence"] < 0.35:
+        if scores["q2_momentum"] > bull_thr and scores["q4_evidence"] < bear_thr:
             contradictions.append(
                 "Current momentum bullish but historically similar setups lost money — false signal risk")
 
         # 3. Historical evidence bullish BUT regime is uncertain/volatile
-        if scores["q4_evidence"] > 0.65 and regime in ("high_volatility", "transitional"):
+        if scores["q4_evidence"] > bull_thr and regime in ("high_volatility", "transitional"):
             contradictions.append(
                 "Historical evidence strong but current regime is uncertain — conditions may differ")
 
         # 4. Trend bullish BUT higher timeframe bearish (timeframe conflict)
         htf = tech_data.get("htf", {}) if isinstance(tech_data.get("htf"), dict) else {}
-        if scores["q1_trend"] > 0.65 and htf.get("trend_daily") == "bearish":
+        if scores["q1_trend"] > bull_thr and htf.get("trend_daily") == "bearish":
             contradictions.append(
                 "1H trend bullish but daily timeframe is bearish — potential bear market rally")
 
         # 5. Trend bearish BUT higher timeframe bullish
-        if scores["q1_trend"] < 0.35 and htf.get("trend_daily") == "bullish":
+        if scores["q1_trend"] < bear_thr and htf.get("trend_daily") == "bullish":
             contradictions.append(
                 "1H trend bearish but daily timeframe is bullish — potential dip in uptrend")
 
         # 6. All sub-scores suspiciously aligned (groupthink check)
         non_risk = [scores[k] for k in ["q1_trend", "q2_momentum", "q3_crowd", "q4_evidence"]]
-        all_bullish = all(s > 0.60 for s in non_risk)
-        all_bearish = all(s < 0.40 for s in non_risk)
+        gt_hi = _p("evidence.contradiction.groupthink_hi", 0.60)
+        gt_lo = _p("evidence.contradiction.groupthink_lo", 0.40)
+        all_bullish = all(s > gt_hi for s in non_risk)
+        all_bearish = all(s < gt_lo for s in non_risk)
         if all_bullish or all_bearish:
             contradictions.append(
                 "All 4 main signals unanimously agree — beware of groupthink, reduce confidence")
@@ -918,10 +933,10 @@ class EvidenceEngine:
             weights = base_weights
             raw_score = sum(scores[k] * weights.get(k, 0) for k in scores)
 
-        # ═══ STEP 3: Direction ═══
-        if raw_score > 0.53:
+        # ═══ STEP 3: Direction (Phase 24: adaptive thresholds) ═══
+        if raw_score > _p("evidence.synthesis.bullish_threshold", 0.53):
             signal = "BULLISH"
-        elif raw_score < 0.47:
+        elif raw_score < _p("evidence.synthesis.bearish_threshold", 0.47):
             signal = "BEARISH"
         else:
             signal = "NEUTRAL"
@@ -952,18 +967,21 @@ class EvidenceEngine:
             std = variance ** 0.5
             # std ranges: 0.0 (perfect agreement) to ~0.25 (extreme disagreement)
             # Map to alignment: 1.0 (aligned) → 0.0 (split)
-            alignment = max(0.0, 1.0 - std * 5.0)  # std=0.20 → alignment=0.0
+            alignment = max(0.0, 1.0 - std * _p("evidence.synthesis.alignment_scale", 5.0))
         else:
             alignment = 0.5
 
-        # Dynamic k: ranges from 7 (disagreement) to 12 (agreement)
-        _k = 7.0 + 5.0 * alignment  # 7-12 range
+        # Dynamic k (Phase 24: adaptive base + range)
+        k_base = _p("evidence.synthesis.k_base", 7.0)
+        k_range = _p("evidence.synthesis.k_range", 5.0)
+        _k = k_base + k_range * alignment
         confidence = 1.0 / (1.0 + math.exp(-_k * (raw_score - 0.50)))
 
         # ═══ STEP 5: Bayesian uncertainty discount (Option D) ═══
         # Only discount: fewer active factors = slightly less certain
         data_completeness = n_active / n_total if n_total > 0 else 0.5
-        uncertainty_factor = 0.75 + 0.25 * data_completeness  # range: 0.75 to 1.0
+        uf_floor = _p("evidence.synthesis.uncertainty_floor", 0.75)
+        uncertainty_factor = uf_floor + (1.0 - uf_floor) * data_completeness
 
         confidence *= uncertainty_factor
 
@@ -987,13 +1005,13 @@ class EvidenceEngine:
         # Cap: evidence count now less restrictive because adaptive re-weighting
         # already handles missing data. Cap is a safety net, not the primary filter.
         if evidence_count >= 5:
-            max_cap = 0.90
+            max_cap = _p("evidence.synthesis.cap_5", 0.90)
         elif evidence_count >= 3:
-            max_cap = 0.80
+            max_cap = _p("evidence.synthesis.cap_3", 0.80)
         elif evidence_count >= 1:
-            max_cap = 0.70
+            max_cap = _p("evidence.synthesis.cap_1", 0.70)
         else:
-            max_cap = 0.55
+            max_cap = _p("evidence.synthesis.cap_0", 0.55)
 
         confidence = min(confidence, max_cap)
 
@@ -1004,12 +1022,14 @@ class EvidenceEngine:
         # If running on DB fallback data (no real tech_data), reduce cap further
         # Q1 (trend) and Q2 (momentum) are unreliable without real price/indicators
         if gather.tech.get("_price_from_db"):
-            confidence *= 0.50  # 50% penalty — no real price = no real trade
-            max_cap = min(max_cap, 0.35)  # Force shadow territory
+            confidence *= _p("evidence.contradiction.db_only_pen", 0.50)
+            max_cap = min(max_cap, _p("evidence.contradiction.db_only_cap", 0.35))
             logger.info(f"[EvidenceEngine:Synthesis] {pair} DB-only mode: confidence halved, cap→0.35")
 
-        # Contradiction penalty: each contradiction reduces confidence by 0.05 (max -0.15)
-        contradiction_penalty = min(len(contradictions) * 0.05, 0.15)
+        # Contradiction penalty (Phase 24: adaptive per-contradiction + max)
+        contradiction_penalty = min(
+            len(contradictions) * _p("evidence.synthesis.contradiction_per", 0.05),
+            _p("evidence.synthesis.contradiction_max", 0.15))
         confidence -= contradiction_penalty
         confidence = max(0.01, confidence)  # Floor BEFORE regime modifier (prevents negative * modifier bug)
 

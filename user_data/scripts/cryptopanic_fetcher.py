@@ -12,6 +12,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 class CryptoPanicFetcher:
     # Class-level flags survive garbage collection of instances
     _disabled = False
@@ -99,7 +106,7 @@ class CryptoPanicFetcher:
             return 0.0
             
         # Slightly weight 'important' positively if no clear direction
-        weighted_score = (pos + like + (imp * 0.2) - neg - dis) / total
+        weighted_score = (pos + like + (imp * _p("cryptopanic.important_weight", 0.2)) - neg - dis) / total
         
         # Clamp bounds
         return max(-1.0, min(1.0, weighted_score))

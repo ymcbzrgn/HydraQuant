@@ -439,103 +439,116 @@ def _legacy_technical_fallback(tech_data: dict) -> dict:
     reasons = []
     price = tech_data["current_price"]
 
-    # RSI (weight 0.15)
+    # Phase 25: ALL legacy fallback weights from Neural Organism
+    try:
+        from neural_organism import _p as _np
+    except ImportError:
+        def _np(pid, fb=0.5, regime="_global"): return fb
+
+    # RSI (adaptive weight)
     rsi = tech_data.get("rsi_14")
+    _rsi_w = _np("rag.legacy.rsi_weight", 0.15)
     if rsi is not None:
         if rsi < 30:
-            score += 0.15
+            score += _rsi_w
             reasons.append(f"RSI={rsi:.0f}(oversold)")
         elif rsi > 70:
-            score -= 0.15
+            score -= _rsi_w
             reasons.append(f"RSI={rsi:.0f}(overbought)")
         elif rsi < 45:
-            score += 0.05
+            score += _rsi_w * 0.33
         elif rsi > 55:
-            score -= 0.05
+            score -= _rsi_w * 0.33
 
-    # MACD histogram (weight 0.15)
+    # MACD histogram (adaptive weight)
     macd_hist = tech_data.get("macd_histogram")
+    _macd_w = _np("rag.legacy.macd_weight", 0.15)
     if macd_hist is not None:
         if macd_hist > 0:
-            score += 0.15
+            score += _macd_w
             reasons.append(f"MACD_hist={macd_hist:+.4f}(bull)")
         else:
-            score -= 0.15
+            score -= _macd_w
             reasons.append(f"MACD_hist={macd_hist:+.4f}(bear)")
 
-    # EMA cross 9/20 (weight 0.12)
+    # EMA cross 9/20 (adaptive weight)
     ema_9 = tech_data.get("ema_9")
     ema_20 = tech_data.get("ema_20")
+    _ema_cross_w = _np("rag.legacy.ema_cross_weight", 0.12)
     if ema_9 is not None and ema_20 is not None:
         if ema_9 > ema_20:
-            score += 0.12
+            score += _ema_cross_w
             reasons.append("EMA9>20(bull)")
         else:
-            score -= 0.12
+            score -= _ema_cross_w
             reasons.append("EMA9<20(bear)")
 
-    # EMA alignment 20/50/200 (weight 0.10)
+    # EMA alignment 20/50/200 (adaptive weight)
     ema_50 = tech_data.get("ema_50")
     ema_200 = tech_data.get("ema_200")
+    _ema_align_w = _np("rag.legacy.ema_align_weight", 0.10)
     if ema_20 is not None and ema_50 is not None and ema_200 is not None:
         if ema_20 > ema_50 > ema_200:
-            score += 0.10
+            score += _ema_align_w
             reasons.append("EMA_golden")
         elif ema_200 > ema_50 > ema_20:
-            score -= 0.10
+            score -= _ema_align_w
             reasons.append("EMA_death")
 
-    # Bollinger Bands (weight 0.08)
+    # Bollinger Bands (adaptive weight)
     bb_lower = tech_data.get("bb_lower")
     bb_upper = tech_data.get("bb_upper")
+    _bb_w = _np("rag.legacy.bb_weight", 0.08)
     if bb_lower is not None and price <= bb_lower:
-        score += 0.08
+        score += _bb_w
         reasons.append("below_BB")
     elif bb_upper is not None and price >= bb_upper:
-        score -= 0.08
+        score -= _bb_w
         reasons.append("above_BB")
 
-    # ADX trend strength (weight 0.07)
+    # ADX trend strength (adaptive ranging multiplier)
     adx = tech_data.get("adx_14")
     if adx is not None:
         if adx < 20:
-            score *= 0.7  # ranging market: reduce conviction
+            score *= _np("rag.legacy.adx_ranging_mult", 0.70)
             reasons.append(f"ADX={adx:.0f}(ranging)")
         elif adx > 25:
             reasons.append(f"ADX={adx:.0f}(trend)")
 
-    # Volume ratio (weight 0.07)
+    # Volume ratio (adaptive multiplier)
     vol = tech_data.get("volume", {})
     vol_ratio = vol.get("ratio", 1.0) if isinstance(vol, dict) else 1.0
     if vol_ratio > 1.2:
-        # Volume confirms the current direction
-        score *= 1.1
+        score *= _np("rag.legacy.vol_confirm_mult", 1.10)
         reasons.append(f"Vol={vol_ratio:.1f}x(confirms)")
     elif vol_ratio < 0.8:
-        score *= 0.85
+        score *= (2.0 - _np("rag.legacy.vol_confirm_mult", 1.10))  # inverse
         reasons.append(f"Vol={vol_ratio:.1f}x(weak)")
 
-    # Multi-timeframe: 4H RSI (weight 0.08)
+    # Multi-timeframe: 4H RSI (adaptive weight)
     htf = tech_data.get("htf", {})
     rsi_4h = htf.get("rsi_4h") if isinstance(htf, dict) else None
+    _htf_w = _np("rag.legacy.htf_rsi_weight", 0.08)
     if rsi_4h is not None:
         if rsi_4h < 40:
-            score += 0.08
+            score += _htf_w
             reasons.append(f"4H_RSI={rsi_4h:.0f}(bull)")
         elif rsi_4h > 60:
-            score -= 0.08
+            score -= _htf_w
             reasons.append(f"4H_RSI={rsi_4h:.0f}(bear)")
 
-    # Multi-timeframe: Daily trend (weight 0.08)
+    # Multi-timeframe: Daily trend (adaptive weight)
     trend_daily = htf.get("trend_daily") if isinstance(htf, dict) else None
+    _daily_w = _np("rag.legacy.daily_weight", 0.08)
     if trend_daily == "bullish":
-        score += 0.08
+        score += _daily_w
         reasons.append("daily_trend=bull")
     elif trend_daily == "bearish":
-        score -= 0.08
+        score -= _daily_w
         reasons.append("daily_trend=bear")
 
-    # S/R proximity (weight 0.05)
+    # S/R proximity (adaptive weight)
+    _sr_w = _np("rag.legacy.sr_weight", 0.05)
     levels = tech_data.get("levels", {})
     if isinstance(levels, dict):
         supports = levels.get("support", [])
@@ -545,37 +558,39 @@ def _legacy_technical_fallback(tech_data: dict) -> dict:
             if isinstance(nearest_sup, (int, float)) and price > 0:
                 dist_pct = (price - nearest_sup) / price * 100
                 if 0 < dist_pct < 2:
-                    score += 0.05
+                    score += _sr_w
                     reasons.append("near_support")
         if resistances and isinstance(resistances, list) and len(resistances) > 0:
             nearest_res = min(resistances, key=lambda r: abs(price - r) if isinstance(r, (int, float)) else 999999)
             if isinstance(nearest_res, (int, float)) and price > 0:
                 dist_pct = (nearest_res - price) / price * 100
                 if 0 < dist_pct < 2:
-                    score -= 0.05
+                    score -= _sr_w
                     reasons.append("near_resistance")
 
-    # Candlestick patterns (weight 0.05)
+    # Candlestick patterns (weight 0.025 each)
     patterns = tech_data.get("patterns", [])
     if isinstance(patterns, list):
         for p in patterns:
             if "bullish" in str(p).lower():
-                score += 0.025
+                score += 0.025  # Candlestick weight — very small, kept fixed
                 reasons.append(str(p))
             elif "bearish" in str(p).lower():
-                score -= 0.025
+                score -= 0.025  # Candlestick weight — very small, kept fixed
                 reasons.append(str(p))
 
-    # Determine signal
-    if score > 0.10:
+    # Determine signal (adaptive threshold)
+    _sig_thr = _np("rag.legacy.signal_dir_thr", 0.10)
+    if score > _sig_thr:
         signal = "BULLISH"
-    elif score < -0.10:
+    elif score < -_sig_thr:
         signal = "BEARISH"
     else:
         signal = "NEUTRAL"
 
-    # Confidence: scale and cap at 0.35
-    confidence = min(abs(score) * 0.50, 0.35)
+    # Confidence: scale and cap (adaptive)
+    _cap = _np("rag.legacy.confidence_cap", 0.35)
+    confidence = min(abs(score) * 0.50, _cap)
     confidence = round(confidence, 2)
 
     reason_str = f"[Technical Fallback] {signal}: {'; '.join(reasons[:6])}. Score: {score:+.2f}"
@@ -613,9 +628,14 @@ def _voting_fallback(tech_text: str, sent_text: str, news_text: str) -> dict:
     else:
         signal = "NEUTRAL"
 
-    # Confidence: (majority/3) * 0.40, capped at 0.30
+    # Confidence (Phase 25: adaptive scaling + cap)
+    try:
+        from neural_organism import _p as _np
+    except ImportError:
+        def _np(pid, fb=0.5, regime="_global"): return fb
     if signal != "NEUTRAL" and majority >= 2:
-        confidence = min(round((majority / 3) * 0.40, 2), 0.30)
+        confidence = min(round((majority / 3) * _np("rag.voting.scaling", 0.40), 2),
+                         _np("rag.voting.cap", 0.30))
     else:
         confidence = 0.0
 
@@ -1718,16 +1738,23 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
     # Decision: Is evidence strong enough to skip LLM?
     ee_confidence = ee_result.get("confidence", 0) if ee_result else 0
 
-    if ee_confidence >= 0.40:
+    # Phase 24: EvidenceFirst threshold is now adaptive via Neural Organism
+    try:
+        from neural_organism import _p as _np
+        _ee_threshold = _np("rag.evidence_first_threshold", 0.40)
+    except Exception:
+        _ee_threshold = 0.40
+
+    if ee_confidence >= _ee_threshold:
         # Strong evidence — return Evidence Engine immediately,
         # but ALSO queue MADAM in background to enrich cache for next query
-        logger.info(f"[Phase20:EvidenceFirst] {pair} HIGH confidence ({ee_confidence:.2f}) → returning EE, queuing MADAM background")
+        logger.info(f"[Phase20:EvidenceFirst] {pair} HIGH confidence ({ee_confidence:.2f} >= {_ee_threshold:.2f}) → returning EE, queuing MADAM background")
         _record_signal_health(pair, "EVIDENCE_ENGINE", ee_result["signal"], ee_result["confidence"])
         _signal_stats["total"] += 1
         _signal_stats["ai"] += 1
 
         # Cache Evidence Engine result NOW (immediate response)
-        if ee_confidence >= 0.30:
+        if ee_confidence >= 0.30:  # Cache floor — too low confidence not worth caching
             _semantic_cache.put(query=query_str, response=json.dumps(ee_result), pair=pair)
 
         # Queue MADAM in background — enrich cache with full LLM pipeline
@@ -1872,9 +1899,14 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
         health = _monitor.check_health()
         checks = health.get("checks", {})
         # Only penalize if ChromaDB (retrieval) was actually down — that makes the signal less reliable
-        if checks.get("chromadb") is False and confidence > 0.40:
+        try:
+            from neural_organism import _p as _np
+        except ImportError:
+            def _np(pid, fb=0.5, regime="_global"): return fb
+        if checks.get("chromadb") is False and confidence > _np("rag.health.chroma_floor", 0.40):
             original_conf = confidence
-            confidence = max(confidence * 0.85, 0.40)  # 15% penalty, floor at 0.40
+            confidence = max(confidence * _np("rag.health.chroma_penalty", 0.85),
+                            _np("rag.health.chroma_floor", 0.40))
             reasoning += f" [DEGRADED: ChromaDB down, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
             logger.warning(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (ChromaDB down)")
     except Exception as e:
@@ -1887,7 +1919,7 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
         cpi_adjustment = _cpi.get_confidence_overlay(pair)
         if abs(cpi_adjustment) > 0.001:
             original_conf = confidence
-            confidence = max(0.01, min(0.85, confidence + cpi_adjustment))
+            confidence = max(0.01, min(_np("rag.tier.max_coord_conf", 0.85), confidence + cpi_adjustment))
             logger.info(f"[Phase20:CrossPair] {pair} confidence adjusted {original_conf:.2f}→{confidence:.2f} "
                        f"(overlay={cpi_adjustment:+.3f})")
     except Exception as e:

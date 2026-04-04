@@ -28,16 +28,25 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
-# Kelly fraction mapping per autonomy level
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
+# Kelly fraction mapping per autonomy level (Phase 24: reads from Neural Organism)
 # Trade-First: EVERY level trades. Size grows with trust, never zero.
-KELLY_FRACTIONS = {
-    0: 0.03,  # Nano-live — minimum viable trade, full logging
-    1: 0.07,  # Micro-live
-    2: 0.15,  # Small-live
-    3: 0.30,  # Cautious-live
-    4: 0.50,  # Standard-live
-    5: 0.75,  # Full-auto
-}
+def _get_kelly_fractions():
+    return {
+        0: _p("autonomy.kelly_l0", 0.03),
+        1: _p("autonomy.kelly_l1", 0.07),
+        2: _p("autonomy.kelly_l2", 0.15),
+        3: _p("autonomy.kelly_l3", 0.30),
+        4: _p("autonomy.kelly_l4", 0.50),
+        5: _p("autonomy.kelly_l5", 0.75),
+    }
+KELLY_FRACTIONS = {0: 0.03, 1: 0.07, 2: 0.15, 3: 0.30, 4: 0.50, 5: 0.75}  # fallback
 
 # Promotion criteria: (min_trades, min_sharpe, max_dd_pct, min_days)
 PROMOTION_CRITERIA = {
@@ -99,8 +108,9 @@ class AutonomyManager:
         return self.current_level
 
     def get_kelly_fraction(self) -> float:
-        """Get the Kelly fraction for the current autonomy level."""
-        return KELLY_FRACTIONS.get(self.current_level, 0.0)
+        """Get the Kelly fraction for the current autonomy level (Phase 24: adaptive)."""
+        adaptive = _get_kelly_fractions()
+        return adaptive.get(self.current_level, KELLY_FRACTIONS.get(self.current_level, 0.03))
 
     def get_max_stake(self, portfolio_value: float = 0.0) -> Optional[float]:
         """

@@ -25,6 +25,13 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from llm_cost_tracker import LLMCostTracker
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 import httpx
 from google.api_core import exceptions as google_exc
 import openai
@@ -68,15 +75,26 @@ def _lookup_rpm(model_name: str) -> int:
     return 10
 
 # ─── Error Taxonomy ──────────────────────────────────────────────────
+def _get_penalty_config():
+    """Phase 24: Adaptive penalty config from Neural Organism."""
+    return {
+        "rate_limit":        {"base": _p("llm.penalty.rate_limit_base", 30.0), "exp": True,  "max": _p("llm.penalty.rate_limit_max", 300.0)},
+        "timeout":           {"base": _p("llm.penalty.timeout_base", 15.0),    "exp": False, "max": _p("llm.penalty.timeout_base", 15.0)},
+        "overloaded":        {"base": _p("llm.penalty.overloaded_base", 45.0), "exp": False, "max": _p("llm.penalty.overloaded_base", 45.0)},
+        "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},
+        "auth":              {"base": 0.0,  "exp": False, "max": 0.0},
+        "empty":             {"base": _p("llm.penalty.empty_base", 30.0),      "exp": False, "max": _p("llm.penalty.empty_base", 30.0)},
+        "other":             {"base": _p("llm.penalty.empty_base", 30.0),      "exp": False, "max": 60.0},
+    }
 PENALTY_CONFIG = {
     "rate_limit":        {"base": 30.0, "exp": True,  "max": 300.0},
     "timeout":           {"base": 15.0, "exp": False, "max": 15.0},
     "overloaded":        {"base": 45.0, "exp": False, "max": 45.0},
-    "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},   # skip, not penalize
-    "auth":              {"base": 0.0,  "exp": False, "max": 0.0},   # permanent disable
+    "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},
+    "auth":              {"base": 0.0,  "exp": False, "max": 0.0},
     "empty":             {"base": 30.0, "exp": False, "max": 30.0},
     "other":             {"base": 30.0, "exp": False, "max": 60.0},
-}
+}  # static fallback
 
 def classify_error(e: Exception) -> str:
     """Classify exception into error taxonomy category."""
@@ -154,7 +172,8 @@ class ModelSlot:
             self.disabled = True
             return
 
-        cfg = PENALTY_CONFIG.get(error_type, PENALTY_CONFIG["other"])
+        _pcfg = _get_penalty_config()
+        cfg = _pcfg.get(error_type, _pcfg["other"])
         if cfg["base"] <= 0:
             return  # context_overflow: no time penalty
 

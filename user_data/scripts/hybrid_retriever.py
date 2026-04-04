@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as VECTOR_DB_DIR
 
+# Phase 24: Neural Organism — adaptive parameters
+try:
+    from neural_organism import _p
+except ImportError:
+    def _p(param_id, fallback=0.5, regime="_global"):
+        return fallback
+
 class HybridRetriever:
     """
     Implements Hybrid Search combining:
@@ -231,8 +238,10 @@ class HybridRetriever:
 
         return embedded_count
 
-    def reciprocal_rank_fusion(self, results_lists: List[List[str]], k=60) -> List[str]:
-        """Calculates RRF score to combine multiple ranked lists."""
+    def reciprocal_rank_fusion(self, results_lists: List[List[str]], k=None) -> List[str]:
+        """Calculates RRF score to combine multiple ranked lists (Phase 24: adaptive k)."""
+        if k is None:
+            k = int(_p("retriever.rrf_k", 60))
         rrf_scores = {}
         for ranked_list in results_lists:
             for rank, doc_id in enumerate(ranked_list):
@@ -539,8 +548,8 @@ class HybridRetriever:
     def _apply_temporal_decay(
         self,
         results: List[Dict[str, Any]],
-        half_life_days: float = 7.0,
-        alpha: float = 0.7
+        half_life_days: float = None,
+        alpha: float = None
     ) -> List[Dict[str, Any]]:
         """
         Apply temporal decay to search results.
@@ -551,12 +560,19 @@ class HybridRetriever:
         - 30-day-old news: decay ≈ 0.05 → ~28.5% penalty
         - 90-day-old news: decay ≈ 0.0002 → killed
         """
+        # Phase 24: adaptive temporal decay parameters
+        if half_life_days is None:
+            half_life_days = _p("retriever.temporal_half_life", 7.0)
+        if alpha is None:
+            alpha = _p("retriever.temporal_alpha", 0.7)
+        unknown_decay = _p("retriever.unknown_date_decay", 0.5)
+
         now = datetime.now(tz=timezone.utc)
-        
+
         for result in results:
             meta = result.get('meta', {})
             pub_date_str = meta.get('published_at') or meta.get('date') or meta.get('timestamp')
-            
+
             if pub_date_str:
                 try:
                     pub_date = datetime.fromisoformat(str(pub_date_str).replace('Z', '+00:00'))
@@ -565,10 +581,10 @@ class HybridRetriever:
                     age_days = (now - pub_date).total_seconds() / 86400.0
                     decay = math.pow(0.5, age_days / half_life_days)
                 except (ValueError, TypeError):
-                    decay = 0.5  # Unknown date → moderate penalty
+                    decay = unknown_decay
             else:
-                decay = 0.5  # No date metadata → moderate penalty
-            
+                decay = unknown_decay
+
             original_score = float(result.get('score', 1.0))
             result['score'] = alpha * original_score + (1 - alpha) * decay
         
