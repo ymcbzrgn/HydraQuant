@@ -20,6 +20,13 @@ if _scripts_dir not in sys.path:
 from forgone_pnl_engine import ForgonePnLEngine
 from confidence_calibrator import ConfidenceCalibrator
 
+# Phase 25: Neural Organism — adaptive parameters (module-level, ALL methods use this)
+try:
+    from neural_organism import _p as _np
+except ImportError:
+    def _np(pid, fb=0.5, regime="_global"):
+        return fb
+
 logger = logging.getLogger(__name__)
 
 class AIFreqtradeSizer(IStrategy):
@@ -786,7 +793,7 @@ class AIFreqtradeSizer(IStrategy):
             # Determine execution mode for logging
             if confidence >= REAL_TRADE_THRESHOLD and signal_type != 'NEUTRAL':
                 exec_mode = "REAL"
-            elif confidence >= _np("strategy.stoploss_floor", 0.30) if '_np' in dir() else confidence >= 0.30:
+            elif confidence >= _np("strategy.stoploss_floor", 0.30):
                 exec_mode = "SHADOW"      # Decent signal, paper trade it
             else:
                 exec_mode = "SHADOW_WEAK"  # Garbage signal, still log for learning
@@ -886,12 +893,6 @@ class AIFreqtradeSizer(IStrategy):
             breakeven_active = trade.get_custom_data("breakeven_active", False)
         except Exception:
             pass
-
-        # Phase 25: All stoploss/trailing params from Neural Organism
-        try:
-            from neural_organism import _p as _np
-        except ImportError:
-            def _np(pid, fb=0.5, regime="_global"): return fb
 
         if breakeven_active and current_rate > 0 and trade.open_rate > 0:
             if not trade.is_short:
@@ -1471,10 +1472,6 @@ class AIFreqtradeSizer(IStrategy):
         effective_max = min(regime_max, atr_safe_max, max_leverage)
 
         # Confidence-based within effective cap (Phase 25: adaptive)
-        try:
-            from neural_organism import _p as _np
-        except ImportError:
-            def _np(pid, fb=0.5, regime="_global"): return fb
         if confidence >= _np("strategy.leverage_conf_high", 0.75):
             lev = effective_max * _np("strategy.leverage_mult_high", 1.0)
         elif confidence >= _np("strategy.leverage_conf_med", 0.60):
@@ -1503,7 +1500,7 @@ class AIFreqtradeSizer(IStrategy):
         signal = cached.get('signal', 'NEUTRAL')
         confidence = cached.get('confidence', 0.0)
 
-        _flip_conf = _np("strategy.flip_exit_conf", 0.55) if '_np' in dir() else 0.55
+        _flip_conf = _np("strategy.flip_exit_conf", 0.55)
         if not trade.is_short and signal == 'BEARISH' and confidence >= _flip_conf:
             return f"ai_flip_bearish_{confidence:.0%}"
         if trade.is_short and signal == 'BULLISH' and confidence >= _flip_conf:
@@ -1575,7 +1572,7 @@ class AIFreqtradeSizer(IStrategy):
         cached = self.ai_signal_cache.get(pair, {})
         confidence = cached.get('confidence', 0.0)
 
-        _roi_hi_conf = _np("strategy.chandelier_high_conf", 0.80) if '_np' in dir() else 0.80
+        _roi_hi_conf = _np("strategy.chandelier_high_conf", 0.80)
         if confidence >= _roi_hi_conf:
             if trade_duration < 120:
                 return 0.20
