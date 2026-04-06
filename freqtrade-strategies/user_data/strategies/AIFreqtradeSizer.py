@@ -1186,11 +1186,24 @@ class AIFreqtradeSizer(IStrategy):
                            rate: float, time_in_force: str, exit_reason: str,
                            current_time: datetime, **kwargs) -> bool:
         """Resolve forgone trades and update Bayesian Kelly with trade outcome."""
+        # Phase 25: Duplicate exit guard — prevent multiple feedback updates for same trade+order
+        # confirm_trade_exit can be called multiple times when order fill fails
+        _exit_key = f"{trade.id}_{exit_reason}_{rate}"
+        if not hasattr(self, '_processed_exits'):
+            self._processed_exits = set()
+        if _exit_key in self._processed_exits:
+            logger.debug(f"[ExitGuard] {pair} duplicate exit skipped: {_exit_key}")
+            return True
+        self._processed_exits.add(_exit_key)
+        # Cleanup: keep only last 100 entries to prevent memory leak
+        if len(self._processed_exits) > 100:
+            self._processed_exits = set(list(self._processed_exits)[-50:])
+
         # Forgone P&L resolution
         fid = self._forgone_ids.pop(pair, None)
         if fid:
             self.forgone_engine.resolve_forgone_trade(fid, exit_price=rate)
-        
+
         logger.info(f"[Trade Exit] {pair} reason={exit_reason}")
 
         # Phase 3.5.2: Bayesian Kelly update — learn from this trade
@@ -1312,28 +1325,59 @@ class AIFreqtradeSizer(IStrategy):
         try:
             from neural_organism import get_organism
             organism = get_organism()
-            # Gather context for the update cycle
+            # Gather context — robust extraction with safe defaults
             fng_val = None
             adx_val = 20.0
             funding_val = 0.0
+            conf_val = 0.5
+            regime_val = "transitional"
             try:
-                fng_val = int(ai_meta.get('fng')) if ai_meta.get('fng') is not None else None
+                _fng = ai_meta.get('fng')
+                if _fng is not None:
+                    fng_val = int(float(_fng))
             except (ValueError, TypeError):
                 pass
-            balance = self.risk_budget.portfolio_value if hasattr(self, 'risk_budget') else 10000
-            peak = balance  # simplified: balance_vs_peak
+            try:
+                _conf = ai_meta.get('confidence')
+                if _conf is not None:
+                    conf_val = float(_conf)
+            except (ValueError, TypeError):
+                pass
+            try:
+                _regime = ai_meta.get('regime')
+                if _regime:
+                    regime_val = str(_regime)
+                else:
+                    # Phase 25: ai_meta'da regime yoksa signal cache'den al
+                    cached = self.ai_signal_cache.get(pair, {})
+                    _cached_reasoning = str(cached.get('reasoning', ''))
+                    if 'trending_bull' in _cached_reasoning:
+                        regime_val = 'trending_bull'
+                    elif 'trending_bear' in _cached_reasoning:
+                        regime_val = 'trending_bear'
+                    elif 'ranging' in _cached_reasoning:
+                        regime_val = 'ranging'
+                    elif 'high_volatility' in _cached_reasoning:
+                        regime_val = 'high_volatility'
+            except Exception:
+                pass
+            try:
+                balance = self.risk_budget.portfolio_value if hasattr(self, 'risk_budget') else 10000
+            except Exception:
+                balance = 10000
+            peak = max(balance, 1.0)
 
             result = organism.update_cycle(
                 pair=pair, pnl_pct=trade_pnl_pct,
-                regime=str(ai_meta.get('regime', 'transitional')),
-                confidence=float(ai_meta.get('confidence', 0.5)) if ai_meta.get('confidence') else 0.5,
+                regime=regime_val,
+                confidence=conf_val,
                 exit_reason=exit_reason,
                 duration_hours=round((current_time - trade.open_date).total_seconds() / 3600, 2) if trade.open_date else 1.0,
-                stake_amount=trade.stake_amount,
+                stake_amount=trade.stake_amount if hasattr(trade, 'stake_amount') else 0,
                 fng=fng_val,
                 adx=adx_val,
                 funding_rate=funding_val,
-                balance_vs_peak=min(1.0, balance / max(peak, 1.0)),
+                balance_vs_peak=min(1.0, balance / peak),
             )
             # Apply pair ban if organism recommends it
             ban_minutes = result.get("ban_minutes", 0)
@@ -1346,7 +1390,7 @@ class AIFreqtradeSizer(IStrategy):
             logger.info(f"[LiveFeedback:NeuralOrganism] {pair} updated: phase={result.get('phase')} "
                        f"overrides={len(result.get('overrides', []))}")
         except Exception as e:
-            logger.debug(f"[LiveFeedback:NeuralOrganism] {pair} update failed: {e}")
+            logger.warning(f"[LiveFeedback:NeuralOrganism] {pair} update FAILED: {e}", exc_info=True)
 
         # Phase 22: Notify exit via strategy message
         try:
@@ -1666,6 +1710,10 @@ class AIFreqtradeSizer(IStrategy):
         if self.dp.runmode.value not in ('dry_run', 'live'):
             return None
         if trade.nr_of_successful_entries >= 4:
+            return None
+
+        # Phase 25: Empty orderbook guard — skip if rates are 0 (exchange has no data)
+        if current_entry_rate <= 0 or current_exit_rate <= 0:
             return None
 
         hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
