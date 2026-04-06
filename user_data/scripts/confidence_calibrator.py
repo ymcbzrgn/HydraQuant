@@ -177,8 +177,13 @@ class ConfidenceCalibrator:
         brier = self.brier_score(min_trades=int(_p("calibrator.min_trades", 20)))
         if brier >= brier_thr:
             self._calibrated = False
-            self._brier_disabled = True  # Prevent fit-disable-fit cycle
-            logger.warning(f"[Calibrator] Brier {brier:.4f} >= {brier_thr} (worse than random), disabling until re-fit")
+            self._brier_disabled = True
+            # Phase 25: Log only ONCE per session, not every call (prevents log spam)
+            if not getattr(self, '_brier_warned', False):
+                logger.warning(f"[Calibrator] Brier {brier:.4f} >= {brier_thr} (worse than random), "
+                              f"passing raw confidence until re-fit improves. "
+                              f"Need more trade outcomes with diverse confidence levels.")
+                self._brier_warned = True
             return raw_confidence
 
         z = self._platt_a * raw_confidence + self._platt_b

@@ -2113,6 +2113,10 @@ class FreqtradeBot(LoggingMixin):
         amount = self._safe_exit_amount(trade, trade.pair, sub_trade_amt or trade.amount)
         time_in_force = self.strategy.order_time_in_force["exit"]
 
+        if trade.has_open_orders:
+            if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
+                return False
+
         if (
             exit_check.exit_type != ExitType.LIQUIDATION
             and not sub_trade_amt
@@ -2130,10 +2134,6 @@ class FreqtradeBot(LoggingMixin):
         ):
             logger.info(f"User denied exit for {trade.pair}.")
             return False
-
-        if trade.has_open_orders:
-            if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
-                return False
 
         try:
             # Execute exit and update trade record

@@ -77,7 +77,20 @@ class BayesianKelly:
                     self.avg_win_loss_ratio = avg_win / avg_loss
 
     def update(self, won: bool, pnl_pct: float = 0.0):
-        """Update Beta distribution after a trade completes."""
+        """Update Beta distribution after a trade completes.
+        Phase 25: Added decay to prevent prior from growing unbounded.
+        Without decay, after 1000 trades alpha≈850 → +1 is invisible (0.850→0.850).
+        With decay, effective window is ~100 trades.
+        """
+        # Decay: shrink old evidence so recent trades matter more
+        # Without this, alpha+beta grows to 1000+ and new trades have zero effect
+        DECAY = 0.98  # Each trade, old evidence loses 2% → effective window ~50 trades
+        self.alpha *= DECAY
+        self.beta_param *= DECAY
+        # Floor: never below 1.0 (keeps valid Beta distribution)
+        self.alpha = max(1.0, self.alpha)
+        self.beta_param = max(1.0, self.beta_param)
+
         if won:
             self.alpha += 1
         else:

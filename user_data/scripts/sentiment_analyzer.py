@@ -14,8 +14,10 @@ logger = logging.getLogger(__name__)
 try:
     from neural_organism import _p
 except ImportError:
+
     def _p(param_id, fallback=0.5, regime="_global"):
         return fallback
+
 
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 ONNX_DIR = os.path.join(MODELS_DIR, "onnx")
@@ -34,11 +36,70 @@ def _check_transformers():
         return _HAS_TRANSFORMERS
     try:
         import transformers  # noqa: F401
+
         _HAS_TRANSFORMERS = True
     except ImportError:
         _HAS_TRANSFORMERS = False
         logger.warning("[Sentiment] transformers not available. Local model fallback disabled.")
     return _HAS_TRANSFORMERS
+
+
+def _get_memory_snapshot():
+    """Return current memory pressure, or None if unavailable."""
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        return {
+            "usage_pct": float(mem.percent),
+            "available_mb": float(mem.available) / (1024 * 1024),
+        }
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"[Sentiment] psutil memory check failed: {e}")
+
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key in {"MemTotal", "MemAvailable"}:
+                    meminfo[key] = int(value.strip().split()[0])
+
+        total_kb = meminfo.get("MemTotal")
+        available_kb = meminfo.get("MemAvailable")
+        if total_kb is not None and available_kb is not None and total_kb > 0:
+            used_pct = ((total_kb - available_kb) / total_kb) * 100.0
+            return {
+                "usage_pct": used_pct,
+                "available_mb": available_kb / 1024.0,
+            }
+    except Exception as e:
+        logger.debug(f"[Sentiment] /proc memory check failed: {e}")
+
+    return None
+
+
+def _local_model_fallback_allowed() -> bool:
+    """Avoid loading large local models when the host is already under memory pressure."""
+    snapshot = _get_memory_snapshot()
+    if not snapshot:
+        # Phase 25: psutil yüklü değilse → GÜVENLİ tarafta kal, local model yükleme
+        # Eski davranış True döndürüyordu → 3.9GB CryptoBERT yüklenip OOM oluyordu
+        logger.warning("[Sentiment] psutil not available — blocking local model to prevent OOM")
+        return False
+
+    usage_pct = snapshot["usage_pct"]
+    available_mb = snapshot["available_mb"]
+    if usage_pct >= 85.0 or available_mb < 1500.0:
+        logger.warning(
+            "[Sentiment] Skipping local model fallback due to memory pressure "
+            f"(usage={usage_pct:.1f}%, available={available_mb:.0f}MB)"
+        )
+        return False
+
+    return True
 
 
 def load_sentiment_pipeline(model_name):
@@ -55,19 +116,39 @@ def load_sentiment_pipeline(model_name):
             try:
                 from optimum.onnxruntime import ORTModelForSequenceClassification
                 from transformers import AutoTokenizer, pipeline as hf_pipeline
+
                 logger.info(f"Loading ONNX model for {model_name} from {onnx_path}")
                 model = ORTModelForSequenceClassification.from_pretrained(onnx_path)
                 tokenizer = AutoTokenizer.from_pretrained(onnx_path)
-                return hf_pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
+                return hf_pipeline(
+                    "text-classification",
+                    model=model,
+                    tokenizer=tokenizer,
+                    truncation=True,
+                    max_length=512,
+                )
             except ImportError:
-                logger.warning(f"optimum.onnxruntime not available, trying PyTorch for {model_name}")
+                logger.warning(
+                    f"optimum.onnxruntime not available, trying PyTorch for {model_name}"
+                )
 
         if os.path.exists(pt_path):
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
+            from transformers import (
+                AutoModelForSequenceClassification,
+                AutoTokenizer,
+                pipeline as hf_pipeline,
+            )
+
             logger.info(f"Loading PyTorch model for {model_name} from {pt_path}")
             model = AutoModelForSequenceClassification.from_pretrained(pt_path)
             tokenizer = AutoTokenizer.from_pretrained(pt_path)
-            return hf_pipeline("text-classification", model=model, tokenizer=tokenizer, truncation=True, max_length=512)
+            return hf_pipeline(
+                "text-classification",
+                model=model,
+                tokenizer=tokenizer,
+                truncation=True,
+                max_length=512,
+            )
 
         logger.warning(f"Model {model_name} not found locally at {onnx_path} or {pt_path}")
         return None
@@ -78,8 +159,8 @@ def load_sentiment_pipeline(model_name):
 
 def clean_text(text: str) -> str:
     """Emoji ve unicode karakterleri temizle"""
-    text = re.sub(r'[^\x00-\x7F]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"[^\x00-\x7F]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -91,9 +172,11 @@ def _get_sentiment_router():
     global _sentiment_router
     if _sentiment_router is None:
         from llm_router import LLMRouter
+
         _sentiment_router = LLMRouter(
             temperature=_p("sentiment.llm_temperature", 0.1),
-            request_timeout=int(_p("sentiment.llm_timeout", 30)))
+            request_timeout=int(_p("sentiment.llm_timeout", 30)),
+        )
     return _sentiment_router
 
 
@@ -107,6 +190,7 @@ def _llm_sentiment_batch(articles: list) -> list:
         import json
 
         from json_utils import extract_json_array
+
         router = _get_sentiment_router()
 
         SYSTEM = """IDENTITY: You are a crypto market sentiment classifier with expertise in financial NLP.
@@ -135,16 +219,16 @@ No markdown, no backticks, ONLY raw JSON array."""
         results = []
         batch_size = 20
         for i in range(0, len(articles), batch_size):
-            batch = articles[i:i + batch_size]
+            batch = articles[i : i + batch_size]
             texts = []
             for a in batch:
-                text = a['summary'] if a['summary'] and len(str(a['summary'])) > 20 else a['title']
+                text = a["summary"] if a["summary"] and len(str(a["summary"])) > 20 else a["title"]
                 texts.append(clean_text(str(text or "")))
 
-            numbered = "\n".join(f"{j+1}. {t[:300]}" for j, t in enumerate(texts))
+            numbered = "\n".join(f"{j + 1}. {t[:300]}" for j, t in enumerate(texts))
             messages = [
                 SystemMessage(content=SYSTEM),
-                HumanMessage(content=f"Score these {len(texts)} articles:\n{numbered}")
+                HumanMessage(content=f"Score these {len(texts)} articles:\n{numbered}"),
             ]
 
             response = router.invoke(messages, priority="medium")
@@ -155,7 +239,7 @@ No markdown, no backticks, ONLY raw JSON array."""
                 for j, a in enumerate(batch):
                     score = float(scores[j]) if j < len(scores) else 0.0
                     score = max(-1.0, min(1.0, score))
-                    results.append((score, a['id']))
+                    results.append((score, a["id"]))
             else:
                 logger.warning(f"[Sentiment LLM] Unexpected response format: {content[:100]}")
 
@@ -170,7 +254,9 @@ def analyze_unscored_news():
     conn = get_db_connection()
     c = conn.cursor()
 
-    c.execute("SELECT id, summary, title, source FROM market_news WHERE sentiment_score IS NULL LIMIT 200")
+    c.execute(
+        "SELECT id, summary, title, source FROM market_news WHERE sentiment_score IS NULL LIMIT 200"
+    )
     articles = c.fetchall()
 
     if not articles:
@@ -194,46 +280,56 @@ def analyze_unscored_news():
     if updates:
         logger.info(f"[Sentiment] LLM scored {len(updates)}/{len(articles)} articles successfully.")
     else:
-        # 2. LLM failed → fall back to local models
-        logger.warning("[Sentiment] LLM API failed. Falling back to local models...")
-        cryptobert = load_sentiment_pipeline("cryptobert")
-        finbert = load_sentiment_pipeline("finbert")
-
-        if cryptobert is None and finbert is None:
-            logger.error("[Sentiment] Both LLM API and local models unavailable. No scoring possible.")
+        # 2. LLM failed -> fall back to local models
+        logger.warning("[Sentiment] LLM API failed. Evaluating local model fallback...")
+        if not _local_model_fallback_allowed():
+            logger.error("[Sentiment] Local model fallback skipped due to memory pressure.")
         else:
-            for article in articles:
-                text_to_analyze = article['summary'] if article['summary'] and len(article['summary']) > 20 else article['title']
-                if not text_to_analyze:
-                    continue
+            logger.warning("[Sentiment] Falling back to local models...")
+            cryptobert = load_sentiment_pipeline("cryptobert")
+            finbert = load_sentiment_pipeline("finbert")
 
-                text_to_analyze = clean_text(text_to_analyze)
-
-                try:
-                    source = article['source'].lower()
-                    if ('yahoo' in source or 'alpha' in source) and finbert:
-                        result = finbert(text_to_analyze)[0]
-                        label_mapping = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
-                    elif cryptobert:
-                        result = cryptobert(text_to_analyze)[0]
-                        label_mapping = {"Bullish": 1.0, "Neutral": 0.0, "Bearish": -1.0}
-                    else:
+            if cryptobert is None and finbert is None:
+                logger.error(
+                    "[Sentiment] Both LLM API and local models unavailable. No scoring possible."
+                )
+            else:
+                for article in articles:
+                    text_to_analyze = (
+                        article["summary"]
+                        if article["summary"] and len(article["summary"]) > 20
+                        else article["title"]
+                    )
+                    if not text_to_analyze:
                         continue
 
-                    label = result['label']
-                    confidence = result['score']
+                    text_to_analyze = clean_text(text_to_analyze)
 
-                    base_score = 0.0
-                    for key, val in label_mapping.items():
-                        if key.lower() in label.lower():
-                            base_score = val
-                            break
+                    try:
+                        source = article["source"].lower()
+                        if ("yahoo" in source or "alpha" in source) and finbert:
+                            result = finbert(text_to_analyze)[0]
+                            label_mapping = {"positive": 1.0, "neutral": 0.0, "negative": -1.0}
+                        elif cryptobert:
+                            result = cryptobert(text_to_analyze)[0]
+                            label_mapping = {"Bullish": 1.0, "Neutral": 0.0, "Bearish": -1.0}
+                        else:
+                            continue
 
-                    final_score = base_score * confidence
-                    updates.append((final_score, article['id']))
+                        label = result["label"]
+                        confidence = result["score"]
 
-                except Exception as e:
-                    logger.error(f"Error scoring article {article['id']}: {e}")
+                        base_score = 0.0
+                        for key, val in label_mapping.items():
+                            if key.lower() in label.lower():
+                                base_score = val
+                                break
+
+                        final_score = base_score * confidence
+                        updates.append((final_score, article["id"]))
+
+                    except Exception as e:
+                        logger.error(f"Error scoring article {article['id']}: {e}")
 
     if updates:
         c.executemany("UPDATE market_news SET sentiment_score = ? WHERE id = ?", updates)
@@ -242,6 +338,9 @@ def analyze_unscored_news():
 
     conn.close()
 
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     analyze_unscored_news()

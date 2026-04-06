@@ -850,10 +850,12 @@ def test_dca_handle_similar_open_order(
     assert not log_has_re(similar_msg, caplog)
 
     # Adjust with same params, should keep existing order as price and amount are similar
+    freqtrade.strategy.confirm_trade_exit = MagicMock(return_value=True)
     freqtrade.strategy.custom_exit_price = MagicMock(return_value=1.95)
     freqtrade.process()
     trade = Trade.get_trades().first()
     assert log_has_re(similar_msg, caplog)
+    assert freqtrade.strategy.confirm_trade_exit.call_count == 0
 
     assert len(trade.orders) == 7
     assert len(trade.open_orders) == 1

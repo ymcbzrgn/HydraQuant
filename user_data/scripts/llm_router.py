@@ -718,8 +718,11 @@ class LLMRouter:
             response, error_type = self._try_model(slot, messages, temperature, **kwargs)
 
             if response is not None:
+                # Phase 25: Quality check — empty/tiny responses are NOT quality passes
+                content = str(getattr(response, "content", ""))
+                is_quality = len(content.strip()) > 20  # Real content, not just "OK" or empty
                 with self._state_lock:
-                    slot.record_success(quality=True)
+                    slot.record_success(quality=is_quality)
                 if slot.provider == "gemini":
                     self.gemini_circuit.record_success()
                 self._maybe_persist()
