@@ -24,65 +24,130 @@
 Her modül farklı hızda, farklı tetikle, ama AYNI paylaşılan workspace'i okuyor/yazıyor:
 
 ```
-    ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
-    │   ALGI (TTM)  │  │  HAYAL GÜCÜ   │  │  NEDENSELLİK  │  │  META-ÖĞREN   │
-    │   Perception  │  │  World Model  │  │    Causal     │  │  Meta-Learn   │
-    │  (her candle) │  │ (background)  │  │  (on event)   │  │  (haftalık)   │
-    └───────┬───────┘  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘
-            │                  │                  │                  │
-            ▼                  ▼                  ▼                  ▼
-    ╔══════════════════════════════════════════════════════════════════════╗
-    ║              GLOBAL WORKSPACE (Shared State)                       ║
-    ║  Market Embedding z + World Predictions + Causal Graph +           ║
-    ║  Uncertainty Bounds + Hormone State + Neuron Values +              ║
-    ║  OOD Score + Regime Embedding + Counterfactuals                    ║
-    ╚══════════════════════════════════════════════════════════════════════╝
-            ▲                  ▲                  ▲                  ▲
-            │                  │                  │                  │
-    ┌───────┴───────┐  ┌───────┴───────┐  ┌───────┴───────┐  ┌───────┴───────┐
-    │   KARAR (RL)  │  │  BELİRSİZLİK  │  │  BAĞIŞIKLIK   │  │  ZAMANLAMA    │
-    │  Multi-Agent  │  │  Uncertainty  │  │   Immunity    │  │  Cerebellum   │
-    │ (sinyal anı)  │  │ (her tahmin)  │  │ (her tehdit)  │  │  (her saat)   │
-    └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘
+  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+  │1.ALGI    │ │2.HAYAL   │ │3.NEDEN   │ │4.KARAR   │ │5.META    │
+  │Triple    │ │World     │ │Causal    │ │Multi-    │ │Reptile   │
+  │Perception│ │Model     │ │Inference │ │Agent RL  │ │+EWC      │
+  │(candle)  │ │(backgrnd)│ │(event)   │ │(sinyal)  │ │(hafta)   │
+  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘
+       │            │            │            │            │
+       ▼            ▼            ▼            ▼            ▼
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║            GLOBAL WORKSPACE (Shared State)                      ║
+  ║  Market Embedding + World Predictions + Causal Graph +          ║
+  ║  Uncertainty + Hormones + Neurons + OOD + Microstructure +      ║
+  ║  Self-Model + Dream Insights + GNN Patterns + MM State          ║
+  ╚══════════════════════════════════════════════════════════════════╝
+       ▲            ▲            ▲            ▲            ▲
+       │            │            │            │            │
+  ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐
+  │6.UNCERT  │ │7.TRINITY │ │8.MULTI   │ │9.SELF    │ │10.DREAM  │
+  │CatBoost  │ │LLM×RL    │ │MODAL     │ │MODEL     │ │ENGINE    │
+  │×CQR      │ │×RAG      │ │5 modality│ │Metacog   │ │Rüya      │
+  │(tahmin)  │ │(sinyal)  │ │(fusion)  │ │(günlük)  │ │(hafta)   │
+  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
+       ▲            ▲            ▲            ▲            ▲
+       │            │            │            │            │
+  ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐ ┌────┴─────┐
+  │11.GNN    │ │12.EVOLVE │ │13.ACTIVE │ │14.MICRO  │ │15.TIMING │
+  │MAGMA     │ │Arch.     │ │LEARN     │ │STRUCTURE │ │Cerebellum│
+  │Graph     │ │Search    │ │Explore   │ │+MM Mode  │ │24h clock │
+  │(event)   │ │(aylık)   │ │(boşluk)  │ │(1-5dk)   │ │(her saat)│
+  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
 ```
 
-**Her süreç bağımsız çalışır ama tümü Global Workspace üzerinden haberleşir.**
+**15 süreç, PARALEL çalışır, Global Workspace üzerinden haberleşir.**
 
 ---
 
-## 6 Bilişsel Süreç — Detaylı Mimari
+## 15 Paralel Bilişsel Süreç — Detaylı Mimari
 
-### 1. ALGI — Perception (Temporal Transformer)
-**Biyolojik karşılık:** Retina + Görsel korteks
+**Not:** Tüm süreçler PARALEL çalışır (pipeline DEĞİL). "6 temel + 7 ileri + 2 microstructure" ayrımı YOK — hepsi eşit vatandaş.
+
+### 1. ALGI — Triple Perception (TTM + Chronos-Bolt + CatBoost)
+**Biyolojik karşılık:** Retina + Görsel korteks + Somatosensory cortex
 **Tetik:** Her candle (sürekli)
-**Ne yapıyor:** Ham piyasa verisi → anlamlı latent temsil (embedding)
+**Ne yapıyor:** Ham piyasa verisi → 3 farklı perspektiften analiz → fusion
 
-**Model: TTM (Tiny Time Mixer) — IBM Research, NeurIPS 2024**
-- 1M parametre — 62x büyük modellerden %4-40 daha iyi (TimesFM, Chronos, Moirai)
-- CPU-native tasarım, GPU gerektirmez
-- Adaptive Patching: farklı zaman ölçeklerini otomatik ayarlar
-- Resolution Prefix Tuning: multi-timeframe (1h + 4h + daily) tek modelde
-- HuggingFace: `ibm-research/ttm-research-r2`
-- ONNX INT8 quantized: <10ms inference
+**KRİTİK BULGU (Kasım 2025, arXiv 2511.18578):**
+- Zero-shot TSFM'ler finansta İŞE YARAMAZ (R²=-2.80%, yönsel doğruluk < %50)
+- CatBoost Sharpe 6.79 vs en iyi neural TSFM 3.66 (NeurIPS 2022: 3 yapısal neden)
+- TimesFM 2.5 CPU'da VİABLE DEĞİL (arXiv 2602.10848: "GPU acceleration required")
+- Finance-native pre-training ŞART — generic pre-train transfer etmiyor
 
-**Input:** 
+**TRIPLE PERCEPTION MİMARİSİ:**
+
 ```
-[1h candles × 24] + [4h candles × 12] + [daily candles × 7]
-+ [F&G, funding_rate, OI, L/S_ratio, BTC_dominance, VIX, DXY]
-= ~200 feature time-series
+Market Data (OHLCV + indicators + macro + sentiment)
+    │
+    ├──→ TTM (1M param, <10ms, ~20MB) ──→ 64-dim embedding z
+    │         Directional signal: up/down/flat + magnitude
+    │         MLP-Mixer, multivariate, CPU-native, en iyi directional
+    │
+    ├──→ Chronos-Bolt-Small (48M param, ~100ms, ~191MB) ──→ Quantile P10-P90
+    │         Uncertainty distribution: "PnL -%3 ile +%7 arası"
+    │         Native quantile output, CPU-viable, TimesFM alternatifi
+    │         HuggingFace: amazon/chronos-bolt-small
+    │
+    └──→ CatBoost (gradient boosting, <1ms inference, ~20MB model)
+              Input: TTM embedding (64-dim) + raw indicators + EE sub-scores
+              CatBoost native embedding_features desteği (LDA + k-NN)
+              Output: final prediction + calibrated probability + SHAP explanation
+              NEDEN CatBoost: Sharpe 6.79 > tüm neural (düşük SNR, uninformative features, non-smooth targets)
 ```
 
-**Output:** 64-dim market embedding `z` → Global Workspace'e yazılır
+**Fusion: 3 perspektif birleşir**
+```python
+# TTM: directional signal (hızlı, hafif)
+ttm_direction = ttm_model(ohlcv_data)  # "BULLISH", confidence 0.68
 
-**Self-supervised pretraining (etiket gereksiz):**
-- Contrastive learning: "aynı rejimden gelen candle'lar benzer, farklı rejimlerden gelen farklı" 
-- Masked reconstruction: rastgele %15 feature'ı sil, tahmin et
-- Next-candle prediction: pretext task
-- LENS framework (2024): 100B financial observation üzerinde contrastive + reconstruction
-- Contrastive Asset Embeddings (ACM ICAIF 2024): hypothesis-testing based sampling
+# Chronos-Bolt: uncertainty bounds (quantile)
+quantiles = chronos_bolt(ohlcv_data)  # P10=-3%, P50=+1.2%, P90=+7%
+interval_width = quantiles["P90"] - quantiles["P10"]  # dar = kesin
 
-**RAM:** ~20MB (1M param × 4 byte + ONNX runtime)
-**Latency:** <10ms per forward pass
+# CatBoost: final karar (TTM embedding + raw features → prediction)
+catboost_pred = catboost_model(
+    embedding_features=[ttm_embedding_64dim],
+    numeric_features=[rsi, atr, funding, fng, adx, ...],
+    ee_subscores=[q1, q2, q3, q4, q5, q6]
+)  # prediction + calibrated_probability + shap_values
+
+# Triple Fusion
+final_confidence = catboost_pred.probability  # CatBoost iyi kalibre
+sizing_multiplier = 1.0 / (1.0 + 5.0 * interval_width)  # Chronos uncertainty
+signal_direction = ttm_direction  # TTM en iyi directional
+```
+
+**Neden triple > single:**
+- TTM: Hızlı, directional sinyalde en iyi (MLP-Mixer, multivariate)
+- Chronos-Bolt: Uncertainty ölçümünde en iyi (quantile, distribution-free)
+- CatBoost: Final kararında en iyi (low SNR, tabular data king, SHAP)
+- 3 farklı mimari = çeşitlilik = tek modelin kaçırdığını diğeri yakalar
+- Uyuşmazlık = ek uncertainty sinyali (reranker agreement gibi)
+
+**CatBoost özel avantajları (Grinsztajn et al. NeurIPS 2022):**
+1. Uninformative features'a dirençli (sadece bilgilendirici olanlarla split)
+2. Non-smooth targets öğrenebilir (piecewise-constant, rejim kırılmaları)
+3. Ordered boosting ile target leakage önleme
+4. Symmetric/oblivious trees ile built-in regularization
+5. Native embedding_features: TTM çıktısını direkt feature olarak alır
+
+**FreqAI entegrasyonu:**
+- FreqAI CatBoost'u 2025.12'de kaldırdı ama BaseRegressionModel pipeline model-agnostic
+- Custom CatBoost model ~50 satır: `fit()` override yeterli
+- Walk-forward, data kitchen, feature pipeline, retraining hepsi hazır
+
+**CPU performansı:**
+- TTM: <10ms inference, ~20MB RAM
+- Chronos-Bolt: ~100ms inference, ~191MB RAM (mmap load)
+- CatBoost: <1ms inference, ~20MB model, 5 saniyede 50K sample train
+- **TOPLAM: ~230MB RAM, <120ms latency** (1h timeframe'de rahat)
+
+**Self-supervised pretraining (TTM):**
+- Contrastive learning: aynı rejimden benzer, farklı rejimden farklı
+- Masked reconstruction: %15 feature sil, tahmin et
+- LENS framework (2024): 100B financial observation üzerinde
+- Contrastive Asset Embeddings (ACM ICAIF 2024)
 
 ---
 
@@ -353,12 +418,44 @@ class MarketOODDetector:
 - NeurIPS 2024: "Mahalanobis performs best for OOD detection"
 - Mevcut k-NN altyapımızla aynı mantık
 
-**Calibration — Online Platt Scaling (mevcut!) + ECE monitoring:**
-- OPS zaten var (confidence_calibrator.py)
-- ECE dashboard: her confidence bin'de expected vs actual accuracy
-- GETS (ICLR 2025 Spotlight): input-adaptive temperature scaling
+**Calibration — Hybrid CatBoost + CQR (Novel Contribution #6):**
 
-**RAM:** ~200MB (5-model ensemble)
+**KRİTİK BULGU (2025):** Platt scaling CatBoost'un kalibrasyonunu BOZUYOR!
+Mevcut Platt calibrator'ımız (Brier=0.26, kalıcı devre dışı) bu yüzden sorunlu.
+
+**Yeni Hybrid Calibrator: CatBoost Probability × CQR Interval**
+
+İkisi FARKLI şeyleri ölçüyor — birleşince DAHA GÜÇLÜ:
+```
+CatBoost native probability: "Bu trade %72 kazanır" (nokta tahmini, iyi kalibre)
+CQR interval: "PnL -%2 ile +%5 arası" (matematiksel %95 coverage garantisi)
+
+Birleşim (NOVEL — kimse yapmadı):
+  sizing = catboost_confidence × (1 / cqr_interval_width)
+  
+  Yüksek olasılık + dar aralık = BÜYÜK POZİSYON (kesin kazanç)
+  Yüksek olasılık + geniş aralık = KÜÇÜK POZİSYON (belirsiz kazanç)
+  Düşük olasılık + dar aralık = PAS GEÇ (kesin kayıp)
+```
+
+**CQR (Conformalized Quantile Regression):**
+- Standard conformal'dan iyi (adaptive interval width)
+- Raw quantile'dan iyi (%83.2 → %95 coverage düzeltme)
+- Chronos-Bolt quantile head + CQR sarması = tek modelden calibrated uncertainty
+- MAPIE kütüphanesi: `pip install mapie`
+- Dağılım-bağımsız GARANTİ: rejim değişse bile coverage korunur
+
+**Platt scaling KALDIRILIR.** CatBoost + CQR daha güçlü:
+- CatBoost: zaten iyi kalibre (ordered boosting + symmetric trees)
+- CQR: matematiksel garanti (Platt'ta yok)
+- Birlikte: 2 boyutlu güven sistemi (probability × interval)
+
+**RAM:** ~200MB (5-model ensemble) → ~50MB (CatBoost + CQR, daha hafif)
+
+**Novel Contribution #6: Dual-Axis Calibration**
+- Kimse CatBoost native probability + CQR interval'i BİRLEŞTİRMEDİ
+- Bu iki-boyutlu güven sistemi hem "kazanır mıyım?" hem "ne kadar?" sorusunu aynı anda yanıtlar
+- Position sizing ikisi birlikte modüle eder — tek boyutlu Platt'tan ÇOK daha bilgilendirici
 
 ---
 
@@ -404,7 +501,7 @@ randomization = {
 
 ---
 
-## Global Workspace Detayları
+## Global Workspace Detayları (v1 — bakınız v3 aşağıda birleşik versiyon)
 
 **Shared State yapısı:**
 ```python
@@ -446,28 +543,11 @@ class GlobalWorkspace:
 
 ---
 
-## RAM Bütçesi (Jina Migration Sonrası)
-
-| Bileşen | Önceki | CAAT |
-|---------|--------|------|
-| Model Server (ColBERT+BGE+FlashRank) | 3.5GB | **0** (kaldırıldı) |
-| TTM Perception | 0 | ~20MB |
-| JEPA World Model | 0 | ~15MB |
-| Causal Engine (Tigramite+DoWhy) | 0 | ~30MB |
-| RL Agents (SAC × 5 organ + meta) | 0 | ~100MB |
-| Deep Ensemble (5 × MLP) | 0 | ~200MB |
-| Meta-Learner (Reptile+EWC) | 0 | ~200MB |
-| Conformal (MAPIE+ACI) | 0 | ~50MB |
-| OOD Detector (Mahalanobis) | 0 | ~10MB |
-| Global Workspace | 0 | ~50MB |
-| **TOPLAM ML** | 0 | **~675MB** |
-| **Net RAM kazancı** | | **~2.8GB** |
-
-32GB sunucuda 2.8GB net kazanç + ML zekası. Rahat sığar.
+## RAM Bütçesi → Birleşik tablo aşağıda (Güncellenmiş bölüme bakınız)
 
 ---
 
-## Implementasyon Öncelik Sırası
+## Implementasyon Öncelik Sırası → Birleşik tablo aşağıda (Güncellenmiş bölüme bakınız)
 
 Paralel süreçler AMA implementasyon sıralı olmalı (bağımlılık zinciri):
 
@@ -522,9 +602,7 @@ Araştırmadan çıkan kritik "YAPMA" listesi:
 
 ---
 
-## 7 İLERİ SEVİYE BİLİŞSEL MODÜL — Over-Over-Over Engineering
-
-Yukarıdaki 6 temel süreç YETMEZ. Bunlar "standart" ML. Gerçek devrim bu 7 modülde:
+### (Süreçler 7-13 devam ediyor — tümü eşit vatandaş, "ileri" değil)
 
 ### 7. LLM × RL × RAG ÜÇGENİ — The Trinity
 
@@ -918,9 +996,7 @@ class ActiveLearner:
 
 ---
 
-## Güncellenmiş Global Workspace
-
-Yeni 7 modül ile Global Workspace genişler:
+## Global Workspace v3 — BİRLEŞİK (Tüm 15 sürecin alanları):
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -945,36 +1021,61 @@ Yeni 7 modül ile Global Workspace genişler:
 
 ---
 
-## Güncellenmiş RAM Bütçesi
+## BİRLEŞİK RAM BÜTÇESİ (Tüm 15 Süreç)
 
-| Bileşen | RAM |
-|---------|-----|
-| Temel 6 süreç (önceki tablo) | ~675MB |
-| LLM×RL×RAG Fusion (cross-attention) | ~30MB |
-| Multi-Modal Encoder (5 modalite) | ~50MB |
-| Self-Model (competence map + bias detection) | ~10MB |
-| Dream Engine (world model reuse) | ~0MB (world model zaten var) |
-| GNN (PyTorch Geometric, küçük graph) | ~30MB |
-| Architecture Evolver (population) | ~20MB |
-| Active Learner | ~5MB |
-| **TOPLAM** | **~820MB** |
-| **Jina kurtardığı RAM** | **3.5GB** |
-| **Net kazanç** | **~2.7GB** |
+| # | Bileşen | RAM |
+|---|---------|-----|
+| - | Model Server (Jina migration ile kaldırılıyor) | -3.5GB |
+| 1 | Triple Perception (TTM 20MB + Chronos-Bolt 191MB + CatBoost 20MB) | ~230MB |
+| 2 | JEPA World Model (GRU128 + Gaussian32) | ~15MB |
+| 3 | Causal Engine (Tigramite + DoWhy) | ~30MB |
+| 4 | RL Agents (SAC × 5 organ + HRL meta) | ~100MB |
+| 5 | Meta-Learner (Reptile + EWC + LRRL) | ~200MB |
+| 6 | Dual-Axis Calibration (CatBoost native + CQR/MAPIE + OOD Mahalanobis) | ~60MB |
+| 7 | LLM×RL×RAG Fusion (cross-attention) | ~30MB |
+| 8 | Multi-Modal Encoder (5 modalite × 64-dim) | ~50MB |
+| 9 | Self-Model (competence map + bias detection) | ~10MB |
+| 10 | Dream Engine (world model reuse) | ~0MB |
+| 11 | GNN (PyTorch Geometric, küçük graph) | ~30MB |
+| 12 | Architecture Evolver (population × 5) | ~20MB |
+| 13 | Active Learner | ~5MB |
+| 14 | Microstructure + MM (LOB encoder + VPIN + GLFT) | ~40MB |
+| 15 | Cerebellum (24-slot) | ~1MB |
+| - | Global Workspace (shared state) | ~50MB |
+| | **TOPLAM ML (15 süreç)** | **~871MB** |
+| | **Jina kurtardığı RAM** | **3.5GB** |
+| | **Net RAM kazancı** | **~2.6GB** |
+
+32GB sunucuda 2.6GB net kazanç + 15 paralel bilişsel süreç. Rahat sığar.
 
 ---
 
-## Güncellenmiş İmplementasyon Önceliği
+## BİRLEŞİK İMPLEMENTASYON ÖNCELİĞİ (Tüm 15 Süreç)
 
-| # | Modül | Kategori | Etki | Zorluk |
-|---|-------|----------|------|--------|
-| 1-6 | Temel 6 süreç | Core CAAT | Çok yüksek | Orta |
-| 7 | LLM×RL×RAG Trinity | İleri | **Devrimsel** | Zor |
-| 8 | Multi-Modal Fusion | İleri | Yüksek | Orta |
-| 9 | Self-Model | İleri | Yüksek | Orta |
-| 10 | Dream Engine | İleri | Yüksek | Zor |
-| 11 | GNN on MAGMA | İleri | Orta | Orta |
-| 12 | Architecture Search | İleri | Orta | Çok zor |
-| 13 | Active Learning | İleri | Yüksek | Orta |
+| # | Süreç | Bağımlılık | Etki | Zorluk | Latency Tier |
+|---|-------|-----------|------|--------|-------------|
+| 1 | CatBoost (Perception #1) | Yok | Çok yüksek | Kolay | Tier-1 (<100ms) |
+| 2 | Mahalanobis OOD (#6) | Yok | Güvenlik | Kolay | Tier-1 |
+| 3 | Chronos-Bolt (#1 quantile) | HuggingFace | Yüksek | Orta | Tier-2 (<5s) |
+| 4 | CQR Calibration (#6) | MAPIE | Yüksek | Kolay | Tier-1 |
+| 5 | TTM Perception (#1) | HuggingFace | Yüksek | Orta | Tier-2 |
+| 6 | EWC Continual (#5) | Yok (10 satır) | Orta | Kolay | Tier-4 |
+| 7 | IQL Offline Pre-train (#4) | FreqTrade backtest | Temel | Orta | Tier-4 |
+| 8 | Tigramite Causal (#3) | Trade verisi | Yüksek | Orta | Tier-3 |
+| 9 | DoWhy Counterfactual (#3) | Causal graph | Yüksek | Orta | Tier-3 |
+| 10 | Self-Model (#9) | Trade history | Yüksek | Orta | Tier-3 |
+| 11 | JEPA World Model (#2) | TTM embedding | Yüksek | Zor | Tier-3 |
+| 12 | SAC Online Fine-tune (#4) | IQL init | Orta | Orta | Tier-1 |
+| 13 | LLM×RL×RAG Trinity (#7) | RAG + RL | **Devrimsel** | Zor | Tier-3 |
+| 14 | Multi-Modal Fusion (#8) | Jina + TTM | Yüksek | Orta | Tier-2 |
+| 15 | Dream Engine (#10) | World model | Yüksek | Zor | Tier-4 |
+| 16 | Market Making (#14) | Bybit WS | Yüksek | Zor | Tier-1 (1-5dk) |
+| 17 | GNN on MAGMA (#11) | PyG | Orta | Orta | Tier-3 |
+| 18 | Active Learning (#13) | Self-model | Yüksek | Orta | Tier-3 |
+| 19 | HRL Meta-policy (#4) | Organ SAC | Zor | Tier-1 |
+| 20 | Reptile Meta-train (#5) | Backtest regimes | Orta | Orta | Tier-4 |
+| 21 | Architecture Search (#12) | Tüm sistem | Orta | Çok zor | Tier-4 |
+| 22 | Cerebellum (#15) | Trade history | Kolay | Kolay | Tier-2 |
 
 ---
 
@@ -1069,7 +1170,7 @@ If Z d-separates threshold from PnL in the causal graph:
 
 ---
 
-## 5 NOVEL BİLİMSEL KATKI
+## 8 NOVEL BİLİMSEL KATKI
 
 Her biri tek başına bir araştırma makalesi olabilir:
 
@@ -1102,6 +1203,25 @@ Her biri tek başına bir araştırma makalesi olabilir:
 **Mevcut literatürde:** Her ikili birleşim var (LLM+RAG = standard, LLM+RL = RLHF, RL+RAG = yok). Üçlü birleşim YOK.
 **Neden önemli:** RAG bağlam, LLM akıl yürütme, RL optimizasyon sağlar — birlikte parçalarının toplamından büyük.
 **Doğrulama:** Trinity vs sadece RL, sentiment-heavy dönemlerde (haber etkisi yüksek) performans.
+
+### Contribution 6: Dual-Axis Calibration (CatBoost × CQR)
+**Yenilik:** CatBoost native probability (nokta güven) + CQR interval (aralık güven) birleştirerek 2 boyutlu güven sistemi.
+**Mevcut literatürde YOK:** Platt scaling veya CQR TEK BAŞINA kullanılıyor. İkisinin birleşimi yeni.
+**Neden önemli:** `sizing = confidence × (1/interval_width)` — hem "kazanır mıyım?" hem "ne kadar belirsizim?" sorusunu aynı anda yanıtlar. Tek boyutlu Platt'tan çok daha bilgilendirici.
+**Doğrulama:** CatBoost+CQR vs Platt-only, Brier score + interval coverage + realized PnL.
+**Ek bulgu:** Platt scaling CatBoost'u BOZUYOR (Classifier Calibration at Scale, 2025) — bizim mevcut calibrator sorununun KÖK NEDENİ bu olabilir.
+
+### Contribution 7: Triple Perception Ensemble (TTM + Chronos-Bolt + CatBoost)
+**Yenilik:** 3 farklı mimari (MLP-Mixer + Transformer + Gradient Boosting) birlikte çalışır.
+**Mevcut literatürde:** Dual model ensembles var ama TTM+quantile+GBM triple YOK.
+**Neden önemli:** Her model farklı açıdan bakar. TTM directional, Chronos uncertainty, CatBoost final karar. Çeşitlilik = tek modelden DAHA İYİ.
+**Doğrulama:** Triple vs single-model, Sharpe + drawdown + win rate karşılaştırması.
+
+### Contribution 8: Hormonal Market Making (Cortisol→Gamma Modulation)
+**Yenilik:** Stoikov/GLFT market-making parametrelerini biyolojik hormon sistemiyle modüle etmek.
+**Mevcut literatürde:** Stoikov gamma sabit veya RL-learned. Hormonal modülasyon YOK.
+**Neden önemli:** Organizma stresli iken spread otomatik genişler (daha az risk), sağlıklı iken daralır (daha agresif). Explicit rule gerekmez.
+**Doğrulama:** Hormonal MM vs fixed-gamma MM, Sharpe + adverse selection rate.
 
 ---
 
@@ -1872,7 +1992,445 @@ export const useOrganismStore = defineStore('organism', {
 
 ---
 
-## Akademik Kaynaklar (70+)
+---
+
+## 14. MARKET MICROSTRUCTURE INTELLIGENCE — Duyu Sinir Sistemi
+
+**"Tahmin yetmez, icra da zeki olmalı." — Signal quality × Execution quality = Real Alpha**
+
+CAAT beyin, MMI beden. Orderbook, trade flow, likidasyon — piyasanın sinir uçları.
+
+### 14.1 LOB Encoder (Order Book Perception)
+**Tetik:** 100ms–1s (Bybit WebSocket)
+**Input:** Top-N bid/ask levels, size, spread, update velocity
+**Output:** `lob_embedding` (32-dim), `imbalance_score`, `spread_regime`
+
+Features:
+- Bid/Ask depth ratio (top 5 / 10 / 20)
+- Microprice deviation: `(bid_size × ask + ask_size × bid) / (bid_size + ask_size)` vs mid
+- Spread percentile (rolling 1h)
+- Book pressure acceleration: `d/dt(imbalance)`
+
+### 14.2 Order Flow Intelligence (CVD + Toxicity)
+**Tetik:** Her trade tick / 1s aggregation
+**Output:** `flow_toxicity`, `cvd_slope`, `aggression_state`
+
+- **CVD (Cumulative Volume Delta):** Aggressor taraf birikimi. CVD divergence = hidden accumulation/distribution
+- **Large lot burst detection:** Institutional flow proxy
+- **VPIN-lite:** Volume-synchronized informed flow estimate
+
+### 14.3 Liquidation Radar
+**Tetik:** 1s–5s
+**Input:** Funding, OI delta, liquidation prints, crowding metrics
+**Output:** `squeeze_probability_long`, `squeeze_probability_short`, `liq_cluster_distance`
+
+Entegrasyon:
+- Squeeze olasılığı > 0.6 → pozisyon sizing clamp
+- Liq cluster yakın → stop placement adaptif genişlet
+- PrefrontalCortex: squeeze_prob > 0.8 + sinyal aynı yönde → VETO
+
+### 14.4 Execution Policy Agent (Yeni RL Sub-Agent)
+**Aksiyon:** limit/market oranı, order slicing, child order interval, aggression level
+**Reward:** `realized_pnl - slippage_penalty - impact_penalty - non_fill_penalty`
+
+### 14.5 Slippage Forecaster
+**Model:** Lightweight GBM (5 feature → bps tahmini)
+**Input:** spread, depth, volatility, urgency, order_size_percentile
+**Entegrasyon:** Beklenen slippage > threshold → notional otomatik düşer veya trade pas geçilir
+
+### Global Workspace v3 Ek Alanlar
+```python
+# Microstructure Intelligence
+lob_embedding: torch.Tensor          # 32-dim
+orderbook_imbalance: float           # [-1, +1]
+flow_toxicity: float                 # [0, 1]
+cvd_slope: float
+squeeze_probability_long: float      # [0, 1]
+squeeze_probability_short: float     # [0, 1]
+expected_slippage_bps: float
+execution_quality_score: float       # post-trade update
+```
+
+### Karar Füzyonu
+```python
+final_confidence = base_confidence * microstructure_confidence
+if flow_toxicity > 0.75: position_size *= 0.6
+if expected_slippage_bps > threshold: execution_mode = "passive_limit"
+if squeeze_prob_short > 0.8 and signal == "short": veto = True
+```
+
+### 14.6 MARKET MAKING MODE — Regime-Based Dual Trading (Stoikov Ocak 2025)
+
+**KRİTİK BULGU:** Sasha Stoikov (Avellaneda-Stoikov'un yaratıcısı) Ocak 2025'te crypto-specific MM makalesi yayınladı (SSRN 5066176). "Bar Portion" sinyali ile SOL/DOGE/GALA perpetual futures'ta **%45.84 cumulative return, Sharpe 0.78, max DD %3.94.**
+
+**Bar Portion (BP) Alpha Sinyali:**
+```
+BP = (Close - Open) / (High - Low)
+```
+Body-to-range ratio. BP→+1.0 = güçlü bullish, BP→-1.0 = güçlü bearish, BP≈0 = doji.
+BP smoothed (EMA) → reservation price'ı momentum yönünde skew eder.
+
+**Regime-Based Dual Mode:**
+```
+Regime Detector (ADX + BOCPD)
+    │
+    ├── ADX < 20 (RANGING) → MARKET MAKING MODU
+    │     • GLFT formülleri (terminal time YOK — 24/7 crypto'ya uygun)
+    │     • Bid/ask around reservation price
+    │     • Bar Portion ile directional skew
+    │     • Cortisol → gamma (risk aversion) modülasyonu
+    │     • Execution loop: 1-5 dakika (1h değil!)
+    │
+    ├── ADX 20-25 (TRANSITIONAL) → HAZIRLIK
+    │     • MM inventory azalt
+    │     • Spread genişlet
+    │     • BOCPD changepoint bekle
+    │
+    └── ADX > 25 (TRENDING) → SİNYAL TAKİBİ MODU (mevcut sistem)
+          • Directional trades (Evidence Engine + RL)
+          • Standard Kelly sizing
+```
+
+**GLFT Formülleri (Gueant-Lehalle-Fernandez-Tapia, terminal time YOK):**
+```python
+c1 = (1.0 / (gamma * delta)) * log(1 + gamma * delta / k)
+c2 = sqrt((gamma / (2 * A * delta * k)) * ((1 + gamma * delta / k) ** (k / (gamma * delta) + 1)))
+
+half_spread = c1 + (delta / 2.0) * c2 * volatility
+skew = c2 * volatility * bar_portion_ema  # BP ile directional skew
+
+reservation_price = mid_price - skew * position
+bid = reservation_price - half_spread
+ask = reservation_price + half_spread
+```
+
+**Hormonal Gamma Modülasyonu (Akademik olarak doğrulanmış — Lalor & Swishchuk 2025):**
+```python
+gamma_effective = gamma_base * (2.0 - cortisol)  # cortisol=0.5 → gamma 2x (daha geniş spread)
+alpha_inventory = 0.001 * (2.0 - cortisol)       # stress → güçlü inventory mean-reversion
+```
+Cortisol yükselince spread genişler (daha az risk), dopamine yükselince spread daralır (daha agresif).
+
+**BOCPD (Bayesian Online Changepoint Detection) > ADX:**
+- ADX lagging (14-period). BOCPD real-time.
+- Tsaknaki et al. (Quantitative Finance 2024): NASDAQ order flow'da regime detection
+- Score-Driven BOCPD (MBOC): time-varying correlation capture
+- Dual-layer: ADX trend strength + BOCPD changepoint detection
+
+**Bybit VIP 0 Gerçekleri:**
+- Maker fee: 0.020% — MM spread bundan BÜYÜK olmalı
+- BTC/USDT spread: 0.01-0.02% → major pair'lerde KÂRSIZ
+- SOL/DOGE/GALA spread: 0.05-0.10% → mid-cap'lerde KÂRLI
+- **Odak: mid-cap perpetual futures** (Stoikov'un test ettiği pairler)
+
+**VPIN Adverse Selection Koruması:**
+```
+VPIN < 0.3:  Güvenli — normal spread
+VPIN 0.3-0.6: Dikkat — spread genişlet
+VPIN 0.6-0.7: Tehlike — sizing küçült
+VPIN > 0.7:  Toksik akış — spread ÇOKK genişlet
+VPIN > 0.8:  Likidasyon cascade riski — QUOTING DURDUR
+```
+
+**Implementasyon:** Hummingbot DEĞİL, doğrudan organism içinde. Freqtrade callback'leri ile:
+- `custom_entry_price()` → bid
+- `custom_exit_price()` → ask
+- Ayrı 1-5dk execution loop (Bybit WebSocket)
+
+### Anti-Fragile Guardrails
+1. **Data dropout:** MMI feed giderse → Phase 26 core'a temiz degrade
+2. **Latency kill-switch:** Micro modüller budget aşarsa → advisory-only mode
+3. **Spoofing resistance:** Tek snapshot'a güvenme; persistence + fill confirmation
+4. **Exchange heterogeneity:** Her borsa için ayrı normalization
+5. **MM → Directional geçiş:** BOCPD changepoint → MM inventory unwind → 1 candle bekle → directional aktif
+
+---
+
+## CONSTITUTION — Değiştirilemez Kurallar
+
+RL, LLM, hormonlar, dream engine — HİÇBİRİ bu kuralları aşamaz. DNA gibi.
+
+```yaml
+# CONSTITUTION — The Organism's Unbreakable Laws
+version: 1.0
+last_updated: 2026-04-07
+
+safety_limits:
+  max_drawdown_pct: 25.0           # Portfolio drawdown ASLA > %25
+  max_single_position_pct: 3.0     # Tek pozisyon ASLA > %3
+  max_leverage: 5.0                # Leverage ASLA > 5x
+  max_portfolio_heat_pct: 10.0     # Toplam açık risk ASLA > %10
+  atr_leverage_product_max: 8.0    # ATR% × leverage ASLA > %8
+
+kill_switches:
+  adrenaline_freeze_stress: 0.85   # stress > 0.85 → TÜM non-essential freeze
+  oom_threshold_mb: 500            # Free RAM < 500MB → yeni trade alma
+  consecutive_loss_freeze: 5       # 5 ardışık kayıp → 24h tam freeze
+
+audit_requirements:
+  every_trade_must_log:
+    - feature_snapshot
+    - uncertainty_bounds
+    - hormone_state
+    - regime_classification
+    - active_overrides
+    - module_contributions
+
+override_hierarchy:
+  # Üst kural alt kuralı ASLA ezmez
+  1_constitution: "unchangeable — hardcoded"
+  2_prefrontal_cortex: "learns from constitution, can add rules"
+  3_hormonal_modulation: "dynamic but bounded by constitution"
+  4_rl_policy: "optimizes within hormonal bounds"
+  5_individual_neurons: "fine-tune within RL policy"
+```
+
+---
+
+## LATENCY TIERS — Zeka Canlı Hattı Kilitlemez
+
+Her modül bir latency tier'a atanır. Tier bütçesini aşan modül otomatik degrade olur.
+
+| Tier | Latency Budget | Modüller | Aşarsa |
+|------|---------------|----------|--------|
+| **Tier-0 (Hard RT)** | < 1ms | Constitution checks, sizing clamp, adrenaline freeze | ASLA aşamaz — inline code |
+| **Tier-1 (Soft RT)** | < 100ms | RL inference, hormone compute, get_param(), OOD check | Timeout → fallback value |
+| **Tier-2 (Near RT)** | < 5s | TTM perception, ensemble prediction, conformal interval | Timeout → stale cache kullan |
+| **Tier-3 (Background)** | < 60s | World model imagination, causal query, MADAM debate | Async thread, karar bekleMEZ |
+| **Tier-4 (Offline)** | Unbounded | Dream engine, sleep consolidation, neuroevolution, ablation | Scheduler job, canlı hattı ETKİLEMEZ |
+
+```python
+# Her modül çağrısında latency guard
+import time
+
+def with_latency_guard(func, tier_budget_ms, fallback):
+    start = time.monotonic()
+    try:
+        result = func()
+        elapsed_ms = (time.monotonic() - start) * 1000
+        if elapsed_ms > tier_budget_ms:
+            logger.warning(f"[LatencyGuard] {func.__name__} took {elapsed_ms:.0f}ms > {tier_budget_ms}ms budget")
+        return result
+    except Exception:
+        return fallback
+```
+
+---
+
+## ABLATION LEAGUE TABLE — Modül Katkı Ölçümü
+
+Her modül haftalık KAPATILIP açılarak katkısı ölçülür. Katkısı yoksa park edilir.
+
+```
+HAFTALIK ABLATION RAPORU (otomatik, scheduler job)
+╔══════════════════╦════════════╦══════════╦══════════╦═════════╗
+║ Modül            ║ Sharpe Δ   ║ DD Δ     ║ WinRate Δ║ Karar   ║
+╠══════════════════╬════════════╬══════════╬══════════╬═════════╣
+║ Hormones         ║ +0.15      ║ -2.3%    ║ +4%      ║ KEEP ✅  ║
+║ Cerebellum       ║ +0.03      ║ -0.5%    ║ +1%      ║ KEEP ✅  ║
+║ Mirror Neurons   ║ +0.01      ║ -0.1%    ║ +0%      ║ WATCH ⚠ ║
+║ Dream Engine     ║ -0.02      ║ +0.3%    ║ -1%      ║ PARK 🔴 ║
+║ GNN              ║ +0.00      ║ +0.0%    ║ +0%      ║ PARK 🔴 ║
+╚══════════════════╩════════════╩══════════╩══════════╩═════════╝
+
+Karar kriterleri:
+  KEEP:  Sharpe Δ > +0.05 VEYA DD Δ < -1%
+  WATCH: -0.05 < Sharpe Δ < +0.05 (2 hafta izle)
+  PARK:  Sharpe Δ < -0.05 VEYA DD Δ > +1% (deaktif et)
+```
+
+**Nasıl çalışır:**
+1. Hafta 1: Modül A kapalı → performans ölç
+2. Hafta 2: Modül A açık → performans ölç
+3. Δ = Hafta2 - Hafta1 (aynı pair grubu, aynı piyasa koşulları)
+4. Cross-validated: farklı pair gruplarında tekrar et
+5. Sonuç: Ablation League Table → Telegram haftalık raporu
+
+---
+
+## DECISION CONTRACT — Zenginleştirilmiş Audit Trail
+
+Her trade kararı zorunlu olarak şu bilgileri içerir (organism_audit tablosu genişletilir):
+
+```json
+{
+  "trade_id": "ETH/USDT:USDT_2026-04-07T12:30:00Z",
+  "timestamp": "2026-04-07T12:30:00Z",
+  
+  "feature_snapshot": {
+    "fng": 13, "adx": 28.5, "rsi": 55, "regime": "trending_bull",
+    "funding_rate": 0.0003, "btc_dominance": 56.7,
+    "market_embedding_hash": "a3f2b1..."
+  },
+  
+  "uncertainty": {
+    "ensemble_variance": 0.12,
+    "conformal_interval": [-2.1, 4.8],
+    "ood_score": 0.15,
+    "prediction_error": 0.3
+  },
+  
+  "hormone_state": {
+    "cortisol": 0.85, "dopamine": 1.02,
+    "serotonin": 0.71, "adrenaline": 1.0
+  },
+  
+  "module_contributions": {
+    "evidence_engine": {"signal": "BULLISH", "confidence": 0.62},
+    "world_model": {"expected_pnl": 1.8, "rollouts_profitable": "68%"},
+    "causal": {"intervention_effect": 0.05},
+    "mirror": {"crowd": "LONG", "contrarian_signal": 0.3},
+    "cerebellum": {"hour_multiplier": 1.15}
+  },
+  
+  "decision": {
+    "action": "LONG", "confidence": 0.62,
+    "sizing": 0.032, "leverage": 1.0,
+    "execution_mode": "REAL"
+  },
+  
+  "overrides": [
+    "PrefrontalCortex: ATR*leverage check passed",
+    "AdaptiveImmunity: no known threat"
+  ],
+  
+  "outcome": {
+    "pnl_pct": null,  // trade kapandığında doldurulur
+    "exit_reason": null,
+    "duration_hours": null,
+    "module_blame": null  // Post-Trade Court doldurur
+  }
+}
+```
+
+---
+
+## MODEL RISK ENGINE — World Model Freni
+
+World model hata yapıyorsa, hayallere güvenme.
+
+```python
+class ModelRiskEngine:
+    """Monitors model health and applies brakes when confidence is unwarranted."""
+    
+    def check_world_model_health(self, prediction_errors: list) -> dict:
+        recent = prediction_errors[-20:]  # Son 20 trade
+        avg_error = sum(recent) / len(recent) if recent else 0.5
+        
+        if avg_error > 0.7:
+            return {"status": "UNHEALTHY", "imagination_weight": 0.2,
+                    "dream_learning": False,
+                    "reason": "World model error > 0.7 — imagination güvenilmez"}
+        elif avg_error > 0.5:
+            return {"status": "DEGRADED", "imagination_weight": 0.5,
+                    "dream_learning": True,
+                    "reason": "World model error elevated — imagination yarı ağırlıkta"}
+        else:
+            return {"status": "HEALTHY", "imagination_weight": 1.0,
+                    "dream_learning": True, "reason": "Model healthy"}
+    
+    def check_counterfactual_bias(self, cf_errors: list) -> float:
+        """Counterfactual tahminleri sistematik olarak yanlı mı?"""
+        if not cf_errors: return 0.0
+        mean_error = sum(cf_errors) / len(cf_errors)
+        # Pozitif bias = model sürekli iyimser tahmin → tehlikeli
+        if mean_error > 0.5:
+            return 0.3  # Counterfactual ağırlığını %30'a düşür
+        return 1.0
+```
+
+---
+
+## POST-TRADE COURT — Kayıp Trade Dava Dosyası
+
+Her kayıp trade için otomatik "dava dosyası" oluşturulur:
+
+```python
+class PostTradeCourt:
+    """Automated blame assignment for losing trades."""
+    
+    def investigate(self, trade_contract: dict, organism) -> dict:
+        """Hangi modül hatalı yönlendirdi?"""
+        verdict = {
+            "trade_id": trade_contract["trade_id"],
+            "pnl_pct": trade_contract["outcome"]["pnl_pct"],
+            "suspects": [],
+            "primary_blame": None,
+            "lessons": [],
+        }
+        
+        modules = trade_contract["module_contributions"]
+        
+        # 1. Signal yanlış mıydı?
+        if modules["evidence_engine"]["signal"] == "BULLISH" and verdict["pnl_pct"] < -3:
+            verdict["suspects"].append({
+                "module": "evidence_engine",
+                "charge": "False bullish signal",
+                "confidence_at_entry": modules["evidence_engine"]["confidence"],
+            })
+        
+        # 2. World model yanıltıcı mıydı?
+        if modules.get("world_model", {}).get("expected_pnl", 0) > 0 and verdict["pnl_pct"] < -3:
+            verdict["suspects"].append({
+                "module": "world_model",
+                "charge": "Overly optimistic imagination",
+                "expected_vs_actual": f"+{modules['world_model']['expected_pnl']}% vs {verdict['pnl_pct']}%",
+            })
+        
+        # 3. Sizing çok büyük müydü?
+        sizing = trade_contract["decision"]["sizing"]
+        if sizing > 0.03 and verdict["pnl_pct"] < -5:
+            verdict["suspects"].append({
+                "module": "sizing",
+                "charge": "Oversized position for the risk",
+                "sizing_used": sizing,
+            })
+        
+        # 4. Hormonlar gevşek miydi?
+        cortisol = trade_contract["hormone_state"]["cortisol"]
+        if cortisol > 0.95 and verdict["pnl_pct"] < -5:
+            verdict["suspects"].append({
+                "module": "hormones",
+                "charge": "Insufficiently stressed — cortisol too relaxed",
+                "cortisol": cortisol,
+            })
+        
+        # En çok suçlu modülü belirle
+        if verdict["suspects"]:
+            verdict["primary_blame"] = verdict["suspects"][0]["module"]
+            # Self-model'e feedback: bu modülün güvenilirliğini düşür
+            organism.self_model.record_blame(verdict["primary_blame"])
+        
+        return verdict
+```
+
+**Entegrasyon:** Her trade kapandığında → Decision Contract doldurulur → kayıpsa Post-Trade Court çalışır → verdict organism_audit'e yazılır → Self-model güncellenir → Ablation League Table'da katkı skoru etkilenir.
+
+---
+
+## Akademik Kaynaklar (90+)
+
+### v9 Yeni Araştırma Bulguları
+- Rahimikia et al. "Re(Visiting) TSFMs in Finance" arXiv 2511.18578 (Nov 2025) — CatBoost Sharpe 6.79
+- Grinsztajn et al. "Why do tree-based models still outperform deep learning on tabular data?" NeurIPS 2022
+- Chronos-Bolt: Amazon, late 2025 — 48M params, native quantile, CPU-viable
+- TimesFM CPU infeasibility: arXiv 2602.10848 — "requires GPU acceleration"
+- TimesFM_fin: pfnet arXiv 2412.09880 — finance-specific fine-tune
+- Stoikov "Market Making in Crypto" SSRN 5066176 (Jan 2025) — Bar Portion alpha
+- GLFT: Gueant-Lehalle-Fernandez-Tapia arXiv 1105.3115 — infinite horizon MM
+- Lalor & Swishchuk "Deep RL in Non-Markov MM" MDPI Risks 2025
+- Tsaknaki et al. "Online Learning of Order Flow" Quantitative Finance 2024 — BOCPD
+- CQR: Romano et al. NeurIPS 2019 — Conformalized Quantile Regression
+- TCP: arXiv 2507.05470 — Temporal Conformal Prediction
+- CatBoost embedding features: catboost.ai/docs — native LDA + k-NN
+- Classifier Calibration at Scale 2025 — Platt scaling degradation finding
+- TabPFN v2.5: Nature 2024, Prior Labs — emerging neural tabular competitor
+- Distributional CP: PNAS — regime-robust conformal prediction
+- CPPS: Kato arXiv 2410.16333 — conformal portfolio selection
+- hftbacktest: GitHub nkaz001 — GLFT backtesting toolkit
+- Sadighian DRLMM: arXiv 1911.08647 — deep RL cryptocurrency MM
+
+### Önceki Kaynaklar (70+)
 
 ### Perception
 - TTM: IBM Research, NeurIPS 2024
