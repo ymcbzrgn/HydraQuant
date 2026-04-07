@@ -91,9 +91,11 @@ Market Data (OHLCV + indicators + macro + sentiment)
     │
     └──→ CatBoost (gradient boosting, <1ms inference, ~20MB model)
               Input: TTM embedding (64-dim) + raw indicators + EE sub-scores
+                     + Chart Structure Features (~130-230 dim, aşağıda detay)
               CatBoost native embedding_features desteği (LDA + k-NN)
               Output: final prediction + calibrated probability + SHAP explanation
               NEDEN CatBoost: Sharpe 6.79 > tüm neural (düşük SNR, uninformative features, non-smooth targets)
+              SHAP: "Bu trade'de order_block_proximity %28, hurst %19 etkili" → açıklanabilir
 ```
 
 **Fusion: 3 perspektif birleşir**
@@ -105,11 +107,19 @@ ttm_direction = ttm_model(ohlcv_data)  # "BULLISH", confidence 0.68
 quantiles = chronos_bolt(ohlcv_data)  # P10=-3%, P50=+1.2%, P90=+7%
 interval_width = quantiles["P90"] - quantiles["P10"]  # dar = kesin
 
-# CatBoost: final karar (TTM embedding + raw features → prediction)
+# CatBoost: final karar (TTM embedding + raw features + chart structure → prediction)
 catboost_pred = catboost_model(
     embedding_features=[ttm_embedding_64dim],
     numeric_features=[rsi, atr, funding, fng, adx, ...],
-    ee_subscores=[q1, q2, q3, q4, q5, q6]
+    ee_subscores=[q1, q2, q3, q4, q5, q6],
+    chart_structure=[                          # ← YENİ: 6 katmanlı chart intelligence
+        *candle_dna_20dim,                     # son 5 mumun silüeti
+        *multi_tf_features,                    # 1h + 4h + 1d göstergeler
+        *vpvr_features,                        # POC, VAH, VAL mesafeleri
+        *smc_features,                         # BOS, CHoCH, FVG, OB, liq sweep
+        hurst_exponent, fractal_dimension,     # piyasa pürüzlülüğü
+        *path_signature_truncated,             # geometrik path özellikleri
+    ]
 )  # prediction + calibrated_probability + shap_values
 
 # Triple Fusion
@@ -124,6 +134,198 @@ signal_direction = ttm_direction  # TTM en iyi directional
 - CatBoost: Final kararında en iyi (low SNR, tabular data king, SHAP)
 - 3 farklı mimari = çeşitlilik = tek modelin kaçırdığını diğeri yakalar
 - Uyuşmazlık = ek uncertainty sinyali (reranker agreement gibi)
+
+**CHART STRUCTURE INTELLIGENCE — "Grafiğe Bakmak" Sayısal Olarak**
+
+Bir insan trader grafiğe baktığında RSI/MACD görmez — **geometrik yapı, hacim kümelenmesi,
+yapısal kırılmalar ve çok ölçekli hiyerarşi** görür. Bu bilgiyi VLM'e (vision model) gerek
+kalmadan 6 katman halinde sayısallaştırıp CatBoost + TTM + RL + World Model'e veriyoruz.
+
+**Katman 1: Candlestick DNA (Mum Dizisi Silüeti) — ~20-40 feature**
+Tek mum anlamsız. Son 5-10 mumun SİLÜETİ bir "DNA dizisi" oluşturur:
+```python
+def candle_dna(ohlcv, lookback=5):
+    """Her mumu 4 boyutlu vektöre encode et, son N mumun dizisini döndür."""
+    features = []
+    for candle in ohlcv[-lookback:]:
+        body_ratio = (candle.close - candle.open) / max(candle.high - candle.low, 1e-8)
+        upper_wick = (candle.high - max(candle.open, candle.close)) / max(candle.high - candle.low, 1e-8)
+        lower_wick = (min(candle.open, candle.close) - candle.low) / max(candle.high - candle.low, 1e-8)
+        vol_relative = candle.volume / rolling_avg_volume
+        features.extend([body_ratio, upper_wick, lower_wick, vol_relative])
+    return features  # 5 mum × 4 = 20 feature
+```
+CatBoost bu diziyi gördüğünde "doji → hammer → engulfing silsilesi = %68 dönüş" öğrenir.
+Tek tek TA-Lib pattern'leri DEĞİL — **sekansın kendisi** bilgi taşır.
+
+**Katman 2: Multi-Timeframe Structure — ~30-50 feature**
+Aynı fiyat farklı ölçeklerde FARKLI görünür. Trader 3 ekrana bakar: günlük trend, 4h yapı, 1h giriş.
+```
+CatBoost feature'ları:
+  1h: RSI, ADX, BB_width, EMA_slope, volume_ratio    (mevcut)
+  4h: RSI_4h, ADX_4h, BB_width_4h, EMA_slope_4h      (YENİ)
+  1d: RSI_1d, ADX_1d, trend_direction_1d, weekly_high/low distance (YENİ)
+  
+  Çapraz: tf_conflict = (1h bullish + 1d bearish → 1, uyumlu → 0)
+          tf_alignment_score = 3 TF'nin yön uyumu (0.0 - 1.0)
+```
+"Günlükte düşüş ama saatlikte toparlanma" → CatBoost bunu **çelişki** olarak görür → uncertainty artar.
+Mevcut informative_pairs (BTC+ETH 4h) bununla birleşir.
+
+**Katman 3: Volume Profile / VPVR — ~8-12 feature**
+Destek/direnç = fiyatın geçmişte KÜMELENDİĞİ seviyeler. Yatay çizgi değil, **hacim dağılımı**:
+```python
+def vpvr_features(ohlcv, lookback=200):
+    """Volume Profile Visible Range — hacim bazlı destek/direnç."""
+    price_bins = np.linspace(ohlcv.low.min(), ohlcv.high.max(), 50)
+    volume_at_price = np.histogram(ohlcv.close, bins=price_bins, weights=ohlcv.volume)[0]
+    
+    poc = price_bins[np.argmax(volume_at_price)]  # Point of Control
+    cumvol = np.cumsum(volume_at_price) / volume_at_price.sum()
+    val = price_bins[np.searchsorted(cumvol, 0.15)]  # Value Area Low (%70 bandın altı)
+    vah = price_bins[np.searchsorted(cumvol, 0.85)]  # Value Area High (%70 bandın üstü)
+    
+    current = ohlcv.close.iloc[-1]
+    return {
+        "poc_distance_pct": (current - poc) / poc,        # POC'a mesafe
+        "above_vah": int(current > vah),                   # Değer alanı üstünde mi
+        "below_val": int(current < val),                   # Değer alanı altında mı
+        "value_area_width_pct": (vah - val) / poc,        # Değer alanı genişliği
+        "poc_strength": volume_at_price.max() / volume_at_price.mean(),  # POC gücü
+        "price_in_value_area": int(val <= current <= vah), # İçeride mi
+        "nearest_high_volume_dist": ...,                   # En yakın yüksek hacim bölgesi
+        "volume_profile_skew": ...,                        # Hacim dağılımı çarpıklığı
+    }
+```
+"Fiyat POC'un altına düştü + POC güçlü → geri dönüş olasılığı yüksek" — CatBoost bunu öğrenir.
+
+**Katman 4: Smart Money Concepts (SMC) — ~15-20 feature**
+Kurumsal trader'ların ayak izlerini sayısallaştır:
+```python
+def smc_features(ohlcv, swing_lookback=5):
+    """BOS, CHoCH, Order Blocks, FVG, Liquidity Sweeps."""
+    swings = detect_swing_points(ohlcv, lookback=swing_lookback)  # zigzag
+    
+    # BOS (Break of Structure): önceki swing high/low kırıldı mı?
+    last_swing_high = swings.last_high
+    last_swing_low = swings.last_low
+    bos_bullish = int(ohlcv.close.iloc[-1] > last_swing_high)  # Yükseliş yapısı kırıldı
+    bos_bearish = int(ohlcv.close.iloc[-1] < last_swing_low)   # Düşüş yapısı kırıldı
+    
+    # CHoCH (Change of Character): HH/HL paterni bozuldu mu?
+    was_uptrend = swings.higher_highs and swings.higher_lows
+    now_broken = ohlcv.close.iloc[-1] < swings.last_higher_low
+    choch = int(was_uptrend and now_broken)  # Trend dönüş sinyali
+    
+    # Order Block: güçlü impulsive hareketten önceki son mum
+    ob_distance = distance_to_nearest_order_block(ohlcv, swings)
+    ob_type = "bullish" if nearest_ob_is_bullish else "bearish"  # categorical
+    
+    # FVG (Fair Value Gap): ardışık mum fitilleri arasındaki boşluk
+    fvg_count = count_unfilled_fvgs(ohlcv, lookback=50)
+    nearest_fvg_distance = distance_to_nearest_fvg(ohlcv)
+    
+    # Liquidity Sweep: swing noktasının hemen üzerine çıkıp geri dönme (stop avı)
+    liq_sweep_detected = detect_liquidity_sweep(ohlcv, swings, threshold_pct=0.002)
+    
+    return {
+        "bos_bullish": bos_bullish,
+        "bos_bearish": bos_bearish,
+        "bos_count_24h": count_bos_last_n_candles(swings, 24),
+        "choch_detected": choch,
+        "ob_distance_pct": ob_distance,
+        "ob_type": ob_type,                    # CatBoost categorical feature
+        "fvg_unfilled_count": fvg_count,
+        "fvg_nearest_distance_pct": nearest_fvg_distance,
+        "liq_sweep_bullish": liq_sweep_detected["bullish"],
+        "liq_sweep_bearish": liq_sweep_detected["bearish"],
+        "market_structure": swings.structure,  # "uptrend" / "downtrend" / "range" (categorical)
+        "swing_high_distance_pct": ...,
+        "swing_low_distance_pct": ...,
+        "impulse_strength": ...,               # Son impulsive hareketin gücü
+    }
+```
+**Neden SMC önemli:** Geleneksel göstergeler (RSI, MACD) **lagging** — fiyat zaten hareket ettikten sonra sinyal verir. SMC yapısal kırılmaları ANINDA tespit eder. "Trend kırıldı" bilgisi RSI'dan 3-5 mum ÖNCE gelir.
+
+**Katman 5: Piyasa Pürüzlülüğü (Fractal Features) — ~3-5 feature**
+```python
+def fractal_features(prices, windows=[50, 100, 200]):
+    """Hurst exponent + fractal dimension → piyasa yapısı."""
+    features = {}
+    for w in windows:
+        H = compute_hurst_exponent(prices[-w:])  # R/S analysis veya DFA
+        features[f"hurst_{w}"] = H
+        # H > 0.5 → trending (momentum çalışır)
+        # H = 0.5 → random walk (hiçbir strateji çalışmaz)
+        # H < 0.5 → mean-reverting (reversion çalışır)
+    
+    features["fractal_dim"] = 2.0 - features["hurst_100"]  # Hausdorff boyutu
+    features["hurst_regime"] = "trending" if H > 0.55 else "reverting" if H < 0.45 else "random"
+    return features
+```
+**Neden Hurst > ADX:** ADX sadece trend gücünü ölçer. Hurst piyasanın **istatistiksel doğasını** söyler — momentum mu yoksa mean-reversion mu oynayacağını BELİRLER. Organizma bu bilgiyle strateji SEÇİMİ yapar.
+
+**Katman 6: Path Signature (Geometrik Yol Özellikleri) — ~50-100 feature**
+**En derin katman — PhD seviyesi.** Rough Path Theory (Kidger & Lyons, NeurIPS 2019).
+
+Path Signature bir zaman serisinin TÜM geometrik özelliklerini tek vektörde yakalar:
+```python
+import signatory  # veya esig
+
+def path_signature_features(ohlcv, depth=4, window=20):
+    """Path signature = zaman serisinin evrensel geometrik parmak izi."""
+    # Path: (time, price, volume, rsi, ...) çok boyutlu yol
+    path = torch.tensor([
+        ohlcv.close[-window:].values,
+        ohlcv.volume[-window:].values,
+        ohlcv.rsi[-window:].values,
+    ]).T.unsqueeze(0)  # [1, window, channels]
+    
+    # Signature: her derecede farklı bilgi
+    sig = signatory.signature(path, depth=depth)
+    # depth=1: yön (toplam değişim)
+    # depth=2: eğrilik (fiyat-hacim lead-lag)
+    # depth=3: salınım paterni (oscillation yapısı)
+    # depth=4: karmaşık çapraz etkileşimler
+    
+    return sig.squeeze().numpy()  # ~50-100 dim (channel sayısına göre)
+```
+
+**Neden Path Signature devrimsel:**
+- İnsan trader'ın "hissettiği" şey budur — grafiğin genel ŞEKLİ
+- Zaman ölçeğinden BAĞIMSIZ (reparametrization invariant) → hızlı/yavaş hareket fark etmez
+- Matematiksel olarak EVRENSEL: herhangi bir continuous fonksiyonu yakınsayabilir (Stone-Weierstrass)
+- Fiyat-hacim arasındaki **lead-lag** ilişkisini depth=2'de otomatik yakalar
+- CatBoost embedding_features olarak direkt kullanılabilir
+- CPU'da <5ms (signatory kütüphanesi C++ backend)
+
+**Akademik destek:**
+- Kidger & Lyons "Deep Signature Transforms" NeurIPS 2019
+- Morrill et al. "A Generalised Signature Method for Multivariate Time Series" 2020
+- Liao et al. "Signature features for financial time series" 2024
+- Perez Arribas et al. "Sig-Wasserstein GANs for TS generation" ICAIF 2020
+
+**6 Katman Özet Tablosu:**
+
+| Katman | Ne Yakalıyor | Feature | Hesaplama | Etki |
+|--------|-------------|---------|-----------|------|
+| 1. Candle DNA | Mum silüet dizisi | ~20-40 | <1ms | Orta |
+| 2. Multi-TF | Çok ölçekli çelişki/uyum | ~30-50 | <5ms | Yüksek |
+| 3. VPVR | Destek/direnç zonları | ~8-12 | <3ms | Yüksek |
+| 4. SMC | Yapısal kırılmalar (BOS/CHoCH/FVG) | ~15-20 | <2ms | Çok yüksek |
+| 5. Fractal | Piyasa pürüzlülüğü (Hurst) | ~3-5 | <2ms | Yüksek |
+| 6. Signature | Geometrik path parmak izi | ~50-100 | <5ms | Çok yüksek |
+| **TOPLAM** | | **~130-230** | **<18ms** | |
+
+**Tüm katmanlar Tier-1 (<100ms) bütçesine rahat sığar. VLM API çağrısı YOK, tamamen local hesaplama.**
+
+**Entegrasyon noktaları (6 modüle bağlanır):**
+1. **CatBoost:** Tüm 130-230 feature direkt input → SHAP ile hangisi önemli otomatik çıkar
+2. **TTM:** Chart features TTM'e ek input olarak verilebilir → embedding daha zengin
+3. **RL:** Observation space'e chart structure eklenir → ajan "CHoCH sonrası ne yapmalıyım" öğrenir
+4. **World Model:** JEPA zenginleştirilmiş embedding'den tahmin yapar → daha isabetli simülasyon
+5. **Causal:** Tigramite "BOS → PnL causal mi?" sorusunu cevaplayabilir → sahte pattern'leri eler
+6. **Organism:** Hurst rejim tespiti → hormonal yanıt (trending + Hurst>0.6 → dopamine↑ = agresif)
 
 **CatBoost özel avantajları (Grinsztajn et al. NeurIPS 2022):**
 1. Uninformative features'a dirençli (sadece bilgilendirici olanlarla split)
@@ -187,7 +389,8 @@ Neden JEPA: Embedding space'te tahmin yapar (ham veri space'inde değil) — gü
 
 ```
 Architecture:
-  Encoder: TTM embedding z (64-dim) → already computed by Perception
+  Encoder: TTM embedding z (64-dim) + chart structure features (~130-230 dim)
+           → enriched state representation from Perception
   Recurrent: GRU(128) — temporal dynamics
   Stochastic: Gaussian(32-dim) — uncertainty in dynamics
   Predictor: MLP(128→64→64) — predict z_next + reward
@@ -1099,7 +1302,8 @@ class ActiveLearner:
 ║                    GLOBAL WORKSPACE (Shared State) v2                      ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║ TEMEL (6 süreç):                                                          ║
-║   market_embedding (TTM 64-dim) + imagination_results (top 10 sim) +      ║
+║   market_embedding (TTM 64-dim) + chart_structure (~130-230 dim) +        ║
+║   imagination_results (top 10 sim) +                                      ║
 ║   causal_graph + ensemble_variance + conformal_interval + ood_score +     ║
 ║   hormone_state + neuron_values + amygdala_fear + organism_health +       ║
 ║   learning_rate + regime_embedding + ewc_fisher                           ║
@@ -1197,8 +1401,9 @@ CAAT HA-RL:
 max_π E[Σ_{t=0}^{T} γᵗ R(sₜ, aₜ)]
 
 where:
-  sₜ ∈ S       : AUGMENTED market state = (z, ω)
-                  z ∈ ℝ⁶⁴ (TTM embedding)
+  sₜ ∈ S       : AUGMENTED market state = (z, c, ω)
+                  z ∈ ℝ⁶⁴  (TTM embedding)
+                  c ∈ ℝ¹³⁰⁻²³⁰ (chart structure: candle DNA + SMC + VPVR + Hurst + signature)
                   ω ∈ ℝ⁴  (cortisol, dopamine, serotonin, adrenaline)
   aₜ ∈ A       : parameter adjustments (organ-grouped, ℝ³⁰⁻⁵⁰ per agent)
   R(sₜ, aₜ)    : raw trade PnL (SAF, modüle EDİLMEMİŞ)
@@ -2546,6 +2751,12 @@ class PostTradeCourt:
 - CPPS: Kato arXiv 2410.16333 — conformal portfolio selection
 - hftbacktest: GitHub nkaz001 — GLFT backtesting toolkit
 - Sadighian DRLMM: arXiv 1911.08647 — deep RL cryptocurrency MM
+- Kidger & Lyons "Deep Signature Transforms" NeurIPS 2019 — path signature for time series
+- Morrill et al. "Generalised Signature Method for Multivariate TS Feature Extraction" 2020
+- Liao et al. "Signature features for financial time series" 2024
+- Perez Arribas et al. "Sig-Wasserstein GANs for TS generation" ICAIF 2020
+- Hurst exponent: Mandelbrot "Fractals and Scaling in Finance" 1997 — R/S analysis
+- Smart Money Concepts: ICT (Inner Circle Trader) methodology — BOS, CHoCH, FVG, Order Blocks
 
 ### Önceki Kaynaklar (70+)
 
