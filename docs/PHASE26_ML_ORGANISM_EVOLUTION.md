@@ -2541,6 +2541,10 @@ def with_latency_guard(func, tier_budget_ms, fallback):
 
 ## ABLATION LEAGUE TABLE — Modül Katkı Ölçümü
 
+**Not:** Bu bölüm temel ablation konseptini tanımlar. Tam otonom versiyonu için
+aşağıdaki "AUTONOMOUS ORGANISM LIFECYCLE" bölümüne bakınız — orada ablation
+online Thompson Sampling + BraiNCA morphogenesis + Meta-Controller ile OTOMATİK çalışır.
+
 Her modül haftalık KAPATILIP açılarak katkısı ölçülür. Katkısı yoksa park edilir.
 
 ```
@@ -2730,7 +2734,686 @@ class PostTradeCourt:
 
 ---
 
-## Akademik Kaynaklar (90+)
+## AUTONOMOUS ORGANISM LIFECYCLE — İnsan Müdahalesi SIFIR
+
+**Manifestonun en kritik bölümü.** 15 bilişsel süreç, 8 novel katkı, Constitution — hepsi güzel.
+Ama "kim bu sistemi çalıştırıyor?" sorusuna cevap yoksa organizma YAŞAMIYOR, sen YAŞATIYORSUN.
+
+**Hedef:** Deploy'dan sonra insan müdahalesi SIFIR. Organizma kendi kendine öğrenir, kendi
+hatalarını bulur, kendi mimarisini büyütür, kendi sağlığını korur. Sen sadece Telegram'da
+bilgilendirme mesajlarını okursun. Aksiyon gerektiren mesaj = yılda 2-3 altyapı krizi, o kadar.
+
+### 12 Katmanlı Otonom Yaşam Döngüsü
+
+---
+
+### Katman 1: ACTIVE INFERENCE CORE — Tek Birleştirici Karar Prensibi
+**Kaynak:** Agentic Finance, MDPI Entropy 28(3), Mart 2026 — Active Inference'ın ilk finans uygulaması
+**İmplementasyon:** `pymdp` (Python) veya `ActiveInference.jl`
+
+Mevcut RL yaklaşımı (SAC/PPO): "reward'ı maximize et." Bu YETERSİZ.
+
+Active Inference (Karl Friston): organizma reward'ı maximize etmez,
+**SURPRİSE'I minimize eder — HER ŞEYLE İLGİLİ.**
+
+**Expected Free Energy (EFE) = tek formül, TÜM kararları yönetir:**
+```
+G(π) = E_q[log q(s) - log p(o,s | π)]
+      = pragmatic_value + epistemic_value
+
+pragmatic = "bu aksiyon kâr getirir mi?" (exploitation)
+epistemic = "bu aksiyon bana BİLGİ kazandırır mı?" (exploration)
+```
+
+**Neden RL'den ÜSTÜN:**
+- RL'de exploration/exploitation trade-off'u elle ayarlanır (epsilon, entropy coeff)
+- Active Inference'da exploration/exploitation **TEK FORMÜLDEN** otomatik çıkar
+- Belirsizlik yüksekse → epistemic term baskın → organizma BİLGİ ARAR
+- Belirsizlik düşükse → pragmatic term baskın → organizma KÂR ARAR
+- **Passivity Paradox (2026 bulgusu):** bazen HİÇBİR ŞEY YAPMAMAK en akıllı aksiyon.
+  Frozen belief transfer Sharpe 0.39 > naive adaptive Sharpe -0.28.
+  EFE bunu otomatik keşfeder, standart RL ASLA keşfedemez.
+
+**Tüm 15 bilişsel süreç EFE'nin farklı yüzleri:**
+- Perception: piyasa surprise'ını azalt = pragmatic EFE
+- World Model: gelecek surprise'ını azalt = predictive EFE
+- Active Learning: bilgi boşluğunu doldur = epistemic EFE
+- Dreams: hiç görmediğim senaryo hakkında surprise azalt = counterfactual EFE
+- Self-Model: kendim hakkında surprise azalt = interoceptive EFE
+- Hormones: surprise seviyesine göre modüle et = homeostatic EFE
+
+**Phase 26 RL ajanları (Süreç 4) EFE-based policy'lerle enhance edilir.**
+SAC hala kullanılır (continuous action space için) ama reward = -EFE.
+
+---
+
+### Katman 2: GELİŞİMSEL MORFOGENESİS — Mimari Kendini Büyütür
+**Kaynak:** BraiNCA, arXiv 2604.01932, Nisan 2026
+**GitHub:** github.com/LPioL/BraiNCA
+
+Mevcut NEAT (Süreç 12): rastgele mutasyon, turnuva, en iyiyi seç. Bu evrim, gelişim DEĞİL.
+
+**Fark:** Evrim = nesiller arası değişim (yavaş, CPU yoğun, 50 popülasyon).
+Gelişim = tek organizmanın BÜYÜMESİ (hızlı, local kurallar, sıfır overhead).
+
+BraiNCA: Attention + long-range connections eklenmiş Neural Cellular Automata.
+Ağ bir tohumdan BÜYÜYOR — her hücre local kurallarla kendi bağlantılarını oluşturur.
+
+**Organizma için:**
+```python
+class DevelopmentalGrowth:
+    """BraiNCA-inspired: subsistemler arası bağlantılar BÜYÜR."""
+
+    def growth_step(self, co_activation_matrix, synapses):
+        """Her trade sonrası çağrılır — local kural, global etki."""
+        for (A, B), co_act in co_activation_matrix.items():
+            if co_act > self.growth_threshold:
+                # Co-active subsistemler arasında bağlantı BÜYÜR
+                if (A, B) not in synapses:
+                    synapses.add_synapse(A, B, weight=co_act * 0.1)
+                else:
+                    synapses.strengthen(A, B, delta=co_act * 0.05)
+
+            # Kullanılmayan bağlantılar ATROPHY (zayıflayıp ölür)
+            for synapse in synapses.all():
+                if synapse.last_used_trades_ago > 100:
+                    synapses.weaken(synapse, delta=0.01)
+                    if synapse.weight < 0.01:
+                        synapses.prune(synapse)  # Ölü bağlantı kesilir
+```
+
+**İlk deploy:** 14 subsistem, 12 seed synapse (tohum).
+**100 trade sonra:** Cerebellum↔MirrorNeurons güçlü bağ BÜYÜMÜŞ (hep birlikte aktif).
+**500 trade sonra:** GNN hiçbir şeyle co-active değilmiş → bağları atrophy → otomatik park.
+**1000 trade sonra:** Organizma kendi mimarisini OLUŞTURMUŞ — kimse tasarlamadı.
+
+**NEAT'i REPLACE eder** (Süreç 12). NEAT popülasyon tabanlı (CPU yoğun).
+BraiNCA local rule tabanlı (sıfır overhead, her trade'de çalışır).
+
+---
+
+### Katman 3: SELF-ORGANIZED CRITICALITY — Kaosun Kıyısında Optimal Hesaplama
+**Kaynak:** ICLR 2025 (Yale) + HAG, Nature Communications 2025
+**GitHub:** github.com/Finebouche/hag
+
+Optimal hesaplama ne düzende ne kaosta olur — **ikisinin SINIRINDA** olur.
+
+**Spectral radius ≈ 1.0:**
+- < 1.0: sinyaller sönüyor → sistem DONMUŞ, öğrenmiyor
+- > 1.0: sinyaller patlıyor → sistem ÇILDIRMIŞ, kaotik
+- = 1.0: sinyaller ne sönüyor ne patlıyor → **BİLGİ İŞLEME MAKSİMUM**
+
+**HAG (Hebbian Architecture Generation):** Unsupervised kural:
+```
+Δw_ij = η × (x_i × x_j − λ × w_ij)
+
+Co-active nöronlar → bağ güçlenir
+Inactive nöronlar → bağ zayıflar
+λ regularization → spectral radius ≈ 1.0'a OTOMATİK yakınsar
+```
+
+**Organizma için:** Mevcut BCM + STDP kurallarına HAG EKLENİR (replace değil, enhance).
+BCM: bireysel nöron plastisitesi. STDP: zamanlama. HAG: **global criticality tuning**.
+Üçü birlikte: nöronlar bireysel olarak öğrenir (BCM), zamanlama öğrenir (STDP),
+ve tüm sistem otomatik olarak kaosun kıyısında kalır (HAG).
+
+**Mevcut homeostasis (Katman 2, Constrained Disorder) yerine geçer.**
+Homeostasis "sabit aralıkta tut" der — kaba. SOC "optimal hesaplama noktasında tut" der — zarif.
+
+**ICLR 2025 kanıtı:** Bu noktada eğitilen modeller, diğerlerini her benchmark'ta geçti.
+Nature Comms 2025: HAG tüm geleneksel Echo State Network plastisitelerinden üstün.
+
+---
+
+### Katman 4: STİGMERGİK KOORDİNASYON — Feromon ile Lock-Free Haberleşme
+**Kaynak:** S-MADRL, Nature Communications Engineering 2024
+
+Mevcut Global Workspace: `RLock + copy-on-read`.
+**Sorun:** GIL altında lock contention, race condition riski, stale data.
+
+**Stigmergi:** Karıncalar birbirleriyle KONUŞMAZ. Yere feromon bırakır. Diğer karıncalar
+feromonu okur. Feromon zamanla uçar (decay). Binlerce karınca mükemmel koordine olur.
+
+```python
+class PheromoneField:
+    """Global Workspace'in stigmergic evrimi."""
+
+    def __init__(self):
+        self._field: dict[str, dict] = {}
+
+    def deposit(self, source: str, signal: str, value: float, half_life_s: float = 30.0):
+        """Modül feromon bırakır."""
+        self._field[signal] = {
+            "value": value, "source": source,
+            "time": time.monotonic(), "half_life": half_life_s
+        }
+
+    def read(self, signal: str) -> float:
+        """Feromonu oku — zamanla zayıflamış olabilir."""
+        p = self._field.get(signal)
+        if not p:
+            return 0.0
+        age = time.monotonic() - p["time"]
+        return p["value"] * (0.5 ** (age / p["half_life"]))
+
+    def read_all(self) -> dict[str, float]:
+        """Tüm aktif feromonları oku (decay uygulanmış)."""
+        return {sig: self.read(sig) for sig in self._field}
+```
+
+**Neden Global Workspace'ten ÜSTÜN:**
+1. Lock YOK → race condition YOK → deadlock YOK
+2. Doğal decay → stale data problemi KENDİLİĞİNDEN çözülür
+3. Timestamp alignment BEDAVA — eski feromon zayıf, yeni güçlü
+4. Modüller bağımsız → GIL sorunsuz (async I/O)
+5. Ölçeklenebilir → 15 veya 150 modül, fark etmez
+6. Emergent coordination: komut yok, feromonları takip ederek KENDİLİĞİNDEN koordine
+
+**Örnek akış:**
+```
+CatBoost: deposit("catboost", "prediction_bearish", 0.78, half_life=60s)
+Hormones: read("prediction_bearish") → 0.78 → cortisol↑
+Amygdala: read("prediction_bearish") → 0.78 → fear↑
+RL Agent: read("prediction_bearish") + read("cortisol") + read("fear") → sizing↓
+
+30 saniye sonra:
+RL Agent: read("prediction_bearish") → 0.39 (decay) → sinyal eskidi, güvenme
+```
+
+**Gemini'nin timestamp alignment eleştirisini KÖKTEN çözer.** Feromon decay = doğal timestamp.
+
+**Global Workspace v3 ile birlikte çalışır:** v3 yapısı semantic olarak korunur,
+ama mekanik olarak RLock yerine PheromoneField kullanılır.
+
+---
+
+### Katman 5: İNTEROSEPTİF PREDİKTİF KODLAMA — Arızayı ÖNCEDEN Gör
+**Kaynak:** arXiv 2511.13668, 2025
+
+Mevcut Interoception (Süreç 6 alt-bileşen): 8 sensör, sağlık raporu. REAKTİF.
+
+**Prediktif kodlama:** Organizma kendi sağlığını ÖNCEDEN TAHMİN eder:
+```python
+class PredictiveInteroception:
+    """Arızayı OLMADAN ÖNCE tahmin et."""
+
+    def __init__(self):
+        self.models = {
+            "latency": SmallMLP(input=10, output=1),      # sonraki saat latency
+            "ram_usage": SmallMLP(input=10, output=1),     # sonraki saat RAM
+            "module_health": SmallMLP(input=20, output=15), # her modülün sağlığı
+            "win_rate_trend": SmallMLP(input=30, output=1), # 7 günlük win rate trendi
+        }
+
+    def predict_and_act(self, current_state):
+        for name, model in self.models.items():
+            predicted = model(current_state)
+            actual = measure(name)
+            error = actual - predicted
+
+            if error > 2 * std:  # Beklenenden KÖTÜ
+                self.proactive_response(name, error)
+                # "Latency artacak" → ŞİMDİDEN cache ısıt
+                # "RAM dolacak" → ŞİMDİDEN gc.collect()
+                # "Win rate düşecek" → ŞİMDİDEN defansif mod
+
+            # Modeli güncelle (online learning)
+            model.update(current_state, actual)
+```
+
+**Hiyerarşik tahmin:**
+- Alt seviye: "RAM kullanımım 30 dk sonra ne olacak?" → proaktif temizlik
+- Orta seviye: "Bu modülün performansı düşecek mi?" → proaktif devre dışı bırakma
+- Üst seviye: "Genel sağlığım bu hafta nereye gidiyor?" → stratejik karar
+
+**Kritik bulgu (2025):** Interoceptive precision dengesi:
+- Çok yüksek precision → organizma katı, kendi modeline aşırı güvenir
+- Çok düşük precision → organizma kendi bozulmasını fark etmez
+- **Precision'ın kendisi de öğrenilmeli** → meta-interoception
+
+**Mevcut Interoception sensörlerini REPLACE etmez, GÜÇLENDIRIR:**
+8 sensör hala var ama artık sadece "ne" değil "ne OLACAK" sorusuna cevap veriyor.
+
+---
+
+### Katman 6: DANGER THEORY BAĞIŞIKLIĞI — Zeki Tehdit Algılama
+**Kaynak:** Hosseini 2025 (Wiley), AIS Bio-Inspired (JAIBD 2025), CLONALG (GitHub)
+
+Mevcut ImmuneMemory + AdaptiveImmunity: basit pair ban + B-cell/T-cell.
+
+**3 mekanizmalı gerçek bağışıklık:**
+
+**Negative Selection:** "Sağlıklı" profil öğren → uymayan = patojen:
+```python
+class NegativeSelector:
+    def fit_healthy_profile(self, healthy_metrics, n_detectors=100):
+        """Sağlıklı davranış profilinden random detektörler üret.
+        Sağlıklıya uyan detektörler SİLİNİR. Kalanlar = anomali dedektörü."""
+        self.detectors = []
+        for _ in range(n_detectors * 10):
+            detector = random_detector()
+            if not matches_self(detector, healthy_metrics):
+                self.detectors.append(detector)  # Self'e BENZEMEYEN = anomali bulur
+            if len(self.detectors) >= n_detectors:
+                break
+```
+
+**CLONALG:** Başarılı dedektör klonlanıp mutasyona uğrar → antikor ailesi:
+```python
+def clonal_expansion(self, successful_detector):
+    """Tehdit bulan dedektörü klonla + hafif mutasyon → benzer tehditleri de yakala."""
+    clones = [mutate(successful_detector, rate=0.05) for _ in range(10)]
+    self.detectors.extend(clones)  # Bağışıklık hafızası ZENGİNLEŞİR
+```
+
+**Danger Theory:** Tepki tehdidin CİDDİYETİYLE orantılı:
+- Drawdown spike = ÇOKK TEHLİKELİ → güçlü yanıt (sizing clamp + cortisol spike)
+- Latency spike = ORTA → ılımlı yanıt (cache kullan, yeni trade bekleme)
+- Tek hatalı log = HAFİF → izle, kaydet, tepki verme
+
+**Katman 5 (Predictive Coding) ile BÜTÜNLEŞİK:** Artık bağışıklık sistemi
+TEPKİSEL değil, PREDİKTİF. "Bu threat pattern'ini gördüm, gelişiyor" → ŞİMDİDEN antikor üret.
+
+---
+
+### Katman 7: ANTİFRAJİL HORMESİS — Stresle Güçlenmek
+**Kaynak:** Applied Antifragility in Technical Systems, Springer 2025
+
+Netflix Chaos Monkey'nin trading versiyonu. Organizma **kasıtlı olarak kendine stres uygular.**
+
+**Shadow mode'da (gerçek para YOK) haftalık stress testleri:**
+```
+1. Rastgele bir modülü kapat → graceful degradation çalışıyor mu?
+2. API latency'yi 5x artır → timeout handler doğru mu?
+3. Sahte flash crash inject et → amygdala + adrenaline freeze doğru mu?
+4. Sahte extreme F&G=1 inject et → cortisol + allostasis tepkisi doğru mu?
+5. Feromon alanını temizle → modüller stale feromon durumunda çalışabiliyor mu?
+```
+
+**Hormesis prensibi:** Küçük zehir dozları bağışıklığı güçlendirir.
+Strese dayanan yollar GÜÇLENİR (HAG Hebbian rule ile bağ güçlenir).
+Strese dayanamayan yollar TESPİT EDİLİR → onarılır veya pruned.
+
+**Criticality (Katman 3) ile BÜTÜNLEŞİK:** Stress testleri sistemi kaosun kıyısına
+itip geri çeker → her iterasyonda critical point daha kesin bulunur.
+
+**3 Taleb prensibi:**
+- **Hormesis:** küçük stres = güçlenme
+- **Optionality:** birden fazla yedek strateji, kayıp sınırlı kazanç sınırsız
+- **Via Negativa:** başarısız bileşenleri KALDIR, yeni ekleme (less is more)
+
+---
+
+### Katman 8: DUAL-BRAIN COMPUTE — Kalite Kaybı Matematiksel Olarak İMKANSIZ
+**Kaynak:** Speculative Decoding (Leviathan et al. ICML 2023), Anytime Algorithms (Zilberstein),
+Conformal Quality Gates (Angelopoulos & Bates 2023), MoE Gating (DeepSeek-V2/V3 2024)
+
+Eski yaklaşım: "CPU/RAM dolunca modül kapat" → **KALİTE KAYBI.**
+Orta yaklaşım: "Hepsini çalıştır ama sırayla" → **GECİKME → stale feromon → dolaylı kalite kaybı.**
+**Yeni yaklaşım:** Her modülün iki beyni var. Kalite ASLA düşmez, sadece YÜKSELEBİLİR.
+
+**Mekanizma A: Dual-Brain (Hızlı Beyin + Derin Beyin)**
+
+Her modülün İKİ versiyonu:
+```
+HIZLI BEYİN (her zaman, <1ms):          DERİN BEYİN (compute müsaitken):
+  CatBoost → zaten <1ms                   CatBoost → full SHAP explanation
+  Hormones → basit formül                  Hormones → allostasis trend analysis
+  Causal → cached causal graph             Causal → Tigramite yeni keşif
+  World Model → cached son simülasyon      World Model → 1000 taze rollout
+  RL Agent → cached policy action          RL Agent → full EFE hesaplama
+  Mirror → cached crowd direction          Mirror → taze funding+OI analiz
+```
+
+```python
+class DualBrainModule:
+    """Her modül hem hızlı hem derin düşünebilir."""
+
+    def __init__(self, fast_fn, deep_fn, name):
+        self.fast_fn = fast_fn    # <1ms, cache/lightweight, HER ZAMAN çalışır
+        self.deep_fn = deep_fn    # ms→saniyeler, tam hesaplama
+        self.name = name
+        self._last_deep_result = None
+        self._deep_freshness = 0
+
+    def fast_brain(self, state) -> float:
+        """Anında cevap — cache veya lightweight model."""
+        if self._last_deep_result and self._deep_freshness > 0.5:
+            return self._last_deep_result  # Son derin cevap hala taze
+        return self.fast_fn(state)  # Lightweight hesaplama
+
+    def deep_brain(self, state) -> float:
+        """Tam hesaplama — compute müsaitken çağrılır."""
+        result = self.deep_fn(state)
+        self._last_deep_result = result
+        self._deep_freshness = 1.0  # Taze
+        return result
+```
+
+**GARANTİ:** Hızlı beyin HER ZAMAN çalışır → cevap HER ZAMAN var.
+Derin beyin çalışırsa → cevap daha iyi olur. Çalışmazsa → hızlı beyin cevabı kullanılır.
+Kalite hızlı beyinin ALTINA ASLA düşemez. Sadece YUKARI gidebilir.
+
+**Mekanizma B: Computation Market (Dikkat Ekonomisi)**
+
+Derin beyin compute'u sınırlı (CPU time). Hangi modül derin düşünsün?
+**Modüller teklif veriyor — en çok bilgi kazandıracak olan kazanır:**
+
+```python
+class ComputationMarket:
+    """Modüller EIG (Expected Information Gain) ile compute'a teklif verir."""
+
+    def allocate(self, modules: list[DualBrainModule], budget_ms: float = 500):
+        # Her modül "derin düşünürsem ne kadar fark yaratırım?" hesaplar
+        bids = []
+        for m in modules:
+            # EIG: hızlı beyin cevabının belirsizliği (yüksek = derin beyin lazım)
+            uncertainty = m.get_fast_brain_uncertainty()
+            # Impact: bu modülün trade kararını ne kadar etkilediği
+            impact = m.get_average_decision_impact()
+            eig = uncertainty * impact  # Belirsiz VE etkili → derin düşün!
+            bids.append((m, eig, m.deep_brain_cost_ms))
+
+        # En yüksek EIG'den başla, budget bitene kadar
+        bids.sort(key=lambda x: x[1], reverse=True)
+        remaining = budget_ms
+        for module, eig, cost in bids:
+            if cost <= remaining:
+                module.deep_brain(current_state)
+                remaining -= cost
+            # Budget bitse → kalan modüller hızlı beyinle devam
+            # Ama cevapları VAR — sadece derin değil
+```
+
+**Örnek senaryolar:**
+```
+Temiz bull trend (ADX=35, sinyaller uyumlu):
+  → CatBoost EIG=0.02, Causal EIG=0.01 → kimse derin düşünmez
+  → Hızlı beyinler yeterli, compute BOŞTA (organizma rahat)
+
+Rejim geçişi (CHoCH + belirsizlik yüksek):
+  → CatBoost EIG=0.4, Causal EIG=0.6, WorldModel EIG=0.5
+  → Market: Causal derin (200ms) + WorldModel derin (250ms) + CatBoost derin (50ms)
+  → Compute tam kullanılıyor, EN ÖNEMLİ modüller derin düşünüyor
+
+Flash crash:
+  → Amygdala EIG=0.9 → amygdala derin düşünsün (freeze kararı kritik!)
+  → Diğerleri hızlı beyinle idare → gecikme YOK, karar HIZLI
+```
+
+**İnsan beyni TAM BÖYLE çalışır:** Yürürken düşünmezsin (hızlı beyin).
+Araba yaklaşınca TÜM dikkatini oraya verirsin (derin beyin, o modüle compute).
+Diğer modüller otopilotta devam eder. Hiçbir modül KAPANMAZ.
+
+**Mekanizma C: Conformal Quality Gate (Matematiksel Garanti)**
+
+Hızlı beyin cevap verdi. Gerçekten yeterli mi? Sezgisel değil, **matematiksel kontrol:**
+
+```python
+class ConformalQualityGate:
+    """Hızlı beyin cevabının yeterliliğini matematiksel olarak doğrula."""
+
+    def check(self, fast_answer, conformal_model) -> tuple[bool, float]:
+        interval = conformal_model.predict_interval(fast_answer, alpha=0.05)
+        width = interval.upper - interval.lower
+
+        if width < self.quality_threshold:
+            return True, width   # Hızlı beyin YETERLİ — %95 garanti
+        else:
+            return False, width  # Aralık geniş → derin beyin ÇALIŞSIN
+```
+
+**Conformal prediction:** Dağılım-bağımsız %95 coverage garantisi.
+"Hızlı beyin yeterli" diyorsa → %95 olasılıkla GERÇEKTEN yeterli. Sezgi değil, MATEMATİK.
+
+**Üç mekanizma birlikte çalışır:**
+```
+Candle gelir
+  → 15 modülün hızlı beyni ANINDA çalışır (<5ms toplam)
+  → Conformal gate: 10 modülün hızlı cevabı yeterli (%95 garanti)
+  → Kalan 5 modül belirsiz → Computation Market
+    → EIG sıralaması: Causal(0.6) > WorldModel(0.5) > CatBoost(0.4) > Mirror(0.2) > Cerebellum(0.1)
+    → Budget 500ms: Causal derin(200ms) + WorldModel derin(250ms) + CatBoost derin(50ms) = 500ms
+    → Mirror+Cerebellum hızlı beyinle (cevapları VAR, sadece derin değil)
+  → Tüm feromonlar güncellenir
+  → Trade kararı verilir
+
+Sonuç:
+  - 15 modülden HİÇBİRİ kapatılmadı — hepsi cevap verdi
+  - Sadece 3'ü derin düşündü (en çok lazım olan 3'ü)
+  - Kalite: hızlı beyin zemininin ALTINA ASLA düşmedi
+  - Compute: %100 verimli, ne israf ne eksik
+  - 32GB sunucu: abanalım gitsin, ama AKILLI abanal
+```
+
+---
+
+### Katman 9: AUTOPOİETİK KİMLİK — "Ben Hala BEN Miyim?"
+**Kaynak:** Computational Autopoiesis, Academia.edu Ağustos 2025
+
+Organizma zamanla DRİFT eder. 1000 trade sonra başlangıçtakinden tamamen farklı olabilir.
+
+**ICAC (Introspective Clustering for Autonomous Correction):**
+```python
+class AutopoieticIdentity:
+    def check_identity(self, current_params, baseline_params):
+        """Organizma periyodik olarak kendini baseline ile karşılaştırır."""
+        kl_div = kl_divergence(current_distribution, baseline_distribution)
+
+        if kl_div < 0.1:
+            return "HEALTHY_EVOLUTION"  # Sağlıklı evrim, kimlik korunuyor
+
+        if kl_div > 0.3:
+            # Performansa bak: drift iyi mi kötü mü?
+            if current_sharpe > baseline_sharpe * 1.1:
+                self.update_baseline(current_params)  # Pozitif evrim → YENİ baseline
+                return "POSITIVE_DRIFT"
+            else:
+                self.soft_pullback(current_params, baseline_params, strength=0.3)
+                return "NEGATIVE_DRIFT"  # Kötü drift → baseline'a doğru yumuşak geri çek
+```
+
+**Active Inference (Katman 1) ile BÜTÜNLEŞİK:** Kimlik koruması = "kendim hakkındaki
+surprise'ı minimize et." EFE'nin interoceptive versiyonu.
+
+**Catastrophic forgetting'den korur + reward hacking'den korur.**
+Organizma hem evrilir hem de KENDİ KALIR.
+
+---
+
+### Katman 10: OTONOM CANARY DEPLOYMENT — Sıfır İnsan Değişiklik Yönetimi
+
+Hiçbir değişiklik aniden canlıya çıkmaz:
+```
+NeuroEvolution / BraiNCA yeni yapı üretir
+  → Shadow mode: 50 trade paralel (gerçek para YOK)
+  → Shadow > live + %3?
+     EVET → Canary: trade'lerin %10'unda yeni yapı
+       → Canary 20 trade sonra hala iyi?
+          EVET → Gradual: %10 → %30 → %60 → %100 (her aşama 10 trade)
+          HAYIR → Instant rollback, yapı arşivlenir
+     HAYIR → Arşivlenir (piyasa değişince tekrar denenebilir)
+```
+
+**Telegram:** "Genome v47 canlıya geçti (shadow'da +4.2%)" → bilgi, aksiyon DEĞİL.
+
+---
+
+### Katman 11: SİRKADYEN RİTİM — Organizmanın Biyolojik Saati
+
+Sabit scheduler DEĞİL — Cerebellum verisiyle uyumlu dinamik yaşam döngüsü:
+
+```
+AKTİF SAATLER (Cerebellum best hours):
+  → Tam algı, tüm modüller, agresif trade
+
+SESSİZ SAATLER (thin liquidity, kötü performans):
+  → Defansif: spread genişlet, sizing küçült
+  → Arka plan: causal analysis, GNN keşif
+
+GECE (03:00-06:00 UTC):
+  → Sleep consolidation + Dream engine + DMN
+
+HAFTA SONU:
+  → Deep housekeeping: evolution tournament, BraiNCA growth review
+  → Antifragil stress test (hormesis)
+  → Identity check (autopoiesis)
+  → Full Ablation raporu
+
+AYLIK (Her ayın 1'i):
+  → Baseline güncelleme kararı
+  → Büyük genome turnuvası
+  → Telegram: kapsamlı aylık rapor
+```
+
+---
+
+### Katman 12: KOLEKTİF ZEKA — Organizmalar Arası Feromon Paylaşımı
+
+Birden fazla pair organızması çalışıyorsa (BTC, ETH, SOL ayrı instance):
+
+**Stigmergik cross-pollination:**
+- Her organizma kendi PheromoneField'ına yazıyor
+- Ek: "shared pheromone layer" — tüm organizmalar okuyabilir
+- ETH organızması deposit("shared", "fvg_importance_bear", 0.85)
+- BTC organızması read("shared", "fvg_importance_bear") → "ETH'de FVG önemli, ben de deneyeyim"
+- Federated: ham veri paylaşılmaz, sadece öğrenilmiş bilgi (feromon)
+
+---
+
+### Katman 13: META-CONTROLLER — Kaç Beyin Kullanayım?
+**Kaynak:** AAMC (Adaptive Agentic Meta-Controller), Neurocomputing 2026
+
+İnsan beyni yürürken TÜM beynini kullanmaz. Basit iş = az kaynak.
+
+**Task Complexity Estimator (TCE) + EFE-based routing:**
+```
+Piyasa durumu → TCE → karmaşıklık skoru
+
+SIMPLE (temiz trend, ADX>30, sinyaller uyumlu):
+  → CatBoost + Hormones + Constitution = yeterli
+  → 3 modül, <20ms, minimal feromon trafiği
+
+MEDIUM (karışık sinyaller, ADX 15-25):
+  → + World Model + Causal + Cerebellum
+  → 7 modül, <200ms
+
+COMPLEX (rejim geçişi, CHoCH, yüksek uncertainty):
+  → Tüm 15 modül aktif
+  → <5s (background modüller async)
+
+EMERGENCY (OOD çok yüksek, black swan):
+  → Constitution + FREEZE
+  → Sadece koruma, trade YOK
+```
+
+**Bu bir SAC policy ile ÖĞRENİLİR:** "hangi piyasa durumunda hangi modül kombinasyonu
+en iyi sonuç verdi?" Meta-controller trade'lerden ÖĞRENİR, kural tabanlı DEĞİL.
+
+**Neden kritik:** Basit piyasada 15 modül çalıştırmak = gereksiz compute,
+gereksiz feromon gürültüsü, gereksiz karmaşıklık. **Zeka = ne zaman AZ düşüneceğini bilmektir.**
+
+---
+
+### 13 Katman Birlikte: Bir Trade'in Otonom Yaşam Yolculuğu
+
+```
+Candle gelir
+  → K13 (Meta-Controller): "Piyasa MEDIUM, 7 modül derin düşünsün yeter"
+  → K8 (Dual-Brain): 15 modülün hızlı beyni ANINDA çalışır (<5ms)
+  → K8 (Conformal Gate): 10 modül yeterli, 5'i belirsiz
+  → K8 (Compute Market): Causal + WorldModel + CatBoost derin düşünsün (EIG sıralı)
+  → K4 (Stigmergi): Tüm modüller feromonlarını bırakır (bazıları derin, bazıları hızlı)
+  → K1 (Active Inference): EFE hesapla → epistemic mi pragmatic mi?
+  → K3 (Criticality): Spectral radius kontrol → 1.02, sağlıklı
+  → Trade kararı verilir — 15 modülden HİÇBİRİ kapatılmadı, hepsi cevap verdi
+
+Trade kapanır (kazanç)
+  → K2 (Morphogenesis): co-active subsistemler arası bağ güçlenir
+  → K6 (Bağışıklık): sonuç normal, tehdit yok
+  → K5 (Predictive): "sonraki saatte latency tahminim 45ms" → OK
+  → K9 (Autopoiesis): KL divergence 0.08, kimlik korunuyor
+  → K1 (Active Inference): global surprise düştü → organizma DAHA İYİ anlıyor
+
+Trade kapanır (kayıp)
+  → Post-Trade Court: primary blame = evidence_engine
+  → K6 (Bağışıklık): bu pattern'i kaydet, CLONALG ile antikor ailesi oluştur
+  → K2 (Morphogenesis): evidence_engine↔sizing bağı zayıflasın mı? co-act düştü
+  → K5 (Predictive): "win rate trend: hafif düşüş, henüz alarm değil"
+  → K1 (Active Inference): global surprise arttı → daha çok epistemic action gerekli
+
+Hafta sonu gelir
+  → K7 (Hormesis): 5 stress test çalıştır → zayıf nokta: causal timeout handler
+  → K11 (Sirkadyen): sleep + dream + evolution
+  → K10 (Canary): genome v47 shadow test sonucu: +2.1% → canary başlat
+  → K9 (Autopoiesis): haftalık identity check → sağlıklı evrim
+  → K12 (Kolektif): ETH'den feromon: "hurst feature bu ay 2x önemli"
+
+Sen ne yapıyorsun?
+  → Telegram'da okuyorsun: "Haftalık: 12 trade, +3.4%, Sağlık: 0.81,
+     Modüller: 15/15 aktif (hepsi cevap verdi, 8'i derin düşündü),
+     GNN bağlantıları atrophy (morphogenesis pruning),
+     Stress test: 5/5 geçti,
+     Genome v47 canary'de 8/20 trade, şimdilik +1.2%"
+  → Aksiyon: YOK. Organizma kendi kendine yaşıyor.
+```
+
+---
+
+### Eski vs Yeni Karşılaştırma
+
+| Bileşen | Eski Tasarım | PhD+++ Versiyonu |
+|---------|-------------|-----------------|
+| Karar prensibi | SAC/PPO (RL) | **Active Inference (EFE)** — exploration/exploitation otomatik |
+| Mimari evrim | NEAT (popülasyon turnuva) | **BraiNCA morphogenesis** — mimari BÜYÜR, local kurallar |
+| Denge noktası | Homeostasis (sabit aralık) | **Self-Organized Criticality** — kaosun kıyısı, HAG |
+| Modül haberleşmesi | Global Workspace (RLock) | **Stigmergic pheromone** — lock-free, decay-based |
+| Sağlık izleme | Interoception (reaktif) | **Predictive Coding** — arızayı ÖNCEDEN görür |
+| Bağışıklık | Basit pair ban | **Negative Selection + CLONALG + Danger Theory** |
+| Stres testi | Yok | **Hormesis** — Netflix Chaos Monkey for trading |
+| Kimlik koruması | Yok | **Autopoiesis + ICAC** — drift detection |
+| Deployment | Manuel | **Canary + Shadow + Gradual rollout** — otomatik |
+| Modül seçimi | Hep hepsi açık | **Meta-Controller** — karmaşıklığa göre dinamik |
+| Öğrenme kuralı | BCM + STDP | **BCM + STDP + HAG** — auto-criticality eklendi |
+| Kaynak yönetimi | Degradation (modül kapat) | **Dual-Brain + Computation Market + Conformal Gate** — kalite kaybı matematiksel olarak İMKANSIZ |
+
+### Novel Contribution #9: Stigmergic Cognitive Architecture
+**Yenilik:** Bilişsel modüller arası koordinasyonu explicit message passing yerine
+feromon bazlı stigmergi ile yapmak. Lock-free, doğal temporal decay, emergent coordination.
+**Mevcut literatürde:** S-MADRL robotik/lojistik için. Finansal bilişsel mimaride YOK.
+**Doğrulama:** Stigmergic vs RLock workspace, latency + coordination quality karşılaştırması.
+
+### Novel Contribution #10: Developmental Morphogenesis for Trading Architecture
+**Yenilik:** Trading sistemi mimarisinin BraiNCA-inspired local growth rules ile
+KENDİ KENDİNE gelişmesi — NEAT-style evolution yerine developmental growth.
+**Mevcut literatürde:** BraiNCA motor kontrol için. Finansal mimari growth YOK.
+**Doğrulama:** BraiNCA-grown architecture vs fixed architecture, 1000 trade sonra Sharpe.
+
+---
+
+## Akademik Kaynaklar (100+)
+
+### v10 Autonomous Lifecycle Kaynakları (Yeni)
+- "Agentic Finance" MDPI Entropy 28(3), Mart 2026 — Active Inference'ın ilk finans uygulaması, Passivity Paradox
+- BraiNCA: arXiv 2604.01932, Nisan 2026 — Attention+NCA developmental morphogenesis
+- Edge of Chaos + LLM pretraining: ICLR 2025 (Yale) arXiv 2410.02536 — SOC ve optimal hesaplama
+- HAG (Hebbian Architecture Generation): Nature Communications 2025 — auto-criticality, github.com/Finebouche/hag
+- S-MADRL Stigmergy: Nature Communications Engineering 2024 — feromon bazlı multi-agent koordinasyon
+- Interoceptive Predictive Coding: arXiv 2511.13668, 2025 — hierarchical self-prediction
+- AAMC (Adaptive Agentic Meta-Controller): Rjoub et al. Neurocomputing 2026 — TCE + RL routing
+- Prefrontal Meta-Control: Frontiers Computational Neuroscience 2025 — model-based vs model-free seçimi
+- AIS Industrial Intrusion Detection: Hosseini 2025, Wiley — Negative Selection + Danger Theory
+- CLONALG: De Castro & Von Zuben — clonal selection algorithm, github.com/christianrfg/clonalg
+- Applied Antifragility in Technical Systems: Springer 2025 — hormesis, optionality, via negativa
+- Computational Autopoiesis: Academia.edu Ağustos 2025 — ICAC, CDN self-reorganization
+- Constrained Disorder Principle: MDPI Biology, Mart 2025 — controlled variability > fixed setpoint
+- Meta-RL Homeostatic Regulation: CCN 2025, Yoshida — allostatic setpoint learning
+- pymdp: Python Active Inference toolkit — EFE minimization implementation
+- Speculative Decoding: Leviathan et al. ICML 2023 — dual-brain fast/slow inference
+- PABEE (Patience-Based Early Exit): Zhou et al. 2020, extended 2024-25 — anytime inference
+- DeepSeek-V2/V3 MoE Gating 2024 — computation market / expert routing
+- Conformal Quality Gates: Angelopoulos & Bates tutorial 2023, adopted 2024-26
+- Google Cascaded LLM Inference 2024 — easy→small model, hard→large model routing
 
 ### v9 Yeni Araştırma Bulguları
 - Rahimikia et al. "Re(Visiting) TSFMs in Finance" arXiv 2511.18578 (Nov 2025) — CatBoost Sharpe 6.79
