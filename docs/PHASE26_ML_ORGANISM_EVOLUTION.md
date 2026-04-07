@@ -132,10 +132,34 @@ signal_direction = ttm_direction  # TTM en iyi directional
 4. Symmetric/oblivious trees ile built-in regularization
 5. Native embedding_features: TTM çıktısını direkt feature olarak alır
 
+**KRİTİK: Training-Serving Skew Önlemi (Feature Noise Injection)**
+
+CatBoost karar ağaçları belirli feature eşiklerine (thresholds) hassas overfit olur.
+Backtest'te ADX=25.01 iken canlıda ADX=24.99 → tamamen farklı ağaç dalına gider.
+Backtest motoru veriyi toplu (array) hesaplar, canlıda tick-by-tick → milimetrik farklar oluşur.
+
+**Çözüm: Eğitimde feature noise injection (data augmentation):**
+```python
+def inject_feature_noise(X_train, noise_pct=0.01):
+    """Her feature'a ±%1 Gaussian gürültü ekle → threshold'lara overfit engelle."""
+    noise = np.random.normal(1.0, noise_pct, X_train.shape)
+    return X_train * noise
+
+# Eğitim sırasında 3-5 augmented kopya ile train et
+X_augmented = pd.concat([X_train] + [inject_feature_noise(X_train) for _ in range(4)])
+y_augmented = pd.concat([y_train] * 5)
+model.fit(X_augmented, y_augmented)
+```
+
+**Ek önlem: Fuzzy threshold monitoring**
+- Canlıda feature değerleri backtest dağılımından sapıyorsa → OOD detector alarm
+- Feature distribution shift > 2σ → model güvenilirliği düşür (uncertainty artar)
+
 **FreqAI entegrasyonu:**
 - FreqAI CatBoost'u 2025.12'de kaldırdı ama BaseRegressionModel pipeline model-agnostic
 - Custom CatBoost model ~50 satır: `fit()` override yeterli
 - Walk-forward, data kitchen, feature pipeline, retraining hepsi hazır
+- **Feature noise injection walk-forward pipeline'a eklenir → her retraining'de otomatik**
 
 **CPU performansı:**
 - TTM: <10ms inference, ~20MB RAM
@@ -170,13 +194,19 @@ Architecture:
   
   Total: ~300K parameters
   Speed: 5000 forward passes/sec on CPU
-  Imagination: 1000 rollouts × 24 steps = ~5 seconds
+  Imagination: 1000 rollouts × 3-5 steps = ~1 second
 ```
+
+**KRİTİK: Short-Horizon Rollout (Compounding Error Önlemi)**
+Finansal zaman serilerinde her adımda tahmin hatası birikir (compounding error).
+24 adım → hata katlanarak büyür → çöp trajectory. Deterministik ortamlarda (satranç, Go)
+uzun rollout çalışır çünkü transition deterministik. Kripto'da stochastic + dışsal şoklar.
+**Çözüm:** Rollout ufku 3-5 adım ile sınırlı. Kısa ama güvenilir > uzun ama çöp.
 
 **Nasıl çalışır:**
 1. Perception'dan `z_current` al (Global Workspace'ten oku)
 2. 1000 farklı parametre konfigürasyonu dene (Latin Hypercube Sampling)
-3. Her biri için 24-adım geleceği simüle et (dünya modeliyle)
+3. Her biri için **3-5 adım** geleceği simüle et (dünya modeliyle, short-horizon)
 4. Her simülasyonun beklenen PnL'ini hesapla
 5. En iyi 10 konfigürasyonu Global Workspace'e yaz
 6. RL karar verirken bu simülasyonları kullanır
@@ -185,9 +215,10 @@ Architecture:
 - LightZero (NeurIPS 2023) toolkit ile MCTS tree search
 - Parametre optimizasyonu bir "oyun" gibi — her "hamle" bir parametre ayarı
 - MCTS en iyi hamle dizisini bulur
+- MCTS depth da 3-5 ile sınırlı (aynı compounding error nedeniyle)
 
 **RAM:** ~15MB
-**Latency:** 5 saniye (1000 imagination rollout)
+**Latency:** ~1 saniye (1000 × 5-step rollout)
 
 ---
 
@@ -667,11 +698,44 @@ class TripleFusion:
         return action
 ```
 
+**KRİTİK: Timestamp Alignment Guard (Time Dilation Önlemi)**
+
+LOB/Microstructure verisi milisaniyeler içinde değişir (Tier-1, <100ms).
+LLM/RAG çıkarımı 3-10 saniye sürer (Tier-3, <60s).
+Cross-attention'a giren veriler FARKLI ZAMANLARA ait olabilir.
+
+**Problem:** LLM "Bullish" derken LOB çoktan çökmüş olabilir. Stale veri + fresh yorum = çöp fusion.
+
+**Çözüm: Her workspace alanına timestamp + staleness guard:**
+```python
+class TimestampedField:
+    value: Any
+    updated_at: float  # time.monotonic()
+    max_age_ms: float  # tier'a göre: Tier-1=200ms, Tier-2=10s, Tier-3=60s
+
+def fuse_with_alignment(fields: list[TimestampedField]) -> bool:
+    """Tüm input'lar yeterince taze mi?"""
+    now = time.monotonic()
+    for f in fields:
+        age_ms = (now - f.updated_at) * 1000
+        if age_ms > f.max_age_ms:
+            logger.warning(f"[TimeAlign] {f.name} stale: {age_ms:.0f}ms > {f.max_age_ms}ms")
+            return False  # Fusion yapma, stale veri var
+    return True
+```
+
+**Kurallar:**
+- Tier-1 (LOB, RL) verisi 200ms'den eski → fusion'a SOKMA
+- Tier-3 (LLM, RAG) verisi 60s'den eski → yeniden sorgula veya cache kullan
+- Cross-tier fusion'da EN ESKİ verinin yaşı raporlanır → organism uncertainty artar
+- Stale veri + taze veri birleştirilMEZ — ya hepsi taze, ya fusion atlanır
+
 **LLM-as-Judge (kalite kontrolü):**
 - Her trade kararından sonra LLM "bu karar mantıklı mı?" diye sorar
 - MADAM debate (Bull/Bear) zaten var — ML kararını debate'e sok
 - LLM "hayır bu saçma" derse → RL kararı override edilir
 - Bu NEUROSYMBOLIC AI — neural (ML) + symbolic (LLM reasoning)
+- **LLM judge asenkron çalışır — canlı hattı BLOKLAMAZ (Tier-3)**
 
 ---
 
@@ -806,7 +870,7 @@ class DreamEngine:
             # Rastgele "ne olursa" dizisi
             trajectory = []
             z = z_start
-            for step in range(48):  # 48 saat rüya
+            for step in range(5):  # 5 adım rüya (short-horizon, compounding error önlemi)
                 # World model'a rastgele event inject et
                 event = random.choice([
                     "flash_crash",      # Ani %10 düşüş
@@ -835,10 +899,42 @@ class DreamEngine:
                 organism.learn_from_dream(params, predicted_reward, actual_reward)
 ```
 
+**KRİTİK: Dream Anomaly Filter (Model Exploit Önlemi)**
+
+Model-based RL'in bilinen en büyük riski: RL ajanı world model'ın HATASINI exploit etmeyi öğrenir.
+JEPA'da ufak bir istatistiksel sapma varsa, ajan piyasayı değil JEPA'nın halüsinasyonunu sömürür.
+Rüyalarda %1000 kâr, canlıda anında batış.
+
+**Çözüm: Rüya verisi RL'e girmeden önce 3 katmanlı filtre:**
+```python
+class DreamFilter:
+    def is_valid_dream(self, trajectory, real_data_stats) -> bool:
+        for z, event, reward in trajectory:
+            # 1. Mahalanobis: rüya gerçek veriden çok mu uzak?
+            maha_dist = mahalanobis(z, real_data_stats.mean, real_data_stats.precision)
+            if maha_dist > chi2.ppf(0.99, df=z.shape[0]):
+                return False  # Hallucination — gerçeklikten kopuk rüya
+
+            # 2. Reward magnitude: gerçekçi mi?
+            if abs(reward) > real_data_stats.max_abs_reward * 3.0:
+                return False  # Unrealistic reward — model hatası
+
+            # 3. Transition smoothness: ani sıçrama var mı?
+            # (embedding space'te ardışık z'ler arası mesafe kontrolü)
+
+        return True  # Geçerli rüya — RL'e gönderilebilir
+```
+
+**Kurallar:**
+- Her rüya trajectory'si bu filtreden geçer → geçemezse SİLİNİR
+- Filtrelenen rüya oranı > %50 → world model UNHEALTHY → ModelRiskEngine devreye girer
+- RL ajanı ASLA filtresiz rüya verisi görmez
+
 **Neden devrimsel:** İnsan bebekleri uyurken beyin MİLYARLARCA senaryo simüle eder. Bu "rüyalar" sayesinde uyanıkken hiç karşılaşmadığı durumlara hazır olur. Organizmamız da:
 - Flash crash yaşamamış ama HAYAL EDEBİLİR
 - Extreme F&G=1 görmemiş ama RÜYASINDA deneyimler
 - Bu senaryolarda pratik yapar → gerçekte karşılaşınca hazır
+- **Her rüya anomaly filter'dan geçer → hallucination'ları öğrenMEZ**
 
 ---
 
@@ -1083,37 +1179,58 @@ class ActiveLearner:
 
 ### Formal Problem Definition
 
-**Hormonal-Modulated Reinforcement Learning (HM-RL):**
+**Hormone-Augmented Reinforcement Learning (HA-RL):**
 
 Standart RL: `max_π E[Σ_{t=0}^{T} γᵗ R(sₜ, aₜ)]`
 
-CAAT HM-RL:
+**KRİTİK TASARIM KARARI: Hormonlar Reward Çarpanı DEĞİL, State'in Parçası**
+
+Eski (v8) yaklaşım: `R(s,a) × H(ω)` — reward'ı hormonlarla çarp.
+**Problem:** Non-stationary reward → SAC/PPO yakınsaması (convergence) bozulur.
+Ajan aynı state+action için farklı reward alır (hormon durumuna göre).
+Off-policy replay buffer'daki eski deneyimler geçersizleşir.
+
+**Yeni (v9) yaklaşım:** Hormonları observation space'e ekle, reward SAF PnL kalsın.
+
+CAAT HA-RL:
 ```
-max_π E[Σ_{t=0}^{T} γᵗ R(sₜ, aₜ) × H(ωₜ)]
+max_π E[Σ_{t=0}^{T} γᵗ R(sₜ, aₜ)]
 
 where:
-  sₜ ∈ S       : market state (TTM embedding z ∈ ℝ⁶⁴)
+  sₜ ∈ S       : AUGMENTED market state = (z, ω)
+                  z ∈ ℝ⁶⁴ (TTM embedding)
+                  ω ∈ ℝ⁴  (cortisol, dopamine, serotonin, adrenaline)
   aₜ ∈ A       : parameter adjustments (organ-grouped, ℝ³⁰⁻⁵⁰ per agent)
-  R(sₜ, aₜ)    : raw trade PnL
-  H(ωₜ) ∈ [0,1]: hormonal modulation function
-  ωₜ = (cortisol, dopamine, serotonin, adrenaline)
+  R(sₜ, aₜ)    : raw trade PnL (SAF, modüle EDİLMEMİŞ)
   γ ∈ (0,1)    : discount factor
   π : S → A    : policy (hierarchical, organ-decomposed)
 ```
 
-**Hormonal modülasyon fonksiyonu:**
+**Hormonlar observation space'te:**
 ```
-H(ω) = cortisol(ω) × dopamine(ω) × serotonin(ω) × I[adrenaline > 0]
+s_augmented = concat(z_market, ω_hormones)
+            = concat(ℝ⁶⁴, ℝ⁴)
+            = ℝ⁶⁸
 
-cortisol(ω) = max(0.5, 1 - 0.4 × stress(ω))
-dopamine(ω) = min(1.1, 0.9 + 0.15 × health(ω))
-serotonin(ω) = max(0.6, 0.5 + 0.5 × info_quality(ω))
+ω = (cortisol, dopamine, serotonin, adrenaline)
+cortisol = max(0.5, 1 - 0.4 × stress)      ∈ [0.5, 1.0]
+dopamine = min(1.1, 0.9 + 0.15 × health)    ∈ [0.9, 1.1]
+serotonin = max(0.6, 0.5 + 0.5 × info_q)   ∈ [0.6, 1.0]
+adrenaline = I[stress < 0.85]               ∈ {0, 1}
 ```
 
-**Teorem (informal): Hormonal Reward Preservation**
-H(ω) ∈ [0.15, 1.1] olduğu sürece, HM-RL'in optimal policy'si standart RL'in optimal policy'sinin ε-yakınsamasıdır, ε = max|H(ω) - 1| × V_max.
+**Neden bu daha iyi:**
+1. Reward SABIT → off-policy replay buffer geçerli kalır → SAC hızlı yakınsar
+2. Ajan "cortisol yüksekken agresif trade = kötü sonuç" ilişkisini KENDİSİ öğrenir
+3. Hormonlar hala etkili — ama IMPLICIT olarak (policy'nin içinde), explicit reward çarpanı olarak DEĞİL
+4. Markov özelliği korunur: aynı (market_state, hormone_state) → aynı reward dağılımı
 
-Sezgisel kanıt: H(ω) reward'ı ölçeklendiriyor ama İŞARETİNİ değiştirmiyor (H > 0 her zaman). Pozitif reward pozitif kalır. Sadece büyüklük değişir → aynı yönde öğrenme, farklı hızda.
+**Teorem (informal): Augmented State Sufficiency**
+Eğer ω hormon vektörü, reward R(s,a) üzerindeki tüm non-market etkiyi capture ediyorsa,
+augmented state s' = (z, ω) Markov özelliğini korur ve standart RL yakınsaması geçerlidir.
+
+**Not:** Hormonlar hala Phase 25 organizmada get_param() modülasyonu için KULLANILIYOR.
+Bu değişiklik sadece Phase 26 RL ajanlarını etkiler. Mevcut kural tabanlı hormon sistemi aynen çalışır.
 
 ### Counterfactual Regret Bound
 
