@@ -1739,6 +1739,10 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         except Exception:
             pass
 
+    # Phase 26: Triple Perception moved to strategy (AIFreqtradeSizer.populate_entry_trend)
+    # because DataFrame is only available there — rag_graph receives HTTP dict, not DataFrame.
+    # Perception results arrive via pheromone_field deposits (read by Evidence Engine if needed).
+
     # Phase 20: Evidence Engine ALWAYS runs first (50ms, LLM-free)
     ee_result = None
     try:

@@ -6,8 +6,8 @@
 
 # --- Triple Perception (CatBoost + TTM + Chronos-Bolt) ---
 catboost>=1.2.7              # Gradient boosting, Sharpe 6.79 > neural TSFMs
-# TTM: installed via HuggingFace transformers (already in requirements-freqai.txt)
-# Chronos-Bolt: installed via HuggingFace transformers
+granite-tsfm                 # IBM TTM (Tiny Time Mixer) — tsfm_public.toolkit
+chronos-forecasting          # Amazon Chronos-Bolt — ChronosBoltPipeline
 
 # --- Uncertainty & Calibration ---
 mapie>=0.9.1                 # Conformal prediction (ACI, CQR)
