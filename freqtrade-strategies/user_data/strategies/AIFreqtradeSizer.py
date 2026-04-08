@@ -775,7 +775,7 @@ class AIFreqtradeSizer(IStrategy):
             chart = compute_chart_features(dataframe, df_4h=df_4h, df_1d=df_1d, include_signature=True)
             for key, val in chart.items():
                 dataframe[f'%-{key}'] = val
-            logger.debug(f"[Phase26:ChartFeatures] {len(chart)} features computed for {pair}")
+            logger.info(f"[Phase26:ChartFeatures] {len(chart)} features computed for {pair}")
         except Exception as e:
             logger.warning(f"[Phase26:ChartFeatures] Failed: {e}")
 
@@ -832,7 +832,7 @@ class AIFreqtradeSizer(IStrategy):
                         f"conf={_tp_result['confidence']:.2f} sizing={_tp_result['sizing_multiplier']:.2f}"
                     )
             except Exception as e:
-                logger.debug(f"[Phase26:TriplePerception] {pair} failed: {e}")
+                logger.warning(f"[Phase26:TriplePerception] {pair} failed: {e}", exc_info=True)
 
             ai_decision = self._get_ai_signal(pair, last_time, dataframe=df)
 
