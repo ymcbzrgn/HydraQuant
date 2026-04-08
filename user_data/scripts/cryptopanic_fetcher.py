@@ -20,9 +20,13 @@ except ImportError:
         return fallback
 
 class CryptoPanicFetcher:
-    # Class-level flags survive garbage collection of instances
-    _disabled = False
-    _404_logged = False
+    # DEPRECATED: CryptoPanic API returns 404 since ~April 2026.
+    # Token expired or endpoint changed. Permanently disabled.
+    # Replaced by expanded RSS feeds in rss_fetcher.py (NewsBTC, Bitcoinist,
+    # BeInCrypto, Blockworks, CoinGecko Blog, Messari, DeFiLlama).
+    # Class kept for import compatibility — fetch() always returns [].
+    _disabled = True
+    _404_logged = True
 
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.environ.get("CRYPTOPANIC_API_KEY")
