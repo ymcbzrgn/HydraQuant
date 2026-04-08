@@ -36,14 +36,55 @@ class DataPipeline:
     Orchestrates the continuous flow of information from external APIs to the RAG memory.
     Replaces the legacy subprocess orchestrator with direct function calls where possible.
     """
-    def __init__(self):
-        self.retriever = HybridRetriever(collection_name="crypto_news")
-        self.streaming_rag = StreamingRAG()
-        self.raptor = RAPTORTree()
+    def __init__(self, llm_router=None):
+        # Phase 23: Lazy init — heavy objects created on first use, not at __init__
+        # Prevents 4 duplicate LLMRouter instances (~100MB wasted)
+        self._llm_router = llm_router
+        self._retriever = None
+        self._streaming_rag = None
+        self._raptor = None
+        self._magma = None
+        self._memorag = None
+        # Lightweight — always init (no LLMRouter, minimal RAM)
         self.crypto_panic = CryptoPanicFetcher()
         self.alpha_vantage = AlphaVantageFetcher()
-        self.magma = MAGMAMemory()
-        self.memorag = MemoRAG()
+
+    def _get_router(self):
+        if self._llm_router is None:
+            from llm_router import LLMRouter
+            self._llm_router = LLMRouter()
+        return self._llm_router
+
+    @property
+    def retriever(self):
+        if self._retriever is None:
+            self._retriever = HybridRetriever(
+                collection_name="crypto_news", llm_router=self._get_router())
+        return self._retriever
+
+    @property
+    def streaming_rag(self):
+        if self._streaming_rag is None:
+            self._streaming_rag = StreamingRAG()
+        return self._streaming_rag
+
+    @property
+    def raptor(self):
+        if self._raptor is None:
+            self._raptor = RAPTORTree(llm_router=self._get_router())
+        return self._raptor
+
+    @property
+    def magma(self):
+        if self._magma is None:
+            self._magma = MAGMAMemory()
+        return self._magma
+
+    @property
+    def memorag(self):
+        if self._memorag is None:
+            self._memorag = MemoRAG(llm_router=self._get_router())
+        return self._memorag
         
     def run_pipeline(self):
         """Executes a single pass of the entire ingestion pipeline."""

@@ -63,6 +63,14 @@ class PipelineScheduler:
         self._bidi_rag = None
         self._calibrator = None
         self._forgone_engine = None
+        # Phase 23: Missing singletons (explorer-god audit — ~80-150MB/day avoidable)
+        self._evidence_engine = None
+        self._cost_tracker = None
+        self._autonomy_manager = None
+        self._rag_evaluator = None
+        self._graph_rag = None
+        self._regime_classifier = None
+        self._risk_budget = None
 
     def _get_pipeline(self):
         """Lazy-load DataPipeline to avoid circular imports."""
@@ -512,9 +520,8 @@ class PipelineScheduler:
             if not lessons:
                 return
 
-            # Push to VectorDB using same retriever
-            from hybrid_retriever import HybridRetriever
-            retriever = HybridRetriever(collection_name="crypto_news")
+            # Reuse DataPipeline's retriever (singleton, no duplicate FlashRank/LLMRouter)
+            retriever = self._get_pipeline().retriever
             
             docs, metas, ids = [], [], []
             for l in lessons:
@@ -752,8 +759,10 @@ class PipelineScheduler:
             if triggered:
                 logger.warning(f"[Phase20:EventTrigger] {trigger_reason} → forcing Evidence Engine re-analysis")
                 try:
-                    from evidence_engine import EvidenceEngine
-                    engine = EvidenceEngine()
+                    if self._evidence_engine is None:
+                        from evidence_engine import EvidenceEngine
+                        self._evidence_engine = EvidenceEngine()
+                    engine = self._evidence_engine
                     # Re-analyze top pairs from opportunity_scores
                     conn2 = sqlite3.connect(AI_DB_PATH, timeout=10)
                     try:
@@ -822,11 +831,14 @@ class PipelineScheduler:
                 "total_eval_trades": 0
             }
             
-            cost_tracker = LLMCostTracker()
-            cost_summary = cost_tracker.get_daily_summary()
+            if self._cost_tracker is None:
+                self._cost_tracker = LLMCostTracker()
+            cost_summary = self._cost_tracker.get_daily_summary()
             stats["api_cost_today"] = sum(m.get("cost_usd", 0) for m in cost_summary.get("models", {}).values())
 
-            autonomy = AutonomyManager()
+            if self._autonomy_manager is None:
+                self._autonomy_manager = AutonomyManager()
+            autonomy = self._autonomy_manager
             stats["autonomy_level"] = f"L{autonomy.current_level}"
 
             # Real portfolio balance + asset breakdown
@@ -1024,8 +1036,10 @@ class PipelineScheduler:
         """Weekly Monday 06:00: RAGAS quality audit — measure retrieval quality, flag bad chunks."""
         logger.info("[Scheduler:Job] Running RAG quality audit...")
         try:
-            from rag_evaluator import RAGQualityEvaluator
-            evaluator = RAGQualityEvaluator()
+            if self._rag_evaluator is None:
+                from rag_evaluator import RAGQualityEvaluator
+                self._rag_evaluator = RAGQualityEvaluator()
+            evaluator = self._rag_evaluator
 
             report = evaluator.get_weekly_quality_report()
             if not report:
@@ -1061,15 +1075,14 @@ class PipelineScheduler:
         """Weekly Sunday 04:00: Rebuild GraphRAG communities from knowledge graph."""
         logger.info("[Scheduler:Job] Rebuilding GraphRAG communities...")
         try:
-            from graph_rag import GraphRAG
-            graph = GraphRAG()
+            if self._graph_rag is None:
+                from graph_rag import GraphRAG
+                self._graph_rag = GraphRAG()
+            graph = self._graph_rag
             communities = graph.build_communities()
             if communities:
-                # Use LLM for summarization (lazy import to avoid singleton issues)
                 try:
-                    from llm_router import LLMRouter
-                    llm = LLMRouter(temperature=0.3)
-                    graph.summarize_communities(communities, llm_router=llm)
+                    graph.summarize_communities(communities, llm_router=self._get_pipeline()._get_router())
                 except Exception:
                     graph.summarize_communities(communities)  # No LLM = fallback text
                 logger.info(f"[GraphRAG] Rebuilt {len(communities)} communities")
@@ -1314,10 +1327,10 @@ class PipelineScheduler:
             # Detect current regime for regime-specific decay rate
             regime = "_global"
             try:
-                from regime_classifier import RegimeClassifier
-                rc = RegimeClassifier()
-                # Use BTC as proxy for market regime
-                regime = rc.classify({}).get("regime", "_global")
+                if self._regime_classifier is None:
+                    from regime_classifier import RegimeClassifier
+                    self._regime_classifier = RegimeClassifier()
+                regime = self._regime_classifier.classify({}).get("regime", "_global")
             except Exception:
                 pass
             organism.decay_all(regime)

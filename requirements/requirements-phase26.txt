@@ -1,0 +1,36 @@
+# Phase 26: CAAT ML Evolution Dependencies
+# Install: pip install -r requirements/requirements-phase26.txt
+#
+# These are needed incrementally as Phase 26 modules are implemented.
+# Not all are needed at once — install per sub-phase.
+
+# --- Triple Perception (CatBoost + TTM + Chronos-Bolt) ---
+catboost>=1.2.7              # Gradient boosting, Sharpe 6.79 > neural TSFMs
+# TTM: installed via HuggingFace transformers (already in requirements-freqai.txt)
+# Chronos-Bolt: installed via HuggingFace transformers
+
+# --- Uncertainty & Calibration ---
+mapie>=0.9.1                 # Conformal prediction (ACI, CQR)
+
+# --- Causal Inference ---
+tigramite>=5.2               # PCMCI+ temporal causal discovery
+dowhy>=0.11                  # SCM + do-calculus + counterfactual
+
+# --- RL Agents ---
+# stable-baselines3 already in requirements/requirements-freqai-rl.txt
+# sb3-contrib already in requirements/requirements-freqai-rl.txt
+
+# --- Meta-Learning ---
+learn2learn>=0.2.0           # Reptile, MAML meta-learning
+
+# --- Chart Structure Intelligence ---
+# signatory requires PyTorch — use esig for CPU-only
+esig>=1.0.0                  # Path signature features (Rough Path Theory)
+
+# --- Active Inference (Phase 26 Autonomous Lifecycle) ---
+pymdp>=0.0.8                 # Active Inference (Expected Free Energy)
+
+# --- Already installed ---
+# flashrank==0.2.10          # In requirements/requirements-ai.txt
+# torch                      # In requirements/requirements-freqai.txt
+# scikit-learn               # In requirements/requirements-freqai.txt
