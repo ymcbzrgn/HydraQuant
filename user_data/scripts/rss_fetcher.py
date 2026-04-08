@@ -17,13 +17,13 @@ logger = logging.getLogger(__name__)
 # TIER 1 and TIER 2 RSS feeds explicitly defined from ROADMAP.md
 # Expanded to include Macro and Secondary Crypto sites for maximum Brain data
 RSS_FEEDS = {
-    # TIER 1 - Crypto Prime
+    # TIER 1 - Crypto Prime (en güvenilir, en hızlı)
     "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
     "CoinTelegraph_All": "https://cointelegraph.com/rss",
     "Decrypt": "https://decrypt.co/feed",
     "The_Block": "https://www.theblock.co/rss.xml",
-    
-    # TIER 2 - Crypto Secondary
+
+    # TIER 2 - Crypto Secondary (iyi kapsama, farklı perspektifler)
     "CryptoSlate": "https://cryptoslate.com/feed/",
     "CryptoPotato": "https://cryptopotato.com/feed/",
     "CryptoNews": "https://cryptonews.com/news/feed/",
@@ -31,12 +31,26 @@ RSS_FEEDS = {
     "DailyHodl": "https://dailyhodl.com/feed/",
     "UToday": "https://u.today/rss",
     "CoinJournal": "https://coinjournal.net/news/feed/",
-    
+
+    # TIER 2.5 - CryptoPanic Replacement (API key gerektirmeyen, ücretsiz RSS)
+    # Bu feed'ler CryptoPanic'in 404 dönmesiyle eklendi (Nisan 2026)
+    "NewsBTC": "https://www.newsbtc.com/feed/",
+    "Bitcoinist": "https://bitcoinist.com/feed/",
+    "BeInCrypto": "https://beincrypto.com/feed/",
+    "Blockworks": "https://blockworks.co/feed",
+    "CoinGecko_Blog": "https://blog.coingecko.com/rss/",
+    "Messari": "https://messari.io/rss",
+    "DeFiLlama_News": "https://feed.defillama.com/",
+
     # TIER 3 - Macro / Traditional Finance
     "CNBC_Finance": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664",
     "Fox_Business": "https://moxie.foxbusiness.com/google-publisher/markets.xml",
     "WSJ_Markets": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-    "Investing_Com": "https://www.investing.com/rss/news_301.rss"
+    "Investing_Com": "https://www.investing.com/rss/news_301.rss",
+
+    # TIER 3.5 - DeFi / On-Chain Specific
+    "Rekt_News": "https://rekt.news/feed.xml",
+    "Week_In_Ethereum": "https://weekinethereumnews.com/feed/",
 }
 
 def parse_date(entry):

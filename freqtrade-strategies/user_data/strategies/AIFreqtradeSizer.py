@@ -1255,7 +1255,7 @@ class AIFreqtradeSizer(IStrategy):
                 'entry_date': str(trade.open_date),
                 'exit_date': str(current_time),
                 'profit_pct': round(trade_pnl_pct, 3),
-                'duration_hours': round((current_time - trade.open_date).total_seconds() / 3600, 2) if trade.open_date else None,
+                'duration_hours': round((current_time - trade.open_date_utc).total_seconds() / 3600, 2) if trade.open_date else None,
                 'exit_reason': exit_reason,
                 'entry_price': trade.open_rate,
                 'rsi_bucket': PatternStatStore.classify_rsi(float(ai_meta['rsi'])) if ai_meta.get('rsi') else None,
@@ -1299,7 +1299,7 @@ class AIFreqtradeSizer(IStrategy):
                 WHERE pair = ? AND outcome_pnl IS NULL
                 ORDER BY timestamp DESC LIMIT 1
             """, (trade_pnl_pct,
-                  int((current_time - trade.open_date).total_seconds() / 60) if trade.open_date else None,
+                  int((current_time - trade.open_date_utc).total_seconds() / 60) if trade.open_date else None,
                   pair))
             conn.commit()
             conn.close()
@@ -1372,7 +1372,7 @@ class AIFreqtradeSizer(IStrategy):
                 regime=regime_val,
                 confidence=conf_val,
                 exit_reason=exit_reason,
-                duration_hours=round((current_time - trade.open_date).total_seconds() / 3600, 2) if trade.open_date else 1.0,
+                duration_hours=round((current_time - trade.open_date_utc).total_seconds() / 3600, 2) if trade.open_date else 1.0,
                 stake_amount=trade.stake_amount if hasattr(trade, 'stake_amount') else 0,
                 fng=fng_val,
                 adx=adx_val,

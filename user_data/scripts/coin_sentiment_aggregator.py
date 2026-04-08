@@ -21,16 +21,20 @@ COIN_MAPPINGS = {
 }
 
 # Phase 7: Tier Weighting - Give higher weight to established crypto news sites
-# Phase 14: Tier 2 (+0.8x) includes Crowd Sentiment from CryptoPanic
+# Tier weights for sentiment aggregation
 TIER_WEIGHTS = {
-    # Tier 1
+    # Tier 1 — crypto prime
     "coindesk.com": 1.0, "cointelegraph.com": 1.0, "decrypt.co": 1.0, "theblock.co": 1.0,
-    # Tier 2
+    # Tier 2 — crypto secondary
     "cryptoslate.com": 0.8, "cryptopotato.com": 0.8, "cryptonews.com": 0.8,
-    "cryptopanic": 0.8,  # Community sourced
-    "alphavantage": 0.8, # Pre-computed financial models
-    # Tier 3
-    "chaingpt.org": 0.6, "finance.yahoo.com": 0.6
+    "alphavantage": 0.8,
+    # Tier 2.5 — CryptoPanic replacements (RSS, API key gerektirmez)
+    "newsbtc.com": 0.8, "bitcoinist.com": 0.8, "beincrypto.com": 0.8,
+    "blockworks.co": 0.9, "messari.io": 0.9,  # Blockworks+Messari daha analitik
+    "blog.coingecko.com": 0.7, "defillama.com": 0.7,
+    # Tier 3 — macro + DeFi niche
+    "chaingpt.org": 0.6, "finance.yahoo.com": 0.6,
+    "rekt.news": 0.7, "weekinethereumnews.com": 0.7,
 }
 
 # Phase 14 imports
