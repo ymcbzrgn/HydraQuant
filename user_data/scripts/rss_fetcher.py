@@ -87,22 +87,21 @@ def fetch_rss_feeds():
     
     for source_name, url in RSS_FEEDS.items():
         logger.info(f"Fetching RSS feed from {source_name}...")
+        feed = None
         try:
             feed = feedparser.parse(url)
-            
+
             for entry in feed.entries:
-                # Basic dedup based on URL which is marked UNIQUE in DB
                 title = entry.get('title', '')
                 link = entry.get('link', '')
                 summary = entry.get('summary', '') or entry.get('description', '')
-                
-                # Omit empty titles
+
                 if not title or not link:
                     continue
-                    
+
                 pub_date = parse_date(entry)
                 thash = title_hash(title)
-                
+
                 try:
                     c.execute('''
                         INSERT OR IGNORE INTO market_news (source, title, summary, url, published_at, title_hash)
@@ -111,14 +110,22 @@ def fetch_rss_feeds():
                     if c.rowcount > 0:
                         new_articles += 1
                 except sqlite3.IntegrityError:
-                    # Item already exists in the DB based on UNIQUE URL or title_hash
                     continue
-                    
+
         except Exception as e:
             logger.error(f"Error fetching {source_name}: {e}")
-            
+        finally:
+            # Phase 23: feedparser XML DOM leak fix — release DOM immediately
+            # feedparser holds entire XML tree with reference cycles that delay GC
+            del feed
+
     conn.commit()
     conn.close()
+
+    # Phase 23: force GC after all feeds processed — collect any remaining DOM fragments
+    import gc
+    gc.collect()
+
     logger.info(f"Finished RSS fetch. Inserted {new_articles} new articles.")
     return new_articles
 
