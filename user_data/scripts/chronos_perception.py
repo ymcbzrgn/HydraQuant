@@ -105,8 +105,8 @@ def compute_chronos_quantiles(
         # Inference
         start = time.time()
         forecast = pipeline.predict(
-            context=context,
-            prediction_length=prediction_length,
+            context,  # positional — ChronosBoltPipeline expects positional, not keyword
+            prediction_length,
         )
         elapsed_ms = (time.time() - start) * 1000
 
