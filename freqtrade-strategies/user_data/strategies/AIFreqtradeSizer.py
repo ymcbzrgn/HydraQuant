@@ -753,6 +753,32 @@ class AIFreqtradeSizer(IStrategy):
             dataframe['%-sentiment_4h'] = 0.0
             dataframe['%-sentiment_24h'] = 0.0
 
+        # Phase 26: Chart Structure Intelligence (6 layers, ~130-230 features)
+        try:
+            from chart_features import compute_chart_features
+
+            # Get 4h and 1d informative pair data if available
+            pair = metadata['pair']
+            stake = self.config.get('stake_currency', 'USDT')
+            df_4h = None
+            df_1d = None
+            if self.dp:
+                try:
+                    df_4h = self.dp.get_pair_dataframe(pair=f"BTC/{stake}", timeframe="4h")
+                except Exception:
+                    pass
+                try:
+                    df_1d = self.dp.get_pair_dataframe(pair=f"BTC/{stake}", timeframe="1d")
+                except Exception:
+                    pass
+
+            chart = compute_chart_features(dataframe, df_4h=df_4h, df_1d=df_1d, include_signature=True)
+            for key, val in chart.items():
+                dataframe[f'%-{key}'] = val
+            logger.debug(f"[Phase26:ChartFeatures] {len(chart)} features computed for {pair}")
+        except Exception as e:
+            logger.warning(f"[Phase26:ChartFeatures] Failed: {e}")
+
         return dataframe
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -774,7 +800,55 @@ class AIFreqtradeSizer(IStrategy):
                         self._semantic_cache = SemanticCache(db_path=self.db_path)
                     self._semantic_cache.invalidate(pair=pair)
 
+            # Phase 26: Triple Perception (TTM + Chronos + CatBoost) — runs HERE because
+            # DataFrame is only available in strategy, not in rag_graph HTTP service.
+            _tp_result = None
+            try:
+                from triple_perception import get_triple_perception
+                _tp = get_triple_perception()
+
+                # Get 4h/1d data for chart features
+                stake = self.config.get('stake_currency', 'USDT')
+                _tp_4h = self.dp.get_pair_dataframe(pair=f"BTC/{stake}", timeframe="4h") if self.dp else None
+                _tp_1d = self.dp.get_pair_dataframe(pair=f"BTC/{stake}", timeframe="1d") if self.dp else None
+
+                # Compute chart features
+                from chart_features import compute_chart_features
+                _tp_chart = compute_chart_features(df, df_4h=_tp_4h, df_1d=_tp_1d, include_signature=True)
+
+                _tp_result = _tp.perceive(
+                    df_1h=df,
+                    df_4h=_tp_4h,
+                    df_1d=_tp_1d,
+                    chart_features=_tp_chart,
+                )
+                if _tp_result:
+                    # Store for sizing/confidence enrichment downstream
+                    if not hasattr(self, '_perception_cache'):
+                        self._perception_cache = {}
+                    self._perception_cache[pair] = _tp_result
+                    logger.info(
+                        f"[Phase26:TriplePerception] {pair}: {_tp_result['signal']} "
+                        f"conf={_tp_result['confidence']:.2f} sizing={_tp_result['sizing_multiplier']:.2f}"
+                    )
+            except Exception as e:
+                logger.debug(f"[Phase26:TriplePerception] {pair} failed: {e}")
+
             ai_decision = self._get_ai_signal(pair, last_time, dataframe=df)
+
+            # Phase 26: Enrich AI decision with Triple Perception
+            if _tp_result and _tp_result.get("confidence", 0) > 0.1:
+                # If perception and RAG agree → boost confidence
+                # If they disagree → reduce confidence (disagreement penalty)
+                tp_signal = _tp_result.get("signal", "NEUTRAL")
+                ai_signal = ai_decision.get("signal", "NEUTRAL")
+                if tp_signal == ai_signal and tp_signal != "NEUTRAL":
+                    ai_decision["confidence"] = min(ai_decision.get("confidence", 0) * 1.15, 0.95)
+                    ai_decision["sizing_multiplier"] = _tp_result.get("sizing_multiplier", 1.0)
+                elif tp_signal != "NEUTRAL" and ai_signal != "NEUTRAL" and tp_signal != ai_signal:
+                    ai_decision["confidence"] *= 0.75  # disagreement penalty
+                ai_decision["perception"] = _tp_result
+
             signal_type = ai_decision.get('signal', 'NEUTRAL')
             confidence = ai_decision.get('confidence', 0.0)
             is_bullish = signal_type == 'BULLISH'
@@ -1467,12 +1541,14 @@ class AIFreqtradeSizer(IStrategy):
         ]
 
     def informative_pairs(self):
-        """Multi-timeframe + cross-pair data (Phase 22 #4)."""
+        """Multi-timeframe + cross-pair data (Phase 22 #4 + Phase 26 Multi-TF)."""
         stake = self.config.get('stake_currency', 'USDT')
         return [
             (f"BTC/{stake}", "1h"),
             (f"BTC/{stake}", "4h"),
+            (f"BTC/{stake}", "1d"),   # Phase 26: daily TF for chart structure Layer 2
             (f"ETH/{stake}", "4h"),
+            (f"ETH/{stake}", "1d"),   # Phase 26: daily TF for chart structure Layer 2
         ]
 
     def leverage(self, pair: str, current_time: datetime, current_rate: float,

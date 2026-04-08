@@ -357,8 +357,14 @@ class PipelineScheduler:
         self.scheduler.add_job(self._organism_cerebellum, 'cron', hour=0, minute=10,
             id='organism_cerebellum', name='Neural Organism Cerebellum Daily', max_instances=1, replace_existing=True)
 
+        # Phase 26: Predictive Interoception + Pheromone cleanup
+        self.scheduler.add_job(self._interoception_check, 'interval', minutes=15,
+            id='interoception_check', name='Predictive Interoception Check', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._pheromone_cleanup, 'interval', minutes=30,
+            id='pheromone_cleanup', name='Pheromone Field Cleanup', max_instances=1, replace_existing=True)
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 33 jobs (27 + 6 organism jobs)")
+        logger.info("[Scheduler] Started with 35 jobs (27 + 6 organism + 2 phase26)")
         return True
 
     def stop(self):
@@ -1398,6 +1404,75 @@ class PipelineScheduler:
             logger.info(f"[Scheduler:Organism] Cerebellum best hours (UTC): {best}")
         except Exception as e:
             logger.error(f"[Scheduler:Organism] Cerebellum failed: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 26: Predictive Interoception + Pheromone
+    # ═══════════════════════════════════════════════════════════
+
+    def _interoception_check(self):
+        """Every 15min: Record system metrics + predict future health."""
+        try:
+            from predictive_interoception import get_interoception
+
+            intro = get_interoception()
+
+            # Record current metrics
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                intro.record("ram_usage_pct", mem.percent / 100.0)
+            except Exception:
+                pass
+
+            # Win rate from recent trades
+            try:
+                conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+                row = conn.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN trade_pnl > 0 THEN 1 ELSE 0 END) as wins
+                    FROM organism_audit
+                    WHERE timestamp > datetime('now', '-7 days')
+                """).fetchone()
+                conn.close()
+                if row and row[0] > 0:
+                    intro.record("win_rate_7d", row[1] / row[0])
+            except Exception:
+                pass
+
+            # API error rate from pheromone field
+            try:
+                from pheromone_field import get_pheromone_field
+                field = get_pheromone_field()
+                health = field.get_field_health()
+                intro.record("organism_health", health.get("avg_freshness", 0.5))
+            except Exception:
+                pass
+
+            # Run prediction + proactive response
+            result = intro.predict_and_act()
+            if result["alerts"]:
+                logger.warning(
+                    f"[Phase26:Interoception] {result['health_trend']} — "
+                    f"{len(result['alerts'])} alerts: "
+                    + ", ".join(a['metric'] for a in result['alerts'])
+                )
+
+        except Exception as e:
+            logger.error(f"[Phase26:Interoception] Check failed: {e}")
+
+    def _pheromone_cleanup(self):
+        """Every 30min: Clean up fully decayed pheromones."""
+        try:
+            from pheromone_field import get_pheromone_field
+            field = get_pheromone_field()
+            cleaned = field.cleanup()
+            health = field.get_field_health()
+            logger.debug(
+                f"[Phase26:Pheromone] Cleanup: {cleaned} removed, "
+                f"{health['active_signals']} active from {health['active_sources']}"
+            )
+        except Exception as e:
+            logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
 
 
 if __name__ == "__main__":
