@@ -228,6 +228,41 @@ def run_full_smoke_test() -> dict:
 
     check("25. System Monitor", test_system_monitor)
 
+    # --- Phase 23: Jina API Connectivity ---
+    def test_jina_embedding():
+        from ai_config import JINA_API_KEYS, JINA_API_URL, JINA_EMBED_MODEL, JINA_EMBED_DIM
+        if not JINA_API_KEYS:
+            print("    SKIP: No JINA_API_KEY configured")
+            return
+        import httpx
+        resp = httpx.post(
+            f"{JINA_API_URL}/embeddings",
+            headers={"Authorization": f"Bearer {JINA_API_KEYS[0]}", "Content-Type": "application/json"},
+            json={"model": JINA_EMBED_MODEL, "input": ["smoke test"], "dimensions": JINA_EMBED_DIM},
+            timeout=10
+        )
+        assert resp.status_code == 200, f"Jina embedding failed: {resp.status_code}"
+        dim = len(resp.json()["data"][0]["embedding"])
+        assert dim == JINA_EMBED_DIM, f"Dim mismatch: {dim} != {JINA_EMBED_DIM}"
+
+    def test_jina_reranker():
+        from ai_config import JINA_API_KEYS, JINA_API_URL, JINA_RERANK_MODEL
+        if not JINA_API_KEYS:
+            print("    SKIP: No JINA_API_KEY configured")
+            return
+        import httpx
+        resp = httpx.post(
+            f"{JINA_API_URL}/rerank",
+            headers={"Authorization": f"Bearer {JINA_API_KEYS[0]}", "Content-Type": "application/json"},
+            json={"model": JINA_RERANK_MODEL, "query": "BTC price", "documents": ["BTC up", "ETH down"], "top_n": 2},
+            timeout=10
+        )
+        assert resp.status_code == 200, f"Jina reranker failed: {resp.status_code}"
+        assert len(resp.json()["results"]) == 2
+
+    check("26. Jina Embedding API", test_jina_embedding)
+    check("27. Jina Reranker API", test_jina_reranker)
+
     # --- Summary ---
     results["duration_seconds"] = round(time.time() - start_time, 2)
     print("=" * 60)
