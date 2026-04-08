@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 from ai_config import AI_DB_PATH as DB_PATH, MODEL_SERVER_URL
+from ai_config import JINA_API_KEYS, JINA_API_URL, JINA_EMBED_MODEL, JINA_EMBED_DIM
 
 
 def _load_all_gemini_keys() -> list:
@@ -59,12 +60,20 @@ class DualEmbeddingPipeline:
     _key_lock = threading.Lock()
     _key_cooldowns = {}  # api_key -> cooldown_until timestamp
 
-    # BGE via model server HTTP (replaces in-process SentenceTransformer)
+    # Jina Embedding API (Phase 23: replaces BGE model server)
     _http_client = None
+    _jina_available = False
+    _jina_checked = False
+    _jina_last_fail = 0.0
+    _jina_key_index = 0
+    _jina_key_lock = threading.Lock()
+    _JINA_COOLDOWN_SECS = 30  # shorter than BGE — API recovers faster
+
+    # Legacy BGE model server (emergency fallback only)
     _bge_server_checked = False
     _bge_server_active = False
-    _bge_last_fail = 0.0  # timestamp of last HTTP failure
-    _BGE_COOLDOWN_SECS = 60  # skip BGE calls for 60s after failure
+    _bge_last_fail = 0.0
+    _BGE_COOLDOWN_SECS = 60
 
     KEY_COOLDOWN_SECS = 120  # 2 min cooldown on Gemini 429
 
@@ -88,30 +97,55 @@ class DualEmbeddingPipeline:
                 DualEmbeddingPipeline._genai_clients = []
             logger.info("[Embedding] Gemini SDK unavailable — skipping API embedding init.")
 
-        # BGE via model server HTTP (one-time health check at first init)
+        # HTTP client (shared for Jina API + legacy model server)
         if DualEmbeddingPipeline._http_client is None:
-            DualEmbeddingPipeline._http_client = httpx.Client(timeout=60)  # BGE CPU encoding needs room
+            DualEmbeddingPipeline._http_client = httpx.Client(timeout=30)
 
-        if not DualEmbeddingPipeline._bge_server_checked:
+        # Phase 23: Jina Embedding API (primary, replaces BGE model server)
+        if not DualEmbeddingPipeline._jina_checked:
+            DualEmbeddingPipeline._jina_checked = True
+            if JINA_API_KEYS:
+                try:
+                    resp = DualEmbeddingPipeline._http_client.post(
+                        f"{JINA_API_URL}/embeddings",
+                        headers={"Authorization": f"Bearer {JINA_API_KEYS[0]}",
+                                 "Content-Type": "application/json"},
+                        json={"model": JINA_EMBED_MODEL, "input": ["health check"],
+                              "dimensions": JINA_EMBED_DIM, "task": "retrieval.passage"},
+                        timeout=10
+                    )
+                    if resp.status_code == 200:
+                        dim = len(resp.json()["data"][0]["embedding"])
+                        DualEmbeddingPipeline._jina_available = True
+                        logger.info(f"[Embedding] Jina API OK: model={JINA_EMBED_MODEL}, dim={dim}, keys={len(JINA_API_KEYS)}")
+                    else:
+                        logger.warning(f"[Embedding] Jina API returned {resp.status_code}: {resp.text[:200]}")
+                except Exception as e:
+                    logger.warning(f"[Embedding] Jina API unavailable: {e}. Will use legacy BGE fallback.")
+
+        # Legacy BGE model server (emergency fallback — only if Jina is down)
+        if not DualEmbeddingPipeline._jina_available and not DualEmbeddingPipeline._bge_server_checked:
             DualEmbeddingPipeline._bge_server_checked = True
             try:
-                resp = DualEmbeddingPipeline._http_client.get(f"{MODEL_SERVER_URL}/health")
+                resp = DualEmbeddingPipeline._http_client.get(f"{MODEL_SERVER_URL}/health", timeout=5)
                 health = resp.json()
                 DualEmbeddingPipeline._bge_server_active = health.get("bge") == "active"
-                logger.info(f"[Embedding] Model server health: {health}")
-            except Exception as e:
+                logger.info(f"[Embedding] Legacy model server health: {health}")
+            except Exception:
                 DualEmbeddingPipeline._bge_server_active = False
-                logger.warning(f"[Embedding] Model server at {MODEL_SERVER_URL} unavailable: {e}. BGE disabled.")
 
         # Log active mode
         has_gemini = bool(DualEmbeddingPipeline._genai_clients)
+        has_jina = DualEmbeddingPipeline._jina_available
         has_bge = DualEmbeddingPipeline._bge_server_active
-        if has_gemini and has_bge:
-            logger.info("[Embedding] Mode: DUAL (Gemini API + BGE model server)")
+        if has_gemini and has_jina:
+            logger.info("[Embedding] Mode: DUAL API (Gemini + Jina) — Phase 23 active")
+        elif has_gemini and has_bge:
+            logger.info("[Embedding] Mode: DUAL LEGACY (Gemini + BGE model server)")
         elif has_gemini:
-            logger.info("[Embedding] Mode: GEMINI-ONLY (BGE server unavailable)")
-        elif has_bge:
-            logger.info("[Embedding] Mode: BGE-ONLY (no Gemini API)")
+            logger.info("[Embedding] Mode: GEMINI-ONLY")
+        elif has_jina:
+            logger.info("[Embedding] Mode: JINA-ONLY")
         else:
             logger.error("[Embedding] Mode: NONE — no embedding backend available!")
 
@@ -192,27 +226,84 @@ class DualEmbeddingPipeline:
         logger.warning(f"[Embedding] All {len(clients)} Gemini keys exhausted or in cooldown. Falling back to BGE.")
         return None
 
+    def _next_jina_key(self) -> str | None:
+        """Round-robin Jina API key selection."""
+        if not JINA_API_KEYS:
+            return None
+        with DualEmbeddingPipeline._jina_key_lock:
+            idx = DualEmbeddingPipeline._jina_key_index % len(JINA_API_KEYS)
+            DualEmbeddingPipeline._jina_key_index = (idx + 1) % len(JINA_API_KEYS)
+            return JINA_API_KEYS[idx]
+
+    def _jina_embed(self, text: str):
+        """Get Jina Embedding v3 via API. Returns list or None. Phase 23 primary."""
+        if not DualEmbeddingPipeline._jina_available:
+            return None
+
+        # Circuit breaker
+        now = time.time()
+        if now - DualEmbeddingPipeline._jina_last_fail < self._JINA_COOLDOWN_SECS:
+            return self._bge_embed(text)  # Fallback to legacy BGE
+
+        # Try all keys
+        for _ in range(len(JINA_API_KEYS)):
+            key = self._next_jina_key()
+            if not key:
+                break
+            try:
+                resp = DualEmbeddingPipeline._http_client.post(
+                    f"{JINA_API_URL}/embeddings",
+                    headers={"Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json"},
+                    json={"model": JINA_EMBED_MODEL,
+                          "input": [text],
+                          "dimensions": JINA_EMBED_DIM,
+                          "task": "retrieval.passage"},
+                    timeout=15
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    emb = data["data"][0]["embedding"]
+                    if emb and len(emb) > 0:
+                        return emb
+                elif resp.status_code == 402:
+                    logger.warning(f"[Embedding] Jina key ...{key[-6:]} token exhausted, trying next")
+                    continue
+                elif resp.status_code == 429:
+                    logger.warning(f"[Embedding] Jina key ...{key[-6:]} rate limited, trying next")
+                    continue
+                else:
+                    logger.warning(f"[Embedding] Jina API {resp.status_code}: {resp.text[:100]}")
+            except Exception as e:
+                logger.warning(f"[Embedding] Jina API error with key ...{key[-6:]}: {e}")
+
+        # All Jina keys failed → circuit breaker + legacy BGE fallback
+        DualEmbeddingPipeline._jina_last_fail = now
+        logger.warning("[Embedding] All Jina keys failed. Falling back to legacy BGE.")
+        return self._bge_embed(text)
+
     def _bge_embed(self, text: str):
-        """Get BGE-Financial embedding via model server HTTP. Returns list or None."""
-        # Circuit breaker: skip if server failed recently
+        """LEGACY: BGE-Financial via model server HTTP. Emergency fallback only."""
         now = time.time()
         if now - DualEmbeddingPipeline._bge_last_fail < self._BGE_COOLDOWN_SECS:
+            return None
+        if not DualEmbeddingPipeline._bge_server_active:
             return None
 
         try:
             resp = DualEmbeddingPipeline._http_client.post(
                 f"{MODEL_SERVER_URL}/embed/bge",
-                json={"texts": [text]}
+                json={"texts": [text]},
+                timeout=60
             )
             resp.raise_for_status()
             embeddings = resp.json().get("embeddings", [])
             if embeddings and len(embeddings[0]) > 0:
                 return embeddings[0]
-            logger.warning("[Embedding] BGE server returned empty embedding")
             return None
         except Exception as e:
             DualEmbeddingPipeline._bge_last_fail = now
-            logger.warning(f"[Embedding] BGE server call failed: {e}")
+            logger.warning(f"[Embedding] Legacy BGE server call failed: {e}")
             return None
 
     def get_embeddings(self, text: str) -> dict:
@@ -246,8 +337,8 @@ class DualEmbeddingPipeline:
         # 2. Generate Embeddings (Cache Miss)
         logger.debug("Cache miss. Generating Dual Embeddings...")
 
-        # BGE-Financial via model server HTTP
-        bge_emb = self._bge_embed(text)
+        # Phase 23: Jina Embedding v3 (primary) → legacy BGE (fallback)
+        bge_emb = self._jina_embed(text)
 
         # Gemini API (with key rotation + fallback)
         gemini_emb = None

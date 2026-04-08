@@ -22,19 +22,21 @@ COIN_MAPPINGS = {
 
 # Phase 7: Tier Weighting - Give higher weight to established crypto news sites
 # Tier weights for sentiment aggregation
+# Keys MUST match RSS_FEEDS dict keys in rss_fetcher.py (case-insensitive via .lower())
 TIER_WEIGHTS = {
-    # Tier 1 — crypto prime
-    "coindesk.com": 1.0, "cointelegraph.com": 1.0, "decrypt.co": 1.0, "theblock.co": 1.0,
+    # Tier 1 — crypto prime (RSS_FEEDS key names, lowercased)
+    "coindesk": 1.0, "cointelegraph_all": 1.0, "decrypt": 1.0, "the_block": 1.0,
     # Tier 2 — crypto secondary
-    "cryptoslate.com": 0.8, "cryptopotato.com": 0.8, "cryptonews.com": 0.8,
+    "cryptoslate": 0.8, "cryptopotato": 0.8, "cryptonews": 0.8,
+    "bitcoin_magazine": 0.8, "dailyhodl": 0.8, "utoday": 0.8, "coinjournal": 0.8,
     "alphavantage": 0.8,
-    # Tier 2.5 — CryptoPanic replacements (RSS, API key gerektirmez)
-    "newsbtc.com": 0.8, "bitcoinist.com": 0.8, "beincrypto.com": 0.8,
-    "blockworks.co": 0.9, "messari.io": 0.9,  # Blockworks+Messari daha analitik
-    "blog.coingecko.com": 0.7, "defillama.com": 0.7,
+    # Tier 2.5 — CryptoPanic replacements
+    "newsbtc": 0.8, "bitcoinist": 0.8, "beincrypto": 0.8,
+    "blockworks": 0.9, "messari": 0.9,  # Blockworks+Messari daha analitik
+    "coingecko_blog": 0.7, "defillama_news": 0.7,
     # Tier 3 — macro + DeFi niche
-    "chaingpt.org": 0.6, "finance.yahoo.com": 0.6,
-    "rekt.news": 0.7, "weekinethereumnews.com": 0.7,
+    "cnbc_finance": 0.6, "fox_business": 0.6, "wsj_markets": 0.6, "investing_com": 0.6,
+    "rekt_news": 0.7, "week_in_ethereum": 0.7,
 }
 
 # Phase 14 imports

@@ -3,12 +3,10 @@ import math
 import sqlite3
 import logging
 import time
-import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 from db import get_db_connection
-from ai_config import MODEL_SERVER_URL
 try:
     from rag_embedding import DualEmbeddingPipeline
 except Exception as _imp_err:
@@ -65,21 +63,30 @@ class HybridRetriever:
         if self.embedder is None:
             logger.error("[HybridRetriever] DualEmbeddingPipeline unavailable. Search will be degraded.")
 
-        # FlashRank + ColBERT via model server HTTP (replaces in-process loading)
-        self._flashrank_http = httpx.Client(timeout=60)  # FlashRank is fast but give breathing room
+        # Phase 23: FlashRank in-process (200MB, always warm) + Jina Reranker v3 API
         self._flashrank_last_fail = 0.0
         self._flashrank_available = False
-        self.colbert_reranker = None
+        self._flashrank_ranker = None
+        self.colbert_reranker = None  # Now actually Jina Reranker v3 (class kept for compat)
+
+        # FlashRank: load in-process (no model server needed)
         try:
-            health_resp = self._flashrank_http.get(f"{MODEL_SERVER_URL}/health")
-            health = health_resp.json()
-            self._flashrank_available = health.get("flashrank") == "active"
-            if health.get("colbert") == "active":
-                from colbert_reranker import ColBERTReranker
-                self.colbert_reranker = ColBERTReranker()
-            logger.info(f"[HybridRetriever] Model server health: {health}")
+            from flashrank import Ranker, RerankRequest as FlashRankRerankRequest
+            self._flashrank_ranker = Ranker(model_name="ms-marco-MiniLM-L-6-v2")
+            self._FlashRankRerankRequest = FlashRankRerankRequest
+            self._flashrank_available = True
+            logger.info("[HybridRetriever] FlashRank loaded in-process (~200MB)")
         except Exception as e:
-            logger.warning(f"[HybridRetriever] Model server unavailable: {e}. FlashRank/ColBERT disabled.")
+            self._FlashRankRerankRequest = None
+            logger.warning(f"[HybridRetriever] FlashRank import failed: {e}. Reranking = Jina only.")
+
+        # Jina Reranker v3 (ColBERTReranker class now wraps Jina API)
+        try:
+            from colbert_reranker import ColBERTReranker
+            self.colbert_reranker = ColBERTReranker()
+            logger.info("[HybridRetriever] Jina Reranker v3 initialized (via ColBERTReranker wrapper)")
+        except Exception as e:
+            logger.warning(f"[HybridRetriever] Jina Reranker init failed: {e}")
 
         try:
             from binary_quantizer import BinaryQuantizer
@@ -480,22 +487,23 @@ class HybridRetriever:
         # Phase 3.15: Temporal Decay — penalize old news before reranking
         passages = self._apply_temporal_decay(passages)
 
-        # 4. Multi-Reranker Ensemble (via model server HTTP)
+        # 4. Multi-Reranker Ensemble (Phase 23: FlashRank in-process + Jina v3 API)
         flashrank_results = []
-        if self._flashrank_available and (time.time() - self._flashrank_last_fail >= 60):
+        if self._flashrank_available and self._flashrank_ranker and (time.time() - self._flashrank_last_fail >= 60):
             try:
+                # FlashRank in-process: RerankRequest API (same as model_server used)
                 doc_texts = [p.get("text", p.get("content", "")) for p in passages]
-                resp = self._flashrank_http.post(
-                    f"{MODEL_SERVER_URL}/rerank/flashrank",
-                    json={"query": query, "documents": doc_texts, "top_k": len(passages)}
-                )
-                resp.raise_for_status()
-                server_results = resp.json().get("results", [])
-                for sr in server_results:
-                    idx = sr.get("index", 0)
+                flash_passages = [{"id": i, "text": t} for i, t in enumerate(doc_texts)]
+                flash_req = self._FlashRankRerankRequest(query=query, passages=flash_passages)
+                flash_output = self._flashrank_ranker.rerank(flash_req)
+                for item in flash_output:
+                    idx = item.get("id", 0) if isinstance(item, dict) else getattr(item, "id", 0)
+                    score = item.get("score", 0.0) if isinstance(item, dict) else getattr(item, "score", 0.0)
+                    if isinstance(idx, str):
+                        idx = int(idx)
                     if 0 <= idx < len(passages):
                         scored = passages[idx].copy()
-                        scored["score"] = sr.get("score", 0.0)
+                        scored["score"] = score
                         flashrank_results.append(scored)
                 if flashrank_results:
                     max_score = max(float(doc.get("score", 0.0)) for doc in flashrank_results)
@@ -505,7 +513,7 @@ class HybridRetriever:
                         doc["flashrank_normalized"] = (float(doc.get("score", 0.0)) - min_score) / range_score
             except Exception as e:
                 self._flashrank_last_fail = time.time()
-                logger.warning(f"[HybridRetriever] FlashRank server call failed: {e}")
+                logger.warning(f"[HybridRetriever] FlashRank in-process call failed: {e}")
                     
         colbert_results = []
         if self.colbert_reranker:

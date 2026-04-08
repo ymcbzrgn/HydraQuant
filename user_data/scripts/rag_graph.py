@@ -36,16 +36,35 @@ logger = logging.getLogger(__name__)
 _signal_stats = {"ai": 0, "fallback": 0, "voting": 0, "timeout": 0, "total": 0}
 
 # =============================================================================
-# MODEL SERVER HEALTH CHECK — BGE, ColBERT, FlashRank served via HTTP
+# Phase 23: JINA API HEALTH CHECK (replaces model server BGE/ColBERT)
+# FlashRank now runs in-process (hybrid_retriever.py), no model server needed.
 # =============================================================================
 try:
     import httpx as _httpx
-    from ai_config import MODEL_SERVER_URL as _MS_URL
-    _ms_resp = _httpx.get(f"{_MS_URL}/health", timeout=5)
-    _ms_health = _ms_resp.json()
-    logger.info(f"[STARTUP] Model server ({_MS_URL}): {_ms_health}")
-except Exception as _ms_e:
-    logger.warning(f"[STARTUP] Model server unavailable: {_ms_e}. BGE/ColBERT/FlashRank will be disabled — FTS5+Gemini fallback active.")
+    from ai_config import JINA_API_KEYS, JINA_API_URL
+    _jina_ok = False
+    if JINA_API_KEYS:
+        _jina_resp = _httpx.post(
+            f"{JINA_API_URL}/embeddings",
+            headers={"Authorization": f"Bearer {JINA_API_KEYS[0]}", "Content-Type": "application/json"},
+            json={"model": "jina-embeddings-v3", "input": ["startup"], "dimensions": 768},
+            timeout=10
+        )
+        if _jina_resp.status_code == 200:
+            logger.info(f"[STARTUP] Jina Embedding API OK ({len(JINA_API_KEYS)} keys)")
+            _jina_ok = True
+        else:
+            logger.warning(f"[STARTUP] Jina API returned {_jina_resp.status_code}. Trying legacy model server...")
+    if not _jina_ok:
+        # Jina keys missing OR Jina returned non-200 → try legacy model server
+        try:
+            from ai_config import MODEL_SERVER_URL as _MS_URL
+            _ms_resp = _httpx.get(f"{_MS_URL}/health", timeout=5)
+            logger.info(f"[STARTUP] Legacy model server: {_ms_resp.json()}")
+        except Exception:
+            logger.warning("[STARTUP] Legacy model server also unavailable. FTS5+Gemini fallback active.")
+except Exception as _startup_e:
+    logger.warning(f"[STARTUP] Jina API + model server both unavailable: {_startup_e}. FTS5+Gemini fallback active.")
 
 # =============================================================================
 # MODULE-LEVEL SINGLETONS — created ONCE at import/startup, reused forever.

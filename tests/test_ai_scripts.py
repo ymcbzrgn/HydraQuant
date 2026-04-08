@@ -1496,6 +1496,8 @@ def test_binary_quantizer_hamming():
 
 
 def test_colbert_reranker_scores(monkeypatch):
+    """Phase 23: ColBERTReranker now wraps Jina Reranker v3 API.
+    Tests Jina API path with mocked HTTP response."""
     from colbert_reranker import ColBERTReranker
 
     # Mock __init__ to avoid HTTP client setup
@@ -1503,26 +1505,32 @@ def test_colbert_reranker_scores(monkeypatch):
 
     model = ColBERTReranker.__new__(ColBERTReranker)
 
-    # Mock HTTP response: server returns results sorted by text length (score=len)
-    class MockResponse:
-        def raise_for_status(self):
-            pass
+    # Mock Jina Reranker v3 API response
+    class MockJinaResponse:
+        status_code = 200
 
         def json(self):
             return {
                 "results": [
-                    {"index": 1, "score": 35.0, "text": "very long document here indeed yes"},
-                    {"index": 0, "score": 10.0, "text": "short text"},
+                    {"index": 1, "relevance_score": 0.95, "document": {"text": "very long document here indeed yes"}},
+                    {"index": 0, "relevance_score": 0.30, "document": {"text": "short text"}},
                 ]
             }
 
     class MockClient:
         def post(self, url, **kwargs):
-            return MockResponse()
+            return MockJinaResponse()
 
     model._http_client = MockClient()
-    model._last_fail = 0.0
-    model._COOLDOWN_SECS = 60
+    model._jina_last_fail = 0.0
+    model._colbert_last_fail = 0.0
+    model._JINA_COOLDOWN_SECS = 15
+    model._COLBERT_COOLDOWN_SECS = 60
+
+    # Provide Jina keys so it takes the Jina path
+    monkeypatch.setattr("colbert_reranker.JINA_API_KEYS", ["fake_key_for_test"])
+    monkeypatch.setattr("colbert_reranker.JINA_API_URL", "https://api.jina.ai/v1")
+    monkeypatch.setattr("colbert_reranker.JINA_RERANK_MODEL", "jina-reranker-v3")
 
     docs = [
         {"text": "short text", "id": "1"},
