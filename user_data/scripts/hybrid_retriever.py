@@ -72,7 +72,7 @@ class HybridRetriever:
         # FlashRank: load in-process (no model server needed)
         try:
             from flashrank import Ranker, RerankRequest as FlashRankRerankRequest
-            self._flashrank_ranker = Ranker(model_name="ms-marco-MiniLM-L-6-v2")
+            self._flashrank_ranker = Ranker()  # default model — specific name gives 404 on HuggingFace
             self._FlashRankRerankRequest = FlashRankRerankRequest
             self._flashrank_available = True
             logger.info("[HybridRetriever] FlashRank loaded in-process (~200MB)")

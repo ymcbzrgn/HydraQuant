@@ -95,7 +95,6 @@ def extract_json(text) -> dict | None:
                 return {"_array": result}
         except (json.JSONDecodeError, ValueError):
             # Tier C.1: Handle non-standard JSON like [+0.7, -0.3] (+ prefix invalid in JSON)
-            import re
             fixed = re.sub(r'(?<=[\[,\s])\+(?=\d)', '', candidate)  # remove + before numbers
             try:
                 result = json.loads(fixed)
