@@ -94,7 +94,16 @@ def extract_json(text) -> dict | None:
                 logger.debug("[json_utils] Extracted JSON array via bracket extraction")
                 return {"_array": result}
         except (json.JSONDecodeError, ValueError):
-            pass
+            # Tier C.1: Handle non-standard JSON like [+0.7, -0.3] (+ prefix invalid in JSON)
+            import re
+            fixed = re.sub(r'(?<=[\[,\s])\+(?=\d)', '', candidate)  # remove + before numbers
+            try:
+                result = json.loads(fixed)
+                if isinstance(result, list):
+                    logger.debug("[json_utils] Extracted JSON array via +sign fix")
+                    return {"_array": result}
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     logger.warning(f"[json_utils] All extraction tiers failed. Raw text: {cleaned[:200]}")
     return None

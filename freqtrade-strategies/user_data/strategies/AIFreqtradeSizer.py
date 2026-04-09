@@ -272,7 +272,9 @@ class AIFreqtradeSizer(IStrategy):
         """
         signal, tag = super().get_entry_signal(pair, timeframe, dataframe)
         if signal:
-            logger.warning(f"[ENTRY-SIGNAL] {pair}: DETECTED {signal} tag={tag}")
+            # Only log if pair is NOT locked (avoid 14K+ spam lines per day)
+            if not self.is_pair_locked(pair):
+                logger.info(f"[ENTRY-SIGNAL] {pair}: {signal} tag={tag}")
         else:
             if len(dataframe) > 0:
                 latest = dataframe.iloc[-1]
@@ -773,8 +775,10 @@ class AIFreqtradeSizer(IStrategy):
                     pass
 
             chart = compute_chart_features(dataframe, df_4h=df_4h, df_1d=df_1d, include_signature=True)
-            for key, val in chart.items():
-                dataframe[f'%-{key}'] = val
+            # Use pd.concat to avoid DataFrame fragmentation (193 columns at once, not one by one)
+            import pandas as _pd
+            chart_df = _pd.DataFrame({f'%-{k}': [v] * len(dataframe) for k, v in chart.items()}, index=dataframe.index)
+            dataframe = _pd.concat([dataframe, chart_df], axis=1)
             logger.info(f"[Phase26:ChartFeatures] {len(chart)} features computed for {pair}")
         except Exception as e:
             logger.warning(f"[Phase26:ChartFeatures] Failed: {e}")

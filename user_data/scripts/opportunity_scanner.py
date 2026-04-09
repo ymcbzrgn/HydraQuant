@@ -155,7 +155,7 @@ class OpportunityScanner:
         Falls back to latest opportunity_scores if available.
         """
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             if pairs:
                 placeholders = ",".join("?" for _ in pairs)
@@ -187,7 +187,7 @@ class OpportunityScanner:
 
         # Fallback to DB
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT composite_score FROM opportunity_scores "
@@ -527,7 +527,7 @@ class OpportunityScanner:
     def _get_fear_greed(self) -> Optional[int]:
         """Read latest F&G from DB."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
@@ -542,7 +542,7 @@ class OpportunityScanner:
         if not results:
             return
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
 
             # Ensure table exists

@@ -32,7 +32,7 @@ class SystemMonitor:
     def _init_table(self):
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +58,7 @@ class SystemMonitor:
         conn = None
         try:
             meta_json = json.dumps(metadata) if metadata else None
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute(
                 "INSERT INTO system_metrics (metric_name, metric_value, metadata_json) VALUES (?, ?, ?)",
                 (name, value, meta_json)
@@ -75,7 +75,7 @@ class SystemMonitor:
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
 
@@ -280,7 +280,7 @@ class SystemMonitor:
         """Hourly metric summaries for chart data."""
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -320,7 +320,7 @@ class SystemMonitor:
         """Remove metrics older than max_age_days."""
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             conn.execute(
                 "DELETE FROM system_metrics WHERE timestamp < datetime('now', ?)",
                 (f"-{max_age_days} days",)
