@@ -337,7 +337,7 @@ class DataPipeline:
         """Get current BTC regime from evidence_audit_log."""
         try:
             from ai_config import AI_DB_PATH
-            conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+            conn = sqlite3.connect(AI_DB_PATH, timeout=30)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT regime FROM evidence_audit_log WHERE pair LIKE 'BTC%' "
