@@ -8,6 +8,7 @@ lancedb>=0.30.0              # Embedded vector DB, Apache 2.0, Lance format
 
 # --- Graph Database ---
 grafeo>=0.5.17               # Embedded graph DB, Rust-native, Cypher+GQL+SPARQL
+pyzmq>=27.0.0                # ZeroMQ IPC for multi-process Grafeo access
 
 # --- Analytics Engine ---
 duckdb>=1.5.0                # Embedded OLAP, MIT, columnar analytics
