@@ -98,6 +98,13 @@ class PipelineScheduler:
 
         self.scheduler = BackgroundScheduler(timezone="UTC")
 
+        # Phase 28: Start Grafeo ZMQ broker (this process is the single writer)
+        try:
+            from graph_store import start_graph_broker
+            start_graph_broker()
+        except Exception as e:
+            logger.warning(f"[Scheduler] Grafeo broker start failed: {e}")
+
         # Every 5 minutes: RSS + FNG + Sentiment
         self.scheduler.add_job(
             self._fetch_and_analyze,
