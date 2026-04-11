@@ -1,5 +1,85 @@
 # Phase 26: CAAT — Cognitive Architecture for Autonomous Trading
 
+---
+
+## CHANGELOG & DURUM TAKIBI (Son guncelleme: 11 Nisan 2026)
+
+### SPRINT 1: ALGI + BELIRSIZLIK + ALTYAPI — TAMAMLANDI ve CANLIDA
+
+| Task | Dosya | Satir | Durum | Notlar |
+|------|-------|-------|-------|--------|
+| 1A | chart_features.py — Candle DNA | 41-77 | DONE (23 feature) | Plan: ~20 feature |
+| 1A | chart_features.py — Multi-TF | 84-148 | DONE (~20 feature) | Plan: 30-50. Eksik: MACD, Ichimoku |
+| 1B | chart_features.py — VPVR | 155-218 | DONE (8 feature) | POC/VAH/VAL tamam |
+| 1B | chart_features.py — SMC | 225-305 | DONE (16 feature) | BOS/CHoCH/FVG/OB/Liq hepsi var |
+| 1C | chart_features.py — Hurst | 312-387 | DONE (5 feature) | R/S analysis |
+| 1C | chart_features.py — Path Sig | 394-441 | DONE (120 feature) | depth=4 (plandan fazla!) |
+| 1D | test_chart_features.py | 252 satir | DONE (23 test) | Plandan fazla (150→252) |
+| 2A | catboost_model.py | — | **YAPILMADI** | Standalone dosya yok. Sprint 2'ye borc |
+| 2B | CatBoost feature pipeline | — | KISMI | triple_perception.py icinde inference stub var (L275-340) |
+| 2C | CatBoost training script | — | **YAPILMADI** | Sprint 2'ye borc |
+| 2D | CatBoost deploy | — | **YAPILMADI** | Model dosyasi yok (catboost_signal_v1.cbm) |
+| 3A | ttm_perception.py | 298 satir | DONE | granite-timeseries-ttm-r2, 64-dim embedding |
+| 3B | chronos_perception.py | 225 satir | DONE | chronos-bolt-small, P10/P50/P90 |
+| 3C | triple_perception.py | 414 satir | DONE | TTM+Chronos+CatBoost fusion hub |
+| 3D | Triple Perception entegrasyon | — | KISMI | AIFreqtradeSizer DONE (L811-839), rag_graph.py YAPILMADI |
+| 4A | ood_detector.py | 262 satir | DONE | MarketOODDetector, Mahalanobis |
+| 4B | conformal_calibrator.py | 252 satir | DONE | CQR+ACI, target_coverage=0.95 |
+| 4C | deep_ensemble.py | 284 satir | DONE | 5x SmallMLP(64→32→1) |
+| 4D | dual_axis_calibrator.py | 168 satir | DONE | CatBoost prob x CQR interval |
+| 5A | pheromone_field.py | 294 satir | DONE | deposit/read/cleanup, thread-safe |
+| 5B | Pheromone entegrasyon | — | KISMI | triple_perception+scheduler DONE, neural_organism+rag_graph YAPILMADI |
+| 5C | predictive_interoception.py | 299 satir | DONE | Proaktif alertler calisiyor. SmallMLP YOK (basit prediktor) |
+| 5D | Entegrasyon testi | — | **YAPILMADI** | Zero test coverage for Phase 26 modules (chart_features haric) |
+| 5E | requirements-phase26.txt | — | **YAPILMADI** | Dosya yok |
+
+**Sprint 1 Ozet:**
+- 11/24 task DONE, 3/24 KISMI, 5/24 YAPILMADI
+- Toplam yeni kod: ~3046 satir (plan: ~1800 — %69 fazla)
+- Toplam test: 252 satir (sadece chart_features icin, geri kalan SIFIR)
+- 193 chart feature CALISIYOR (plan: 130-230)
+- TTM + Chronos CALISIYOR, CatBoost BEKLENIYOR (model yok)
+- Pheromone + Interoception CALISIYOR (scheduler'da 15dk/30dk job)
+- Hormonlar: cortisol=1.0, dopamine=1.05, serotonin=0.786, adrenaline=1.0
+
+**Sprint 1 Borclari (Sprint 2'de veya Phase 28 sonrasi yapilacak):**
+1. CatBoost training pipeline (2A-2D) — model dosyasi olusturulmali
+2. rag_graph.py entegrasyonu — Triple Perception ve Pheromone sadece comment var
+3. neural_organism.py pheromone entegrasyonu — sifir kod
+4. Entegrasyon testleri — chart_features haric hicbir Phase 26 modulu test edilmedi
+5. requirements-phase26.txt — dependency dosyasi olusturulmali
+6. Interoception SmallMLP — basit prediktor kullanildi, plan MLP idi
+
+### PHASE 28: DATABASE EVOLUTION — SPRINT 2'DEN ONCE YAPILACAK
+
+Phase 28 araya giriyor (docs/PHASE28_DATABASE_EVOLUTION.md):
+- ChromaDB → LanceDB (vector search)
+- Grafeo (graph DB — Causal, MAGMA, Agent networks)
+- DuckDB (analytics — backtest, OHLCV)
+- Zvec (Alibaba, experimental 1 collection)
+- SQLite connection pooling + db.py v2 merkezilestirme
+- Tahmini sure: 7-12 gun
+- **Sprint 2 bu bitmeden BASLAMAZ**
+
+### SPRINT 2: KARAR + NEDENSELLIK + OTONOM YASAM — BEKLIYOR
+
+Tum 20 task (6A-10E) BEKLIYOR durumda. Hicbiri baslamadi. Dosyalar olusturulmadi.
+
+**Sprint 2'de EK olarak yapilacaklar (Sprint 1 borclari):**
+- CatBoost training pipeline (2A-2D detaylari TANIMLANMALI)
+- rag_graph.py Phase 26 entegrasyonu
+- neural_organism.py pheromone entegrasyonu
+- Phase 26 modul testleri
+
+**Sprint 2'de KAPSAMDA OLMAYAN isler (Sprint 3+ veya gelecek phase):**
+- Process 12: Evolutionary Architecture Search (priority #21)
+- Process 14: Market Microstructure Intelligence (priority #16)
+- Process 15: Cerebellum 24-slot timing (priority #22)
+- Novel Contribution #8: Hormonal Market Making (Process 14 gerektirir)
+- Model Risk Engine, Post-Trade Court, Ablation League Table (dokumanlanmis ama sprint'e atanmamis)
+
+---
+
 ## A Manifesto on Living Financial Intelligence
 
 > "The measure of intelligence is the ability to change." — Albert Einstein

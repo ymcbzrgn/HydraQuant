@@ -806,8 +806,7 @@ def analyze_sentiment(state: GraphState):
     
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         c = conn.cursor()
 
         # Fear & Greed Index (live from fng_fetcher.py)
@@ -1739,9 +1738,10 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         except Exception:
             pass
 
-    # Phase 26: Triple Perception moved to strategy (AIFreqtradeSizer.populate_entry_trend)
-    # because DataFrame is only available there — rag_graph receives HTTP dict, not DataFrame.
-    # Perception results arrive via pheromone_field deposits (read by Evidence Engine if needed).
+    # Phase 26: Triple Perception runs in strategy (AIFreqtradeSizer.populate_entry_trend)
+    # and deposits results to pheromone_field (SIGNAL_PREDICTION, SIGNAL_UNCERTAINTY).
+    # Phase 28: Evidence Engine now reads these pheromone deposits and adjusts confidence.
+    # Flow: Strategy→TriplePerception→PheromoneField→EvidenceEngine→rag_graph
 
     # Phase 20: Evidence Engine ALWAYS runs first (50ms, LLM-free)
     ee_result = None
@@ -1926,12 +1926,12 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
             from neural_organism import _p as _np
         except ImportError:
             def _np(pid, fb=0.5, regime="_global"): return fb
-        if checks.get("chromadb") is False and confidence > _np("rag.health.chroma_floor", 0.40):
+        if checks.get("lancedb") is False and confidence > _np("rag.health.chroma_floor", 0.40):
             original_conf = confidence
             confidence = max(confidence * _np("rag.health.chroma_penalty", 0.85),
                             _np("rag.health.chroma_floor", 0.40))
-            reasoning += f" [DEGRADED: ChromaDB down, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
-            logger.warning(f"[Phase19:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (ChromaDB down)")
+            reasoning += f" [DEGRADED: LanceDB down, confidence reduced from {original_conf:.2f} to {confidence:.2f}]"
+            logger.warning(f"[Phase28:Health] {pair} confidence degraded {original_conf:.2f}→{confidence:.2f} (LanceDB down)")
     except Exception as e:
         logger.debug(f"[Phase19:Health] Health check skipped: {e}")
 
@@ -1999,6 +1999,7 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
 
 import threading as _threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from db import get_connection, get_db_connection
 
 # Concurrency limiter: max 2 coins processing the full 5-agent graph in parallel.
 # Each coin spawns 5 LLM calls (LangGraph parallel nodes). Without this,

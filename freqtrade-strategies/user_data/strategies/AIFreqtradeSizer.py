@@ -1129,9 +1129,23 @@ class AIFreqtradeSizer(IStrategy):
             
             # Görev 1 Fix: Use PositionSizer to calculate fraction, which respects BayesianKelly and Autonomy logic
             fraction = self._position_sizer.calculate_stake_fraction(confidence)
-            
+
             # Let it scale down to "dust" sizes if confidence is terribly low
             final_stake = final_stake * fraction
+
+            # Phase 28 Fix: Apply Triple Perception sizing_multiplier
+            # This is computed by OOD + CQR + DeepEnsemble + Chronos uncertainty
+            # and was previously calculated but never applied to actual trade size
+            sizing_mult = ai_decision.get("sizing_multiplier", 1.0)
+            if hasattr(self, '_perception_cache') and pair in self._perception_cache:
+                sizing_mult = self._perception_cache[pair].get("sizing_multiplier", sizing_mult)
+            if sizing_mult != 1.0:
+                old_stake = final_stake
+                final_stake *= sizing_mult
+                logger.info(
+                    f"[Phase28:SizingMultiplier] {pair} stake adjusted: "
+                    f"${old_stake:.2f} × {sizing_mult:.2f} = ${final_stake:.2f}"
+                )
             
             # Phase 3.5.3: Risk Budget scaling — shrink if budget running low
             final_stake = self.risk_budget.scale_position(final_stake)

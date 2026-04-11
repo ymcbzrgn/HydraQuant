@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Any, Tuple
 
 sys.path.append(os.path.dirname(__file__))
 from ai_config import AI_DB_PATH
+from db import get_connection, get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -711,9 +712,7 @@ class Hippocampus:
         self.db_path = db_path
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     @staticmethod
@@ -914,9 +913,7 @@ class ImmuneMemory:
         self._consec_cache: Dict[str, int] = {}
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def record_loss(self, pair: str, loss_pct: float, regime: str):
@@ -1073,8 +1070,7 @@ class PredictiveModel:
     def predict_expected_pnl(self, fingerprint: str) -> float:
         """Given fingerprint, predict expected PnL from historical episodes."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             rows = conn.execute(
                 "SELECT outcome_pnl FROM hippocampus_episodes "
                 "WHERE fingerprint = ? ORDER BY timestamp DESC LIMIT 10",
@@ -1260,7 +1256,7 @@ class AdaptiveImmunity:
                 "first_seen": datetime.now(tz=timezone.utc).isoformat(),
             }
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = get_db_connection(self.db_path)
             cell = self._bcells[fingerprint]
             conn.execute(
                 "INSERT OR REPLACE INTO immune_bcells "
@@ -1291,8 +1287,7 @@ class AdaptiveImmunity:
     def load_from_db(self):
         """Load B-cells from SQLite on startup."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             rows = conn.execute("SELECT * FROM immune_bcells").fetchall()
             conn.close()
             for r in rows:
@@ -1323,8 +1318,7 @@ class DefaultModeNetwork:
 
         # 1. Counterfactual: what if the worst trades had different params?
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             worst = conn.execute(
                 "SELECT * FROM hippocampus_episodes "
                 "ORDER BY outcome_pnl ASC LIMIT 5").fetchall()
@@ -1387,8 +1381,7 @@ class SleepConsolidation:
 
         # 1. EXPERIENCE REPLAY: review recent episodes
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             recent = conn.execute(
                 "SELECT * FROM hippocampus_episodes "
                 "ORDER BY timestamp DESC LIMIT 50").fetchall()
@@ -1451,7 +1444,7 @@ class NeuroEvolution:
         params = {f"{pid}:{r}": n.current_val for (pid, r), n in neurons.items()
                   if r == "_global"}  # Only global regime for simplicity
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = get_db_connection(self.db_path)
             conn.execute(
                 "INSERT INTO evolution_population "
                 "(params_json, fitness, generation, created_at, is_active) "
@@ -1470,8 +1463,7 @@ class NeuroEvolution:
     def get_best_genome(self) -> Optional[Dict[str, float]]:
         """Get the highest-fitness genome from the population."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT params_json, fitness FROM evolution_population "
                 "ORDER BY fitness DESC LIMIT 1").fetchone()
@@ -1554,97 +1546,12 @@ class NeuralOrganism:
     # ─── SQLite Setup ───
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _ensure_tables(self):
+        """Tables are created by db.init_db(). Here we only seed required rows."""
         with self._get_conn() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS neuron_state (
-                    param_id TEXT NOT NULL, organ TEXT NOT NULL,
-                    regime TEXT NOT NULL DEFAULT '_global',
-                    current_val REAL NOT NULL, default_val REAL NOT NULL,
-                    min_bound REAL NOT NULL, max_bound REAL NOT NULL,
-                    alpha REAL DEFAULT 2.0, beta_param REAL DEFAULT 2.0,
-                    prior_strength REAL DEFAULT 5.0, frozen INTEGER DEFAULT 0,
-                    update_count INTEGER DEFAULT 0,
-                    activity_ema REAL DEFAULT 0.0, theta_m REAL DEFAULT 0.0,
-                    last_updated TEXT,
-                    PRIMARY KEY (param_id, regime)
-                );
-                CREATE TABLE IF NOT EXISTS neuron_synapses (
-                    source TEXT NOT NULL, target TEXT NOT NULL,
-                    weight REAL DEFAULT 0.5, synapse_type TEXT DEFAULT 'excitatory',
-                    fire_count INTEGER DEFAULT 0,
-                    PRIMARY KEY (source, target)
-                );
-                CREATE TABLE IF NOT EXISTS hormone_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    cortisol REAL DEFAULT 1.0, dopamine REAL DEFAULT 1.0,
-                    serotonin REAL DEFAULT 1.0, adrenaline REAL DEFAULT 1.0,
-                    market_stress REAL DEFAULT 0.0, portfolio_health REAL DEFAULT 0.5,
-                    info_quality REAL DEFAULT 0.5, updated_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS hippocampus_episodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT, fingerprint TEXT NOT NULL,
-                    outcome_pnl REAL NOT NULL, regime TEXT, timestamp TEXT
-                );
-                CREATE TABLE IF NOT EXISTS amygdala_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    fear_level REAL DEFAULT 0.0, peak_fear REAL DEFAULT 0.0,
-                    peak_time TEXT, tier TEXT DEFAULT 'normal', updated_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS immune_memory (
-                    pair TEXT NOT NULL, loss_pct REAL NOT NULL,
-                    ban_until TEXT, consecutive_losses INTEGER DEFAULT 1,
-                    regime TEXT, timestamp TEXT
-                );
-                CREATE TABLE IF NOT EXISTS organism_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_pair TEXT, trade_pnl REAL, hormones TEXT,
-                    fear_tier TEXT, overrides TEXT, phase TEXT, timestamp TEXT
-                );
-                -- Phase 25: New tables
-                CREATE TABLE IF NOT EXISTS cerebellum_hours (
-                    hour INTEGER PRIMARY KEY, wins INTEGER DEFAULT 1,
-                    losses INTEGER DEFAULT 1, avg_pnl REAL DEFAULT 0.0, updated_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS interoception_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    param_drift REAL DEFAULT 0.0, belief_width REAL DEFAULT 0.5,
-                    pred_error REAL DEFAULT 0.5, hormone_stability REAL DEFAULT 1.0,
-                    trade_freq REAL DEFAULT 0.0, win_rate REAL DEFAULT 0.5,
-                    data_completeness REAL DEFAULT 0.5, consec_dir INTEGER DEFAULT 0,
-                    updated_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS immune_bcells (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    threat_fingerprint TEXT NOT NULL UNIQUE,
-                    severity REAL DEFAULT 0.0, encounter_count INTEGER DEFAULT 1,
-                    last_encounter TEXT, antibody_strength REAL DEFAULT 1.0
-                );
-                CREATE TABLE IF NOT EXISTS evolution_population (
-                    genome_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    params_json TEXT NOT NULL, fitness REAL DEFAULT 0.0,
-                    novelty_score REAL DEFAULT 0.0, generation INTEGER DEFAULT 0,
-                    created_at TEXT, is_active INTEGER DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS sleep_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_date TEXT, episodes_replayed INTEGER,
-                    synapses_pruned INTEGER, habits_broken INTEGER,
-                    counterfactuals TEXT, duration_sec REAL, timestamp TEXT
-                );
-                CREATE TABLE IF NOT EXISTS dmn_discoveries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    discovery_type TEXT, description TEXT,
-                    param_ids TEXT, potential_improvement REAL, timestamp TEXT
-                );
-            """)
             # Seed hormones row if missing
             if conn.execute("SELECT COUNT(*) FROM hormone_state").fetchone()[0] == 0:
                 conn.execute("INSERT INTO hormone_state (id) VALUES (1)")
@@ -1843,6 +1750,23 @@ class NeuralOrganism:
         stake_pct = stake_amount / portfolio_value if portfolio_value > 0 else 0.01
         trade_hour = datetime.now(tz=timezone.utc).hour
 
+        # ═══ 0. PHEROMONE READ — Phase 28: Read perception signals ═══
+        perception_data = {}
+        try:
+            from pheromone_field import get_pheromone_field
+            _pfield = get_pheromone_field()
+            _tp_sig = _pfield.read("prediction")
+            perception_data = {
+                "signal": _tp_sig,
+                "uncertainty": _pfield.read_float("uncertainty", default=0.0),
+                "health": _pfield.read_float("organism_health", default=0.0),
+            }
+            # If perception indicates high uncertainty → preemptively raise cortisol
+            if perception_data["uncertainty"] > 0.7:
+                self.hormones.cortisol = min(self.hormones.cortisol + 0.1, 2.0)
+        except Exception:
+            pass
+
         # ═══ 1. SENSE — Proprioception + Interoception (deep self-awareness) ═══
         self_state = self.proprioception.assess(
             self._neurons, self._consec_wins, self._consec_losses)
@@ -1862,9 +1786,27 @@ class NeuralOrganism:
             consec_losses=self._consec_losses, active_sources=active_sources,
             balance_vs_peak=balance_vs_peak)
 
+        # Phase 28: Deposit hormone state to pheromone field
+        try:
+            _pfield.deposit("neural_organism", "HORMONE_STATE", {
+                "cortisol": self.hormones.cortisol,
+                "dopamine": self.hormones.dopamine,
+                "serotonin": self.hormones.serotonin,
+                "adrenaline": self.hormones.adrenaline,
+            }, half_life=600)  # 10 min decay
+        except Exception:
+            pass
+
         # ═══ 5. FEAR — Amygdala graduated response ═══
         fear_response = (self.amygdala.process_loss(pnl_pct) if not won
                          else {"fear_level": 0, "learning_mult": 1.0, "sizing_mult": 1.0, "tier": "normal"})
+
+        # Phase 28: Deposit fear level to pheromone field
+        try:
+            _pfield.deposit("neural_organism", "FEAR_LEVEL",
+                            fear_response.get("fear_level", 0.0), half_life=300)
+        except Exception:
+            pass
 
         # ═══ 6. MEMORY — Hippocampus store + recall ═══
         self.hippocampus.store_episode(pair, fingerprint, pnl_pct, regime)

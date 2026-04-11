@@ -26,6 +26,7 @@ from json_utils import extract_json_strict
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
+from db import get_db_connection
 
 # ── Evaluation Prompts ──────────────────────────────────────────────
 
@@ -117,9 +118,7 @@ class RAGQualityEvaluator:
         self._ensure_table()
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _ensure_table(self):
@@ -327,8 +326,7 @@ Overall Average:    {rows['avg']:.3f}"""
     def get_weekly_quality_report(self) -> dict:
         """Structured weekly quality report for scheduler feedback loop."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
 
             this_week = conn.execute("""
                 SELECT AVG(faithfulness) as f, AVG(context_precision) as cp,

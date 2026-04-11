@@ -22,6 +22,7 @@ from forgone_pnl_engine import ForgonePnLEngine
 from memo_rag import MemoRAG
 from bidirectional_rag import BidirectionalRAG
 from system_monitor import SystemMonitor
+from db import get_connection, get_db_connection
 
 app = FastAPI(title="Freqtrade AI API", version="1.0")
 
@@ -34,8 +35,7 @@ app.add_middleware(
 )
 
 def get_db_conn():
-    conn = sqlite3.connect(AI_DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     return conn
 
 @app.get("/api/ai/status")

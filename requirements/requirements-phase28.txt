@@ -1,0 +1,22 @@
+# Phase 28: Database Evolution Dependencies
+# Install: pip install -r requirements/requirements-phase28.txt
+#
+# ChromaDB → LanceDB migration + Grafeo graph + DuckDB analytics
+
+# --- Vector Search (replaces ChromaDB) ---
+lancedb>=0.30.0              # Embedded vector DB, Apache 2.0, Lance format
+
+# --- Graph Database ---
+grafeo>=0.5.17               # Embedded graph DB, Rust-native, Cypher+GQL+SPARQL
+
+# --- Analytics Engine ---
+duckdb>=1.5.0                # Embedded OLAP, MIT, columnar analytics
+
+# --- Experimental Vector (Alibaba) ---
+# zvec>=0.3.0                # Uncomment when ready to test Zvec (Apache 2.0)
+#                             # Currently experimental — 1 collection only
+
+# --- Already installed (Phase 26) ---
+# catboost>=1.2.7            # In requirements-phase26.txt
+# granite-tsfm               # In requirements-phase26.txt
+# chronos-forecasting        # In requirements-phase26.txt

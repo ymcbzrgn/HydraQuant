@@ -10,7 +10,8 @@ import time
 
 # Step 0: Ensure we use a temporary isolated database for the smoke test
 os.environ["AI_DB_PATH"] = "/tmp/smoke_db.sqlite"
-os.environ["CHROMA_PERSIST_DIR"] = "/tmp/smoke_chroma"
+os.environ["CHROMA_PERSIST_DIR"] = "/tmp/smoke_chroma"  # legacy
+os.environ["LANCE_DB_DIR"] = "/tmp/smoke_lancedb"
 
 # Add scripts directory to path to allow imports
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,9 +57,9 @@ def run_full_smoke_test() -> dict:
         init_db()
 
     def test_ai_config():
-        from ai_config import AI_DB_PATH, CHROMA_PERSIST_DIR
+        from ai_config import AI_DB_PATH, LANCE_DB_DIR
         assert AI_DB_PATH, "AI_DB_PATH is empty"
-        assert CHROMA_PERSIST_DIR, "CHROMA_PERSIST_DIR is empty"
+        assert LANCE_DB_DIR, "LANCE_DB_DIR is empty"
 
     def test_llm_router_import():
         from llm_router import LLMRouter

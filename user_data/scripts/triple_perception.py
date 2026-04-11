@@ -294,10 +294,21 @@ class TriplePerception:
         for i, v in enumerate(ttm_embedding[:64]):
             features[f"ttm_{i}"] = float(v)
 
-        # Evidence Engine sub-scores
+        # Evidence Engine sub-scores (both ee_ and sub_ prefixed for trainer compatibility)
         if ee_subscores:
             for k, v in ee_subscores.items():
                 features[f"ee_{k}"] = float(v)
+                features[f"sub_{k}"] = float(v)  # Phase 28: trainer uses sub_ prefix
+
+        # Phase 28: Add trainer-compatible features from result context
+        # These match catboost_trainer.py feature_names
+        features["confidence"] = features.get("ee_confidence", 0.5)
+        features["trust_score"] = features.get("ee_trust", 0.5)
+        features["max_cap"] = features.get("ee_max_cap", 0.35)
+        regime_map = {"trending_bull": 4, "ranging": 2, "transitional": 3,
+                      "trending_bear": 1, "high_volatility": 5}
+        features["regime_code"] = regime_map.get(
+            features.get("regime", "transitional"), 3)
 
         # Chart structure features
         if chart_features:

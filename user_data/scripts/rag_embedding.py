@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Constants
 from ai_config import AI_DB_PATH as DB_PATH, MODEL_SERVER_URL
 from ai_config import JINA_API_KEYS, JINA_API_URL, JINA_EMBED_MODEL, JINA_EMBED_DIM
+from db import get_connection, get_db_connection
 
 
 def _load_all_gemini_keys() -> list:
@@ -150,9 +151,7 @@ class DualEmbeddingPipeline:
             logger.error("[Embedding] Mode: NONE — no embedding backend available!")
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection()
         return conn
 
     def _hash_text(self, text: str) -> str:

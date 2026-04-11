@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_connection, get_db_connection
 
 # Phase 24: Neural Organism — adaptive parameters
 try:
@@ -179,52 +180,38 @@ class AgentPool:
         self.db_path = db_path
         self._llm = llm_router
         self._init_tables()
+        # Phase 28: Grafeo integration for agent relationship graph
+        self._graph_store = None
+        try:
+            from graph_store import get_graph_store
+            self._graph_store = get_graph_store()
+        except Exception:
+            pass
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _init_tables(self):
-        """Create agent memory and performance tables."""
+        """Ensure agent tables exist (idempotent)."""
         try:
             conn = self._get_conn()
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS agent_memory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    agent_type TEXT NOT NULL,
-                    pair TEXT NOT NULL,
-                    regime TEXT,
-                    signal TEXT NOT NULL,
-                    strength REAL,
-                    key_argument TEXT,
-                    evidence_engine_confidence REAL,
-                    final_outcome_pnl REAL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_mem_type "
-                        "ON agent_memory(agent_type, regime)")
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS agent_performance (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    agent_type TEXT NOT NULL,
-                    pair TEXT NOT NULL,
-                    regime TEXT,
-                    signal TEXT NOT NULL,
-                    outcome_pnl REAL,
-                    was_correct BOOLEAN,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_perf "
-                        "ON agent_performance(agent_type, regime)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS agent_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
+                pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL, strength REAL,
+                key_argument TEXT, evidence_engine_confidence REAL,
+                final_outcome_pnl REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS agent_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
+                pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL,
+                outcome_pnl REAL, was_correct BOOLEAN,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_mem_type ON agent_memory(agent_type, regime)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_perf ON agent_performance(agent_type, regime)")
             conn.commit()
             conn.close()
         except Exception as e:
-            logger.error(f"[AgentPool:Init] Table creation failed: {e}")
+            logger.error(f"[AgentPool:Init] Table init failed: {e}")
 
     # ═══════════════════════════════════════════════════════════
     # AGENT SELECTION
@@ -758,6 +745,19 @@ class AgentPool:
 
             conn.commit()
             conn.close()
+
+            # Phase 28: Record agent→pair relationship in Grafeo
+            if self._graph_store and updated > 0:
+                try:
+                    for row in rows:
+                        self._graph_store.add_edge(
+                            "entity", row["agent_type"].lower(), "traded",
+                            pair.lower().replace("/", "_"),
+                            weight=abs(outcome_pnl) / 10.0,
+                            metadata={"pnl": outcome_pnl, "signal": row["signal"],
+                                      "regime": regime or "unknown"})
+                except Exception:
+                    pass
 
             logger.info(f"[AgentPool:Outcome] {pair} → {outcome_pnl:+.2f}%, "
                        f"updated {updated} agent records")

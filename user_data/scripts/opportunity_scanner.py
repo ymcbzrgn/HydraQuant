@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 # Phase 24: Neural Organism — adaptive parameters
 try:
@@ -155,8 +156,7 @@ class OpportunityScanner:
         Falls back to latest opportunity_scores if available.
         """
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             if pairs:
                 placeholders = ",".join("?" for _ in pairs)
                 rows = conn.execute(f"""
@@ -187,8 +187,7 @@ class OpportunityScanner:
 
         # Fallback to DB
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT composite_score FROM opportunity_scores "
                 "WHERE pair = ? ORDER BY timestamp DESC LIMIT 1", (pair,)
@@ -527,8 +526,7 @@ class OpportunityScanner:
     def _get_fear_greed(self) -> Optional[int]:
         """Read latest F&G from DB."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
             ).fetchone()
@@ -542,8 +540,7 @@ class OpportunityScanner:
         if not results:
             return
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn = get_db_connection(self.db_path)
 
             # Ensure table exists
             conn.execute("""

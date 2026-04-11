@@ -1,5 +1,6 @@
 # AI Core Dependencies
-chromadb==1.5.4
+# chromadb==1.5.4  # DEPRECATED Phase 28: replaced by LanceDB
+lancedb>=0.30.0
 sqlite-vec==0.1.6
 sentence-transformers==5.2.3
 

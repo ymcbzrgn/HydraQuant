@@ -33,6 +33,7 @@ if not hasattr(_np, 'matrix'):
 
 # Load .env BEFORE any module that needs API keys
 from dotenv import load_dotenv
+from db import get_connection, get_db_connection
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 
 logger = logging.getLogger(__name__)
@@ -363,8 +364,18 @@ class PipelineScheduler:
         self.scheduler.add_job(self._pheromone_cleanup, 'interval', minutes=30,
             id='pheromone_cleanup', name='Pheromone Field Cleanup', max_instances=1, replace_existing=True)
 
+        # Phase 28: ML Model Retraining Jobs
+        self.scheduler.add_job(self._catboost_retrain, 'cron', day_of_week='sun', hour=3,
+            id='catboost_retrain', name='CatBoost Weekly Retrain', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._ood_refit, 'cron', day_of_week='sun', hour=4,
+            id='ood_refit', name='OOD Detector Refit', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._conformal_recalibrate, 'interval', hours=6,
+            id='conformal_recal', name='Conformal Recalibration', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._ensemble_refit, 'cron', day_of_week='sun', hour=5,
+            id='ensemble_refit', name='Deep Ensemble Refit', max_instances=1, replace_existing=True)
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 35 jobs (27 + 6 organism + 2 phase26)")
+        logger.info("[Scheduler] Started with 39 jobs (27 + 6 organism + 2 phase26 + 4 phase28)")
         return True
 
     def stop(self):
@@ -723,7 +734,7 @@ class PipelineScheduler:
         try:
             import sqlite3
             from ai_config import AI_DB_PATH
-            conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+            conn = get_db_connection()
             try:
                 conn.row_factory = sqlite3.Row
 
@@ -770,7 +781,7 @@ class PipelineScheduler:
                         self._evidence_engine = EvidenceEngine()
                     engine = self._evidence_engine
                     # Re-analyze top pairs from opportunity_scores
-                    conn2 = sqlite3.connect(AI_DB_PATH, timeout=10)
+                    conn2 = get_db_connection()
                     try:
                         conn2.row_factory = sqlite3.Row
                         pairs = conn2.execute("""
@@ -975,8 +986,7 @@ class PipelineScheduler:
             # Query forgone winners (shadow trades that would have been profitable)
             forgone_text = ""
             try:
-                ai_conn = sqlite3.connect(AI_DB_PATH, timeout=30)
-                ai_conn.row_factory = sqlite3.Row
+                ai_conn = get_db_connection()
                 forgone = ai_conn.execute("""
                     SELECT pair, signal_type, confidence, entry_price, resolved_pnl_pct
                     FROM forgone_profit
@@ -1426,7 +1436,7 @@ class PipelineScheduler:
 
             # Win rate from recent trades
             try:
-                conn = sqlite3.connect(AI_DB_PATH, timeout=10)
+                conn = get_db_connection()
                 row = conn.execute("""
                     SELECT COUNT(*) as total,
                            SUM(CASE WHEN trade_pnl > 0 THEN 1 ELSE 0 END) as wins
@@ -1473,6 +1483,89 @@ class PipelineScheduler:
             )
         except Exception as e:
             logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
+
+
+    # ═══ Phase 28: ML Model Retraining Handlers ═══════════════════
+
+    def _catboost_retrain(self):
+        """Weekly: Retrain CatBoost on accumulated trade data."""
+        try:
+            from catboost_trainer import gather_training_data, train_catboost
+            X, y, feature_names = gather_training_data(min_trades=50)
+            if X is not None:
+                result = train_catboost(X, y, feature_names, test_ratio=0.2)
+                logger.info(f"[Phase28:CatBoost] Retrained: acc={result.get('test_accuracy', 'N/A')}")
+            else:
+                logger.info("[Phase28:CatBoost] Insufficient data for retraining")
+        except Exception as e:
+            logger.warning(f"[Phase28:CatBoost] Retrain failed: {e}")
+
+    def _ood_refit(self):
+        """Weekly: Refit OOD detector reference distributions with recent data."""
+        try:
+            from ood_detector import MarketOODDetector
+            import pandas as pd
+            from db import get_connection
+            detector = MarketOODDetector()
+            with get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT confidence, trust_score_at_decision, outcome_duration, regime
+                    FROM ai_decisions WHERE outcome_pnl IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 500
+                """).fetchall()
+            if len(rows) >= 30:
+                df = pd.DataFrame([dict(r) for r in rows])
+                features = df[["confidence", "trust_score_at_decision", "outcome_duration"]].fillna(0.5)
+                regimes = df["regime"].fillna("transitional")
+                detector.fit(features, regimes)
+                logger.info(f"[Phase28:OOD] Refit on {len(rows)} trades")
+            else:
+                logger.info("[Phase28:OOD] Insufficient data for refit")
+        except Exception as e:
+            logger.warning(f"[Phase28:OOD] Refit failed: {e}")
+
+    def _conformal_recalibrate(self):
+        """Every 6h: ACI alpha adjustment based on recent coverage."""
+        try:
+            from conformal_calibrator import ConformalCalibrator
+            cal = ConformalCalibrator()
+            # Get recent predictions vs outcomes
+            from db import get_connection
+            with get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT confidence, outcome_pnl FROM ai_decisions
+                    WHERE outcome_pnl IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 50
+                """).fetchall()
+            for row in rows:
+                cal.update(row["confidence"], 1.0 if row["outcome_pnl"] > 0 else 0.0)
+            logger.debug(f"[Phase28:Conformal] ACI updated with {len(rows)} outcomes")
+        except Exception as e:
+            logger.debug(f"[Phase28:Conformal] Recalibration failed: {e}")
+
+    def _ensemble_refit(self):
+        """Weekly: Refit deep ensemble on recent trade features."""
+        try:
+            from deep_ensemble import DeepEnsemble
+            import numpy as np
+            from db import get_connection
+            ensemble = DeepEnsemble(n_models=5, input_dim=10)
+            with get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT confidence, trust_score_at_decision, outcome_pnl, outcome_duration
+                    FROM ai_decisions WHERE outcome_pnl IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 200
+                """).fetchall()
+            if len(rows) >= 30:
+                X = np.array([[r["confidence"] or 0.5, r["trust_score_at_decision"] or 0.5,
+                               r["outcome_duration"] or 1.0] + [0.5] * 7 for r in rows])
+                y = np.array([[r["outcome_pnl"]] for r in rows])
+                result = ensemble.fit(X, y, epochs=50)
+                logger.info(f"[Phase28:Ensemble] Refit: loss={result.get('avg_loss', 'N/A'):.4f}")
+            else:
+                logger.info("[Phase28:Ensemble] Insufficient data for refit")
+        except Exception as e:
+            logger.warning(f"[Phase28:Ensemble] Refit failed: {e}")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from ai_config import AI_DB_PATH
 from llm_router import LLMRouter
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class BidirectionalRAG:
 
     def _init_db(self):
         """Initializes the bidirectional learning log table."""
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path) as conn:
             c = conn.cursor()
             c.execute('''
                 CREATE TABLE IF NOT EXISTS ai_lessons (
@@ -69,7 +70,7 @@ class BidirectionalRAG:
             lesson = str(response.content).strip()
             
             # Save the lesson
-            with sqlite3.connect(self.db_path) as conn:
+            with get_db_connection(self.db_path) as conn:
                 c = conn.cursor()
                 c.execute('''
                     INSERT INTO ai_lessons (decision_id, pair, signal, outcome_pnl, lesson_text)
@@ -86,8 +87,7 @@ class BidirectionalRAG:
 
     def get_unembedded_lessons(self) -> List[Dict[str, Any]]:
         """Retrieves lessons that need to be written back to the vector DB."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with get_db_connection(self.db_path) as conn:
             rows = conn.execute("SELECT * FROM ai_lessons WHERE is_embedded = 0").fetchall()
             return [dict(r) for r in rows]
 
@@ -95,7 +95,7 @@ class BidirectionalRAG:
         """Flags lessons as having been written back to Chroma via HybridRetriever."""
         if not lesson_ids:
             return
-        with sqlite3.connect(self.db_path) as conn:
+        with get_db_connection(self.db_path) as conn:
             placeholders = ",".join(["?"] * len(lesson_ids))
             conn.execute(f"UPDATE ai_lessons SET is_embedded = 1 WHERE id IN ({placeholders})", lesson_ids)
             conn.commit()

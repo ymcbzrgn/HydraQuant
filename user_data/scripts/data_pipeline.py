@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(__file__))
 from rss_fetcher import fetch_rss_feeds
 from fng_fetcher import fetch_fng
 
-from db import get_db_connection
+from db import get_db_connection, get_connection
 from sentiment_analyzer import analyze_unscored_news
 from rag_chunker import ContentChunker
 from hybrid_retriever import HybridRetriever
@@ -118,14 +118,14 @@ class DataPipeline:
             logger.error(f"Failed during sentiment analysis: {e}")
             
         # 3. Vectorization & RAG Insertion
-        logger.info("[Step 3] Vectorizing and embedding unprocessed news into ChromaDB...")
+        logger.info("[Step 3] Vectorizing and embedding unprocessed news into LanceDB...")
         self._embed_unprocessed_news()
         
         logger.info("---| PIPELINE PASS COMPLETE |---")
 
     def _embed_unprocessed_news(self):
         """
-        Finds database articles that haven't been pushed to ChromaDB,
+        Finds database articles that haven't been pushed to LanceDB,
         chunks them, generates embeddings, and saves them.
         """
         conn = get_db_connection()
@@ -231,7 +231,7 @@ class DataPipeline:
                     ids=ids_to_insert
                 ) or 0
 
-            # Flag as embedded ONLY if vectors were actually stored in ChromaDB.
+            # Flag as embedded ONLY if vectors were actually stored in LanceDB.
             # If only FTS5 was written (embedded_count=0), do NOT flag — next cycle
             # will retry embedding when the embedder is available. FTS5 inserts are
             # idempotent (DELETE + INSERT) so retries are safe.
@@ -239,7 +239,7 @@ class DataPipeline:
                 format_strings = ','.join(['?'] * len(successful_db_ids))
                 c.execute(f"UPDATE market_news SET is_embedded = 1 WHERE id IN ({format_strings})", tuple(successful_db_ids))
                 conn.commit()
-                logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles ({embedded_count} chunks to ChromaDB).")
+                logger.info(f"Successfully vectorized and flagged {len(successful_db_ids)} root articles ({embedded_count} chunks to LanceDB).")
             elif successful_db_ids:
                 logger.warning(f"Added {len(docs_to_insert)} chunks to FTS5 only. NOT flagging is_embedded — will retry when embedder is available.")
                 
@@ -337,8 +337,7 @@ class DataPipeline:
         """Get current BTC regime from evidence_audit_log."""
         try:
             from ai_config import AI_DB_PATH
-            conn = sqlite3.connect(AI_DB_PATH, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection()
             row = conn.execute(
                 "SELECT regime FROM evidence_audit_log WHERE pair LIKE 'BTC%' "
                 "ORDER BY timestamp DESC LIMIT 1"

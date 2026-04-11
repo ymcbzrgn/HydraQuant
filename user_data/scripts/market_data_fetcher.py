@@ -21,6 +21,7 @@ from typing import Dict, Any, Optional, List
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,7 @@ class MarketDataFetcher:
         self._init_tables()
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _init_tables(self):

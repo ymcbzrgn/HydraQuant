@@ -8,6 +8,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
+from db import get_db_connection
 
 class AIDecisionLogger:
     """
@@ -67,9 +68,7 @@ class AIDecisionLogger:
             conn.commit()
         
     def _get_db_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
         
     def log_decision(

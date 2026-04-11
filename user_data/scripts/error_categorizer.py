@@ -8,6 +8,7 @@ from llm_router import LLMRouter
 from langchain_core.messages import SystemMessage, HumanMessage
 from ai_config import AI_DB_PATH as DB_PATH
 from json_utils import extract_json_strict
+from db import get_connection, get_db_connection
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,9 +47,7 @@ class ErrorCategorizer:
         self._ensure_columns()
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _ensure_columns(self):

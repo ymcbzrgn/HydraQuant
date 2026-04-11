@@ -12,6 +12,7 @@ from typing import List, Dict, Any
 from ai_config import AI_DB_PATH
 from llm_router import LLMRouter
 from langchain_core.messages import HumanMessage
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class RAPTORTree:
     def _init_db(self):
         """RAPTOR node'larını FTS5 SQLite üzerinde tut."""
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS raptor_nodes (
                         node_id TEXT PRIMARY KEY,
@@ -116,7 +117,7 @@ Provide only the summary text without any preamble.
     def _persist_tree(self, nodes: List[Dict[str, Any]], level: int):
         """Ağaç node'larını DB'ye kaydet."""
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 for node in nodes:
                     node_id = node.get('id', f"lvl{level}_unknown")
                     content = node.get('text', '')
@@ -158,7 +159,7 @@ Reply exactly with one word: LEAF, CLUSTER, or META.
         # SQLite FTS Search over the targeted level
         results = []
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 # Basic FTS5 match using term extraction (simplified)
                 # In production raptor, we'd embed the question and do cosine against level X
                 # For this implementation, we extract the top keywords or just return the highest level if META

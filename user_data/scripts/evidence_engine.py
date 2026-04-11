@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -231,8 +232,38 @@ class EvidenceEngine:
             # Phase D: CONTRADICTION DETECTION
             contradictions = self._detect_contradictions(scores, gather, regime, tech_data)
 
+            # Phase 28: Read Triple Perception pheromone deposits
+            perception_boost = 0.0
+            try:
+                from pheromone_field import get_pheromone_field
+                pfield = get_pheromone_field()
+                tp_signal = pfield.read("prediction")
+                tp_uncertainty = pfield.read_float("uncertainty", default=0.0)
+                tp_health = pfield.read_float("organism_health", default=0.0)
+
+                if tp_signal and isinstance(tp_signal, dict):
+                    tp_direction = tp_signal.get("direction", "NEUTRAL")
+                    tp_conf = tp_signal.get("confidence", 0.0) * tp_signal.get("_decay", 1.0)
+                    # If perception agrees with evidence, boost confidence
+                    # If disagrees, penalize
+                    ee_direction = "BULLISH" if sum(s for s in scores.values() if isinstance(s, (int, float))) > 0 else "BEARISH"
+                    if tp_direction == ee_direction and tp_conf > 0.3:
+                        perception_boost = tp_conf * 0.1  # up to +0.1 confidence
+                    elif tp_direction != "NEUTRAL" and tp_direction != ee_direction and tp_conf > 0.3:
+                        perception_boost = -tp_conf * 0.05  # up to -0.05 penalty
+                    logger.info(f"[EE:Pheromone] {pair} perception={tp_direction} conf={tp_conf:.2f} "
+                               f"uncertainty={tp_uncertainty:.2f} boost={perception_boost:+.3f}")
+            except Exception as e:
+                logger.debug(f"[EE:Pheromone] Pheromone read skipped: {e}")
+
             # Phase E: SYNTHESIS + CALIBRATION
             result = self._synthesize(pair, scores, contradictions, regime, gather, patterns)
+
+            # Apply perception boost to final confidence
+            if perception_boost != 0.0:
+                old_conf = result.get("confidence", 0)
+                result["confidence"] = max(0.01, min(0.95, old_conf + perception_boost))
+                result["reasoning"] = result.get("reasoning", "") + f" [Perception: {perception_boost:+.3f}]"
 
             # Phase F: AUDIT LOG
             evidence_sources = {
@@ -327,8 +358,7 @@ class EvidenceEngine:
     def _get_fear_greed(self) -> Optional[int]:
         """Read latest Fear & Greed Index from DB."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1"
             ).fetchone()
@@ -345,8 +375,7 @@ class EvidenceEngine:
         """
         td = dict(existing) if existing else {}
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
 
             # Try to get latest price from derivatives_data (OI implies a price reference)
             _deriv_pair = pair.split(":")[0]  # "BTC/USDT:USDT" → "BTC/USDT"
@@ -404,8 +433,7 @@ class EvidenceEngine:
     def _get_btc_dominance(self) -> Optional[float]:
         """Read BTC dominance from macro_data or defi_data table."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             # Try cross-asset data first (yfinance might store this)
             row = conn.execute(
                 "SELECT value FROM macro_data WHERE metric_name LIKE '%btc_dom%' "
@@ -1126,8 +1154,7 @@ class EvidenceEngine:
                    evidence_sources: Dict, max_cap: float):
         """Persist structured audit log to SQLite. MiroFish JSONL pattern."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn = get_db_connection(self.db_path)
 
             # Ensure table exists (idempotent)
             conn.execute("""

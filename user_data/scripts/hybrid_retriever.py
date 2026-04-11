@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-from db import get_db_connection
+from db import get_db_connection, get_connection
 try:
     from rag_embedding import DualEmbeddingPipeline
 except Exception as _imp_err:
@@ -20,11 +20,12 @@ from streaming_rag import StreamingRAG
 from raptor_tree import RAPTORTree
 from magma_memory import MAGMAMemory
 from memo_rag import MemoRAG
-from ai_config import AI_DB_PATH, get_chroma_client
+from ai_config import AI_DB_PATH
+from lance_store import get_lance_store, get_lance_table
 
 logger = logging.getLogger(__name__)
 
-from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as VECTOR_DB_DIR
+from ai_config import AI_DB_PATH as DB_PATH
 
 # Phase 24: Neural Organism — adaptive parameters
 try:
@@ -36,28 +37,22 @@ except ImportError:
 class HybridRetriever:
     """
     Implements Hybrid Search combining:
-    1. Dense Search (ChromaDB with Gemini + BGE Matryoshka)
+    1. Dense Search (LanceDB with Gemini + Jina/BGE embeddings)
     2. Sparse Search (BM25 keyword search)
     3. Reranking (FlashRank Cross-Encoder)
     """
     
     def __init__(self, collection_name: str = "crypto_news", llm_router=None):
         self._llm_router = llm_router  # Pass-through for sub-components
-        self.chroma_client = get_chroma_client()
+        # Phase 28: LanceDB replaces ChromaDB
+        self._lance_store = get_lance_store()
         # Primary: Gemini embeddings (general semantic, 768-dim)
-        # embedding_function=None: we provide pre-computed embeddings via add(embeddings=...)
-        # Without this, ChromaDB defaults to its own 384-dim DefaultEmbeddingFunction,
-        # causing dimension mismatch when our 768-dim vectors are inserted.
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-            embedding_function=None
+        self.collection = self._lance_store.get_or_create_table(
+            name=collection_name, dim=768, metric="cosine"
         )
-        # Secondary: BGE-Financial embeddings (domain-specific, 768-dim)
-        self.bge_collection = self.chroma_client.get_or_create_collection(
-            name=f"{collection_name}_bge",
-            metadata={"hnsw:space": "cosine"},
-            embedding_function=None
+        # Secondary: Jina/BGE embeddings (domain-specific, 768-dim)
+        self.bge_collection = self._lance_store.get_or_create_table(
+            name=f"{collection_name}_bge", dim=768, metric="cosine"
         )
         self.embedder = DualEmbeddingPipeline() if DualEmbeddingPipeline is not None else None
         if self.embedder is None:
@@ -104,21 +99,15 @@ class HybridRetriever:
     _db_tables_ensured = False
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection()
 
         # Create binary_embeddings table once per process, not every connection
         if not HybridRetriever._db_tables_ensured:
-            conn.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
-                doc_id TEXT PRIMARY KEY,
-                packed_bge BLOB
-            )''')
             HybridRetriever._db_tables_ensured = True
         return conn
 
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]) -> int:
-        """Embeds and adds documents to ChromaDB collections + SQLite FTS5.
+        """Embeds and adds documents to LanceDB tables + SQLite FTS5.
         Returns number of successfully embedded documents (0 = FTS5-only, no vectors)."""
         embedded_count = 0
 
@@ -148,7 +137,7 @@ class HybridRetriever:
         else:
             logger.warning("[HybridRetriever] Embedder unavailable — documents will be added to FTS5 only (keyword search).")
 
-        # --- Phase 2: Store vectors in ChromaDB (separate try/except per collection) ---
+        # --- Phase 2: Store vectors in LanceDB (separate try/except per table) ---
         # Primary: Gemini collection — drives embedded_count
         if gemini_valid_indices:
             g_ids = [ids[i] for i in gemini_valid_indices]
@@ -161,24 +150,24 @@ class HybridRetriever:
                 )
                 embedded_count = len(gemini_valid_indices)
             except Exception as e:
-                if 'dimension' in str(e).lower():
-                    logger.warning(f"[HybridRetriever] Gemini collection dimension mismatch — recreating: {e}")
+                if 'dimension' in str(e).lower() or 'schema' in str(e).lower():
+                    logger.warning(f"[HybridRetriever] Gemini table dimension mismatch — recreating: {e}")
                     try:
                         cname = self.collection.name
-                        self.chroma_client.delete_collection(cname)
-                        self.collection = self.chroma_client.get_or_create_collection(
-                            name=cname, metadata={"hnsw:space": "cosine"}, embedding_function=None
+                        self._lance_store.delete_table(cname)
+                        self.collection = self._lance_store.get_or_create_table(
+                            name=cname, dim=768, metric="cosine"
                         )
                         self.collection.add(
                             ids=g_ids, embeddings=gemini_embeddings,
                             documents=g_docs, metadatas=g_metas
                         )
                         embedded_count = len(gemini_valid_indices)
-                        logger.info(f"[HybridRetriever] Gemini collection recreated — {embedded_count} docs added.")
+                        logger.info(f"[HybridRetriever] Gemini table recreated — {embedded_count} docs added.")
                     except Exception as retry_e:
-                        logger.error(f"[HybridRetriever] Gemini collection retry failed: {retry_e}")
+                        logger.error(f"[HybridRetriever] Gemini table retry failed: {retry_e}")
                 else:
-                    logger.error(f"[HybridRetriever] ChromaDB Gemini add failed: {e}")
+                    logger.error(f"[HybridRetriever] LanceDB Gemini add failed: {e}")
 
         # Secondary: BGE collection — independent, failure does NOT affect embedded_count
         if bge_valid_indices:
@@ -191,23 +180,23 @@ class HybridRetriever:
                     documents=b_docs, metadatas=b_metas
                 )
             except Exception as e:
-                if 'dimension' in str(e).lower():
-                    logger.warning(f"[HybridRetriever] BGE collection dimension mismatch — recreating: {e}")
+                if 'dimension' in str(e).lower() or 'schema' in str(e).lower():
+                    logger.warning(f"[HybridRetriever] BGE table dimension mismatch — recreating: {e}")
                     try:
                         bname = self.bge_collection.name
-                        self.chroma_client.delete_collection(bname)
-                        self.bge_collection = self.chroma_client.get_or_create_collection(
-                            name=bname, metadata={"hnsw:space": "cosine"}, embedding_function=None
+                        self._lance_store.delete_table(bname)
+                        self.bge_collection = self._lance_store.get_or_create_table(
+                            name=bname, dim=768, metric="cosine"
                         )
                         self.bge_collection.add(
                             ids=b_ids, embeddings=bge_embeddings,
                             documents=b_docs, metadatas=b_metas
                         )
-                        logger.info(f"[HybridRetriever] BGE collection recreated — {len(bge_valid_indices)} docs added.")
+                        logger.info(f"[HybridRetriever] BGE table recreated — {len(bge_valid_indices)} docs added.")
                     except Exception as retry_e:
-                        logger.error(f"[HybridRetriever] BGE collection retry failed: {retry_e}")
+                        logger.error(f"[HybridRetriever] BGE table retry failed: {retry_e}")
                 else:
-                    logger.error(f"[HybridRetriever] ChromaDB BGE add failed: {e}")
+                    logger.error(f"[HybridRetriever] LanceDB BGE add failed: {e}")
 
         # --- Phase 3: ALWAYS add to FTS5 (no embeddings needed) + Binary BGE ---
         # O(1) lookup for binary BGE phase (uses bge_valid_indices, not gemini)
@@ -237,7 +226,7 @@ class HybridRetriever:
                 conn.commit()
 
             if embedded_count > 0:
-                logger.info(f"Added {len(documents)} docs to FTS5 + {embedded_count} to ChromaDB.")
+                logger.info(f"Added {len(documents)} docs to FTS5 + {embedded_count} to LanceDB.")
             else:
                 logger.info(f"Added {len(documents)} docs to FTS5 only (keyword search). ChromaDB: 0 (embedder {'unavailable' if self.embedder is None else 'failed'}).")
         except Exception as e:
@@ -360,8 +349,8 @@ class HybridRetriever:
         if query_embs:
             collection_count = self.collection.count()
             if collection_count > 0:
-                dense_results = self.collection.query(
-                    query_embeddings=[query_embs['gemini']],
+                dense_results = self.collection.search(
+                    query_embedding=query_embs['gemini'],
                     n_results=min(30, collection_count)
                 )
                 dense_gemini_ids = dense_results['ids'][0] if dense_results['ids'] else []
@@ -375,8 +364,8 @@ class HybridRetriever:
             try:
                 bge_count = self.bge_collection.count()
                 if bge_count > 0:
-                    bge_results = self.bge_collection.query(
-                        query_embeddings=[query_embs['bge']],
+                    bge_results = self.bge_collection.search(
+                        query_embedding=query_embs['bge'],
                         n_results=min(30, bge_count)
                     )
                     dense_bge_ids = bge_results['ids'][0] if bge_results['ids'] else []
@@ -391,7 +380,7 @@ class HybridRetriever:
         passages = []
         found_ids = set()
         if fused_top_20:
-            # Primary: fetch from ChromaDB (has metadata + parent text)
+            # Primary: fetch from LanceDB (has metadata + parent text)
             try:
                 fetched = self.collection.get(ids=fused_top_20, include=["documents", "metadatas"])
                 if fetched and fetched['documents']:
@@ -412,7 +401,7 @@ class HybridRetriever:
                         })
                         found_ids.add(doc_id)
             except Exception as e:
-                logger.warning(f"[HybridRetriever] ChromaDB fetch failed: {e}")
+                logger.warning(f"[HybridRetriever] LanceDB fetch failed: {e}")
 
             # Fallback: fetch missing docs from FTS5 (for FTS5-only docs without embeddings)
             missing_ids = [did for did in fused_top_20 if did not in found_ids]
@@ -609,11 +598,16 @@ class HybridRetriever:
             return []
         try:
             query_text = f"Historical impact of {event_type.replace('_', ' ')} on cryptocurrency prices"
-            results = self.collection.query(
-                query_texts=[query_text],
-                where={"event_type": event_type},
-                n_results=top_k,
-            )
+            # Phase 28: LanceDB needs embedding, not text. Use embedder if available.
+            query_embs = self.embedder.get_embeddings(query_text) if self.embedder else None
+            if query_embs and query_embs.get('gemini'):
+                results = self.collection.search(
+                    query_embedding=query_embs['gemini'],
+                    n_results=top_k,
+                    where={"event_type": event_type},
+                )
+            else:
+                results = {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
             if not results or not results.get("documents") or not results["documents"][0]:
                 return []
             return [

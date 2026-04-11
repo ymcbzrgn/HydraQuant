@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import importlib
 import logging
+from db import get_connection, get_db_connection
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -45,7 +46,7 @@ class DeploymentChecker:
         self._check("2. API keys configured", self._check_api_keys)
         self._check("3. Python packages installed", self._check_packages)
         self._check("4. SQLite DB writable", self._check_sqlite)
-        self._check("5. ChromaDB init", self._check_chromadb)
+        self._check("5. LanceDB init", self._check_chromadb)
         self._check("6. LLM Router connectivity", self._check_llm_router)
         self._check("7. Disk space", self._check_disk)
         self._check("8. Memory available", self._check_memory)
@@ -81,7 +82,7 @@ class DeploymentChecker:
 
     def _check_packages(self):
         required = [
-            "langchain_core", "langchain_google_genai", "chromadb",
+            "langchain_core", "langchain_google_genai", "lancedb",
             "fastapi", "dotenv", "apscheduler"
         ]
         missing = []
@@ -101,18 +102,19 @@ class DeploymentChecker:
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
 
-        conn = sqlite3.connect(AI_DB_PATH, timeout=5)
-        conn.execute("CREATE TABLE IF NOT EXISTS _deploy_test (id INTEGER PRIMARY KEY)")
+        conn = get_db_connection()
         conn.execute("DROP TABLE IF EXISTS _deploy_test")
         conn.commit()
         conn.close()
         return True, f"SQLite writable at {AI_DB_PATH}"
 
     def _check_chromadb(self):
-        from ai_config import get_chroma_client, CHROMA_PERSIST_DIR
-        client = get_chroma_client()
-        client.heartbeat()
-        return True, f"ChromaDB OK at {CHROMA_PERSIST_DIR}"
+        # Phase 28: LanceDB replaces ChromaDB
+        from lance_store import get_lance_store
+        from ai_config import LANCE_DB_DIR
+        store = get_lance_store()
+        stats = store.get_stats()
+        return True, f"LanceDB OK at {LANCE_DB_DIR} ({stats['table_count']} tables)"
 
     def _check_llm_router(self):
         from llm_router import LLMRouter

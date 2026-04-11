@@ -5,12 +5,17 @@ ENV GEMINI_API_KEY="" \
     GROQ_API_KEY="" \
     OPENROUTER_API_KEY="" \
     AI_DB_PATH="/freqtrade/user_data/db/ai_data.sqlite" \
-    CHROMA_PERSIST_DIR="/freqtrade/user_data/db/vectordb"
+    CHROMA_PERSIST_DIR="/freqtrade/user_data/db/vectordb" \
+    LANCE_DB_DIR="/freqtrade/user_data/db/lancedb"
 
 # Switch to root temporarily if needed for permissions, but Freqtrade base normally handles user pip
 # AI dependencies
 COPY --chown=ftuser:ftuser requirements-ai.txt /freqtrade/
-RUN pip install --user --no-cache-dir -r /freqtrade/requirements-ai.txt
+COPY --chown=ftuser:ftuser requirements/requirements-phase26.txt /freqtrade/requirements/
+COPY --chown=ftuser:ftuser requirements/requirements-phase28.txt /freqtrade/requirements/
+RUN pip install --user --no-cache-dir -r /freqtrade/requirements-ai.txt \
+    && pip install --user --no-cache-dir -r /freqtrade/requirements/requirements-phase26.txt \
+    && pip install --user --no-cache-dir -r /freqtrade/requirements/requirements-phase28.txt
 
 # AI scripts
 COPY --chown=ftuser:ftuser user_data/scripts/ /freqtrade/user_data/scripts/

@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional, List
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,7 @@ class PatternStatStore:
         self._init_db()
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _init_db(self):
@@ -675,3 +674,27 @@ class PatternStatStore:
                 return row['cnt'] if row else 0
         except Exception:
             return 0
+
+    # ─── Phase 28: DuckDB Analytics Delegation ─────────────────
+    def get_analytics_summary(self, pair: Optional[str] = None) -> Dict[str, Any]:
+        """Delegate heavy OLAP analytics to DuckDB (10-100x faster than SQLite).
+
+        Returns: rolling Sharpe, regime breakdown, pattern win rates, forgone PnL.
+        Falls back to basic SQLite query() if DuckDB unavailable.
+        """
+        try:
+            from analytics_engine import get_analytics
+            engine = get_analytics()
+            return {
+                "rolling_sharpe": engine.rolling_sharpe(pair, window=30),
+                "regime_performance": engine.regime_performance(),
+                "pattern_features": engine.pattern_win_rate_by_features(pair),
+                "forgone_pnl": engine.forgone_pnl_analysis(),
+                "source": "duckdb",
+            }
+        except Exception as e:
+            logger.debug(f"[PatternStatStore] DuckDB analytics unavailable: {e}")
+            return {
+                "basic_stats": self.query(pair=pair) if pair else {},
+                "source": "sqlite_fallback",
+            }
