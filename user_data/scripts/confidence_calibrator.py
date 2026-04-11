@@ -19,6 +19,7 @@ sys.path.append(os.path.dirname(__file__))
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
+from db import get_connection, get_db_connection
 
 # Phase 24: Neural Organism — adaptive parameters
 try:
@@ -41,9 +42,7 @@ class ConfidenceCalibrator:
         self._brier_disabled = False  # Phase 21: prevent fit-disable-fit cycle
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def _get_history(self, min_trades: int = 20) -> List[Tuple[float, float]]:

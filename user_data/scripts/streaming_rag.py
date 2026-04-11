@@ -12,6 +12,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 try:
     from rag_embedding import DualEmbeddingPipeline
 except Exception as _e:
@@ -56,7 +57,7 @@ class StreamingRAG:
     def _init_hot_buffer(self):
         """In-memory or fast SQLite hot buffer for documents < 1 hour old."""
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS hot_buffer (
                         doc_id TEXT PRIMARY KEY,
@@ -89,7 +90,7 @@ class StreamingRAG:
         array_bytes = np.array(embeddings['gemini'], dtype=np.float32).tobytes()
             
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO hot_buffer (doc_id, content, embedding, metadata) VALUES (?, ?, ?, ?)",
                     (doc_id, content, array_bytes, json.dumps(metadata))
@@ -117,7 +118,7 @@ class StreamingRAG:
         hot_results = []
         
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 cursor = conn.execute("SELECT doc_id, content, embedding, metadata FROM hot_buffer")
                 
                 scored_docs = []
@@ -155,7 +156,7 @@ class StreamingRAG:
         cutoff_time = datetime.now(tz=timezone.utc) - timedelta(hours=1)
         
         try:
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            with get_db_connection() as conn:
                 # Select expired documents
                 cursor = conn.execute(
                     "SELECT doc_id, content, embedding, metadata FROM hot_buffer WHERE timestamp < ?",

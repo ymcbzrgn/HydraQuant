@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 sys.path.append(os.path.dirname(__file__))
 from ai_config import AI_DB_PATH
 from llm_router import LLMRouter
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class MemoRAG:
     def _init_db(self):
         """Initialize SQLite tables for global memory blocks."""
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS memorag_global (
@@ -48,7 +49,7 @@ class MemoRAG:
     def get_global_memory(self) -> str:
         """Fetch the current globally compressed corpus summary."""
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT summary FROM memorag_global WHERE id = 1")
                 row = cursor.fetchone()
@@ -100,7 +101,7 @@ COMPRESSION RULES:
                 
             updated_memory = content_raw.strip()
             
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE memorag_global SET summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",

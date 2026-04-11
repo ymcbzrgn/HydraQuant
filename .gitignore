@@ -141,3 +141,7 @@ freqtrade-strategies/user_data/scripts
 .claude/
 config_binance_testnet_futures.json
 uv.lock
+
+# Claude Code tools
+.code-review-graph/
+graphify-out/

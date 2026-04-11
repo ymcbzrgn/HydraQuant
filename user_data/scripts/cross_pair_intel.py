@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 # Phase 24: Neural Organism — adaptive parameters
 try:
@@ -46,11 +47,16 @@ class CrossPairIntel:
     def __init__(self, db_path: str = AI_DB_PATH):
         self.db_path = db_path
         self._latest: Dict[str, Any] = {}
+        # Phase 28: Grafeo for pair correlation graph
+        self._graph_store = None
+        try:
+            from graph_store import get_graph_store
+            self._graph_store = get_graph_store()
+        except Exception:
+            pass
 
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     # ═══════════════════════════════════════════════════════════
@@ -121,6 +127,25 @@ class CrossPairIntel:
                     f"bull={bullish}/{total}, bear={bearish}/{total}")
 
         self._latest["market_bias"] = result
+
+        # Phase 28: Record pair signal correlations in Grafeo entity graph
+        if self._graph_store and len(evidence_results) >= 2:
+            try:
+                pairs_with_signals = [(r["pair"], r.get("signal", "NEUTRAL"))
+                                       for r in evidence_results if r.get("pair")]
+                # Connect pairs with same signal direction
+                for i in range(len(pairs_with_signals)):
+                    for j in range(i + 1, min(i + 3, len(pairs_with_signals))):
+                        p1, s1 = pairs_with_signals[i]
+                        p2, s2 = pairs_with_signals[j]
+                        if s1 == s2 and s1 != "NEUTRAL":
+                            self._graph_store.add_edge(
+                                "entity", p1.lower().replace("/", "_"),
+                                "co_moves_with", p2.lower().replace("/", "_"),
+                                weight=strength)
+            except Exception:
+                pass
+
         return result
 
     def detect_btc_lead(self, btc_signal: Dict, alt_signals: List[Dict]) -> Dict[str, Any]:

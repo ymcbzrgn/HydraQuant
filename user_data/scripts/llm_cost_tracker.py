@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
+from db import get_db_connection
 
 class LLMCostTracker:
     """
@@ -61,9 +62,7 @@ class LLMCostTracker:
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=30000")
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS llm_calls (
@@ -118,9 +117,7 @@ class LLMCostTracker:
         import time as _time
         for attempt in range(3):
             try:
-                with sqlite3.connect(self.db_path, timeout=30) as conn:
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute("PRAGMA busy_timeout=30000")
+                with get_db_connection(self.db_path) as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO llm_calls
@@ -145,7 +142,7 @@ class LLMCostTracker:
             target_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT SUM(cost_usd) FROM llm_calls 
@@ -164,7 +161,7 @@ class LLMCostTracker:
             
         summary = {"total_cost": 0.0, "total_calls": 0, "models": {}}
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT model, COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cost_usd), AVG(latency_ms)

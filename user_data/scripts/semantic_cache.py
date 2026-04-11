@@ -17,6 +17,7 @@ except Exception as _e:
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
+from db import get_db_connection
 
 
 def _load_gemini_keys() -> list:
@@ -61,9 +62,7 @@ class SemanticCache:
 
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=30000")
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS semantic_cache (
@@ -140,7 +139,7 @@ class SemanticCache:
         highest_sim = 0.0
 
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 if pair:
                     cursor.execute("SELECT query_embedding, response FROM semantic_cache WHERE pair = ?", (pair,))
@@ -193,7 +192,7 @@ class SemanticCache:
             return
 
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO semantic_cache 
@@ -208,7 +207,7 @@ class SemanticCache:
     def invalidate(self, pair: Optional[str] = None):
         """Invalidate cache entries for a specific pair, or all entries."""
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 if pair:
                     cursor.execute("DELETE FROM semantic_cache WHERE pair = ?", (pair,))
@@ -222,7 +221,7 @@ class SemanticCache:
     def cleanup_expired(self):
         """Remove expired entries based on TTL."""
         try:
-            with sqlite3.connect(self.db_path, timeout=30) as conn:
+            with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 # Use basic datetime comparison
                 cursor.execute("""

@@ -36,6 +36,7 @@ import httpx
 from google.api_core import exceptions as google_exc
 import openai
 import groq
+from db import get_connection, get_db_connection
 
 try:
     from google.genai import errors as genai_errors
@@ -248,16 +249,7 @@ class SlotPersistence:
 
     def _ensure_table(self):
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.execute("""CREATE TABLE IF NOT EXISTS model_slot_stats (
-                slot_id TEXT PRIMARY KEY,
-                alpha REAL DEFAULT 1.0,
-                beta_param REAL DEFAULT 1.0,
-                total_calls INTEGER DEFAULT 0,
-                success_count INTEGER DEFAULT 0,
-                quality_pass_count INTEGER DEFAULT 0,
-                last_updated TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-            )""")
+            conn = get_db_connection(self.db_path)
             conn.commit()
             conn.close()
         except Exception as e:
@@ -265,8 +257,7 @@ class SlotPersistence:
 
     def load_all(self) -> Dict[str, dict]:
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             rows = conn.execute("SELECT * FROM model_slot_stats").fetchall()
             conn.close()
             return {r["slot_id"]: dict(r) for r in rows}
@@ -275,7 +266,7 @@ class SlotPersistence:
 
     def save_batch(self, slots: List[ModelSlot]):
         try:
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = get_db_connection(self.db_path)
             for s in slots:
                 conn.execute("""INSERT OR REPLACE INTO model_slot_stats
                     (slot_id, alpha, beta_param, total_calls, success_count, quality_pass_count, last_updated)

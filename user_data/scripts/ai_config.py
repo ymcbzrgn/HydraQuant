@@ -35,29 +35,48 @@ JINA_API_KEYS = [
 ]
 JINA_API_URL = os.environ.get("JINA_API_URL", "https://api.jina.ai/v1")
 JINA_EMBED_MODEL = os.environ.get("JINA_EMBED_MODEL", "jina-embeddings-v3")
-JINA_EMBED_DIM = int(os.environ.get("JINA_EMBED_DIM", "768"))  # ChromaDB uyumu: 768
+JINA_EMBED_DIM = int(os.environ.get("JINA_EMBED_DIM", "768"))  # LanceDB dim: 768
 JINA_RERANK_MODEL = os.environ.get("JINA_RERANK_MODEL", "jina-reranker-v3")  # v3 SOTA, v2'den üstün
 
-# ChromaDB Persist Directory for Embeddings
+# ── Vector DB Paths ──────────────────────────────────────────────
+# Phase 28: ChromaDB replaced by LanceDB
 CHROMA_PERSIST_DIR = os.environ.get(
     "CHROMA_PERSIST_DIR",
     os.path.join(BASE_DIR, "vectordb")
+)  # LEGACY — kept for migration script reference only
+
+LANCE_DB_DIR = os.environ.get(
+    "LANCE_DB_DIR",
+    os.path.join(BASE_DIR, "db", "lancedb")
 )
 
-# ── ChromaDB Singleton ──────────────────────────────────────────────
-# All modules MUST use get_chroma_client() instead of PersistentClient() directly.
-# Prevents SQLite lock contention from multiple PersistentClient instances.
+# ── LanceDB Singleton (Phase 28) ──────────────────────────────────
+# All modules MUST use get_lance_store() from lance_store.py.
+# Legacy get_chroma_client() still works for migration period.
+
 _chroma_client = None
 _chroma_lock = threading.Lock()
 
 
 def get_chroma_client():
-    """Thread-safe singleton ChromaDB PersistentClient."""
+    """LEGACY: ChromaDB client. Use get_lance_store() for new code."""
     global _chroma_client
     if _chroma_client is None:
         with _chroma_lock:
             if _chroma_client is None:
-                import chromadb
-                os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
-                _chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+                try:
+                    import chromadb
+                    os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+                    _chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+                except ImportError:
+                    raise ImportError(
+                        "chromadb not installed. Phase 28 migration complete — "
+                        "use get_lance_store() from lance_store.py instead."
+                    )
     return _chroma_client
+
+
+def get_lance_store():
+    """Phase 28: Thread-safe singleton LanceDB store. Preferred over get_chroma_client()."""
+    from lance_store import get_lance_store as _get
+    return _get()

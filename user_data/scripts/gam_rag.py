@@ -8,7 +8,9 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from ai_config import AI_DB_PATH as DB_PATH, CHROMA_PERSIST_DIR as CHROMA_PATH, get_chroma_client
+from ai_config import AI_DB_PATH as DB_PATH
+from db import get_connection, get_db_connection
+from lance_store import get_lance_store
 
 class GamRAG:
     """
@@ -18,29 +20,33 @@ class GamRAG:
     When future similar regimes arise, the Agent uses this memory.
     """
 
-    def __init__(self, db_path: str = DB_PATH, chroma_path: str = CHROMA_PATH):
+    def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
-        self._ensure_paths(chroma_path)
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-        # Use singleton ChromaDB client
-        self.chroma_client = get_chroma_client()
-        # GAM-RAG uses ChromaDB's built-in embedding (query_texts=, add(documents=...))
-        # so we do NOT set embedding_function=None here (unlike hybrid_retriever which
-        # provides pre-computed 768-dim embeddings). This collection uses the default
-        # all-MiniLM-L6-v2 (384-dim) which is separate from the 768-dim crypto_news collection.
-        self.gam_collection = self.chroma_client.get_or_create_collection(
-            name="successful_trade_patterns",
-            metadata={"hnsw:space": "cosine"}
+        # Phase 28: LanceDB replaces ChromaDB
+        self._lance_store = get_lance_store()
+        self.gam_collection = self._lance_store.get_or_create_table(
+            name="successful_trade_patterns", dim=768, metric="cosine"
         )
+        # Lazy-load embedder for text → embedding conversion
+        self._embedder = None
 
-    def _ensure_paths(self, chroma_path: str):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        os.makedirs(chroma_path, exist_ok=True)
+    def _get_embedding(self, text: str):
+        """Get Gemini embedding for text. Lazy-loads embedder."""
+        try:
+            if self._embedder is None:
+                from rag_embedding import DualEmbeddingPipeline
+                self._embedder = DualEmbeddingPipeline()
+            embs = self._embedder.get_embeddings(text)
+            if embs and embs.get('gemini'):
+                return embs['gemini']
+        except Exception as e:
+            logger.debug(f"[GAM-RAG] Embedding failed: {e}")
+        return None
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = get_db_connection(self.db_path)
         return conn
 
     def get_winning_patterns(self, min_pnl: float = 2.0) -> List[Dict[str, Any]]:
@@ -96,10 +102,13 @@ class GamRAG:
         
         try:
             logger.info(f"Writing Bidirectional Memory for Trade ID {trade['id']} (PnL: +{trade['outcome_pnl']:.2f}%)")
+            # Phase 28: LanceDB needs embeddings, use Gemini embedder
+            embedding = self._get_embedding(memory_document)
             self.gam_collection.add(
+                ids=[doc_id],
+                embeddings=[embedding] if embedding else None,
                 documents=[memory_document],
                 metadatas=[metadata],
-                ids=[doc_id]
             )
             
             # Mark the trade as memorized in SQLite
@@ -126,14 +135,15 @@ class GamRAG:
         query_text = f"What logic has historically won in {current_regime} for {pair}?"
         
         try:
-            results = self.gam_collection.query(
-                query_texts=[query_text],
+            # Phase 28: LanceDB needs embedding, not text
+            query_emb = self._get_embedding(query_text)
+            if not query_emb:
+                return []
+            results = self.gam_collection.search(
+                query_embedding=query_emb,
                 n_results=k,
-                # Filter by similar contextual regimes if possible
-                where={"regime": current_regime}
+                where={"regime": current_regime},
             )
-            
-            # `results['documents'][0]` because query_texts is a list of length 1
             docs = results.get('documents', [[]])[0]
             return docs
             

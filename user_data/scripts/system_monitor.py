@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 
 sys.path.append(os.path.dirname(__file__))
 from ai_config import AI_DB_PATH
+from db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class SystemMonitor:
     def _init_table(self):
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn = get_db_connection(self.db_path)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +59,7 @@ class SystemMonitor:
         conn = None
         try:
             meta_json = json.dumps(metadata) if metadata else None
-            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn = get_db_connection(self.db_path)
             conn.execute(
                 "INSERT INTO system_metrics (metric_name, metric_value, metadata_json) VALUES (?, ?, ?)",
                 (name, value, meta_json)
@@ -75,8 +76,7 @@ class SystemMonitor:
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             c = conn.cursor()
 
             # RAG latency average
@@ -187,7 +187,7 @@ class SystemMonitor:
         # 1. Database connectivity
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = get_db_connection(self.db_path)
             conn.execute("SELECT 1")
             checks["database"] = True
         except Exception:
@@ -201,7 +201,7 @@ class SystemMonitor:
         conn = None
         try:
             five_min_ago = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM llm_calls WHERE timestamp >= ?",
                 (five_min_ago,)
@@ -213,21 +213,21 @@ class SystemMonitor:
             if conn:
                 conn.close()
 
-        # 3. ChromaDB — can we import and connect?
+        # 3. LanceDB (Phase 28: replaced ChromaDB)
         try:
-            from ai_config import get_chroma_client
-            client = get_chroma_client()
-            client.heartbeat()
-            checks["chromadb"] = True
+            from lance_store import get_lance_store
+            store = get_lance_store()
+            store.get_stats()
+            checks["lancedb"] = True
         except Exception:
-            checks["chromadb"] = False
-            alerts.append("ChromaDB unavailable")
+            checks["lancedb"] = False
+            alerts.append("LanceDB unavailable")
 
         # 4. Scheduler — last job run within 15 minutes?
         conn = None
         try:
             fifteen_min_ago = (datetime.now(tz=timezone.utc) - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = get_db_connection(self.db_path)
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM system_metrics WHERE metric_name = 'scheduler_job' AND timestamp >= ?",
                 (fifteen_min_ago,)
@@ -262,7 +262,7 @@ class SystemMonitor:
             checks["memory_usage_pct"] = 0.0
 
         # Determine overall status
-        critical_checks = [checks.get("database", False), checks.get("chromadb", False)]
+        critical_checks = [checks.get("database", False), checks.get("lancedb", False)]
         if not all(critical_checks):
             status = "critical"
         elif alerts:
@@ -280,8 +280,7 @@ class SystemMonitor:
         """Hourly metric summaries for chart data."""
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection(self.db_path)
             cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
             rows = conn.execute("""
@@ -320,7 +319,7 @@ class SystemMonitor:
         """Remove metrics older than max_age_days."""
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn = get_db_connection(self.db_path)
             conn.execute(
                 "DELETE FROM system_metrics WHERE timestamp < datetime('now', ?)",
                 (f"-{max_age_days} days",)
