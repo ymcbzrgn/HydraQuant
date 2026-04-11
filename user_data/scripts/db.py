@@ -53,7 +53,7 @@ class _ConnectionPool:
         logger.info(f"[DB] Connection pool initialized (max={self._max_size}, timeout={self._busy_timeout_ms}ms)")
 
     def _create_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH, timeout=self._busy_timeout_ms / 1000)
+        conn = sqlite3.connect(DB_PATH, timeout=self._busy_timeout_ms / 1000, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
@@ -175,7 +175,7 @@ def get_db_connection(db_path: str = None) -> sqlite3.Connection:
     if db_path is None or db_path == DB_PATH:
         return _pool.acquire()
     # Custom path — direct connection (for tests with tmp_path)
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
