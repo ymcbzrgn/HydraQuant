@@ -56,6 +56,15 @@ class LanceTable:
         self._dim = dim
         self._metric = metric
 
+    @staticmethod
+    def _to_float_list(vec) -> List[float]:
+        """Convert any embedding format (numpy, list, tuple) to plain float list."""
+        if hasattr(vec, 'tolist'):
+            return vec.tolist()  # numpy array
+        if isinstance(vec, (list, tuple)):
+            return [float(x) for x in vec]
+        return list(vec)
+
     def add(self, ids: List[str], embeddings: Optional[List[List[float]]] = None,
             documents: Optional[List[str]] = None,
             metadatas: Optional[List[Dict[str, Any]]] = None):
@@ -74,7 +83,7 @@ class LanceTable:
             meta = metadatas[i] if metadatas is not None and i < len(metadatas) else {}
             record = {
                 "id": doc_id,
-                "vector": (list(embeddings[i]) if hasattr(embeddings[i], '__iter__') else [0.0] * self._dim) if embeddings is not None and len(embeddings) > i else [0.0] * self._dim,
+                "vector": self._to_float_list(embeddings[i]) if embeddings is not None and i < len(embeddings) else [0.0] * self._dim,
                 "document": documents[i] if documents is not None and i < len(documents) else "",
                 "metadata_json": json.dumps(meta or {}, ensure_ascii=False),
                 "created_at": datetime.utcnow().isoformat(),
