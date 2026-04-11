@@ -71,11 +71,11 @@ class LanceTable:
 
         records = []
         for i, doc_id in enumerate(ids):
-            meta = metadatas[i] if metadatas and i < len(metadatas) else {}
+            meta = metadatas[i] if metadatas is not None and i < len(metadatas) else {}
             record = {
                 "id": doc_id,
-                "vector": embeddings[i] if embeddings else [0.0] * self._dim,
-                "document": documents[i] if documents else "",
+                "vector": (list(embeddings[i]) if hasattr(embeddings[i], '__iter__') else [0.0] * self._dim) if embeddings is not None and len(embeddings) > i else [0.0] * self._dim,
+                "document": documents[i] if documents is not None and i < len(documents) else "",
                 "metadata_json": json.dumps(meta or {}, ensure_ascii=False),
                 "created_at": datetime.utcnow().isoformat(),
                 # Sprint 2 Trinity fields
