@@ -65,11 +65,30 @@ class GraphStore:
         if not GRAFEO_AVAILABLE:
             raise ImportError("grafeo not installed. Run: pip install grafeo")
         os.makedirs(GRAPH_DB_DIR, exist_ok=True)
-        self._db = grafeo.GrafeoDB.open(GRAPH_DB_PATH)
         self._write_lock = threading.Lock()
+        self._is_writer = False
+
+        # Try exclusive write access first
+        try:
+            self._db = grafeo.GrafeoDB.open(GRAPH_DB_PATH)
+            self._is_writer = True
+            logger.info(f"[GraphStore] WRITER mode: {GRAPH_DB_PATH} "
+                         f"(nodes={self._db.node_count}, edges={self._db.edge_count})")
+        except Exception as e:
+            if "locked" in str(e).lower():
+                # Another process has write lock — open read-only in memory
+                try:
+                    self._db = grafeo.GrafeoDB.open_in_memory(GRAPH_DB_PATH)
+                    logger.info(f"[GraphStore] READER mode (in-memory): {GRAPH_DB_PATH} "
+                                 f"(nodes={self._db.node_count}, edges={self._db.edge_count})")
+                except Exception as e2:
+                    # DB file doesn't exist yet — create in-memory empty
+                    self._db = grafeo.GrafeoDB()
+                    logger.warning(f"[GraphStore] EMPTY in-memory mode (no DB file yet)")
+            else:
+                raise
+
         self._initialized = True
-        logger.info(f"[GraphStore] Connected: {GRAPH_DB_PATH} "
-                     f"(nodes={self._db.node_count}, edges={self._db.edge_count})")
 
     # ─── MAGMA-Compatible API ───────────────────────────────────────
 
@@ -87,6 +106,11 @@ class GraphStore:
 
         source_lower = source.lower().strip()
         target_lower = target.lower().strip()
+
+        if not self._is_writer:
+            # Reader mode — can't write, log and skip
+            logger.debug(f"[GraphStore] Skipped add_edge (reader mode): {source}->{target}")
+            return False
 
         with self._write_lock:
             try:
@@ -342,7 +366,9 @@ class GraphStore:
     # ─── Stats & Management ─────────────────────────────────────────
 
     def save(self):
-        """Persist graph to disk via WAL checkpoint."""
+        """Persist graph to disk via WAL checkpoint (writer only)."""
+        if not self._is_writer:
+            return
         try:
             self._db.wal_checkpoint()
         except Exception:
@@ -356,6 +382,7 @@ class GraphStore:
             mem = "N/A"
         return {
             "path": GRAPH_DB_PATH,
+            "mode": "writer" if self._is_writer else "reader",
             "node_count": self._db.node_count,
             "edge_count": self._db.edge_count,
             "memory_usage": mem,
