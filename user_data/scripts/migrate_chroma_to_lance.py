@@ -87,12 +87,16 @@ def migrate_collection(chroma_coll, lance_table, batch_size: int = 500,
         if dry_run:
             logger.info(f"  [DRY-RUN] Would migrate {len(ids)} docs (offset={offset})")
         else:
+            # ChromaDB returns numpy arrays — use 'is not None' checks (not 'if X')
+            has_emb = embeddings is not None and len(embeddings) > 0
+            has_doc = documents is not None and len(documents) > 0
+            has_meta = metadatas is not None and len(metadatas) > 0
             try:
                 lance_table.add(
                     ids=ids,
-                    embeddings=embeddings if embeddings else None,
-                    documents=documents if documents else None,
-                    metadatas=metadatas if metadatas else None,
+                    embeddings=embeddings if has_emb else None,
+                    documents=documents if has_doc else None,
+                    metadatas=metadatas if has_meta else None,
                 )
             except Exception as e:
                 logger.error(f"  LanceDB add failed at offset={offset}: {e}")
@@ -101,9 +105,9 @@ def migrate_collection(chroma_coll, lance_table, batch_size: int = 500,
                     try:
                         lance_table.add(
                             ids=[ids[i]],
-                            embeddings=[embeddings[i]] if embeddings else None,
-                            documents=[documents[i]] if documents else None,
-                            metadatas=[metadatas[i]] if metadatas else None,
+                            embeddings=[embeddings[i]] if has_emb else None,
+                            documents=[documents[i]] if has_doc else None,
+                            metadatas=[metadatas[i]] if has_meta else None,
                         )
                     except Exception as e2:
                         logger.warning(f"  Skipped {ids[i]}: {e2}")
