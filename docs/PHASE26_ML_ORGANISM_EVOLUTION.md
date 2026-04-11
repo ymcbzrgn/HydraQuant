@@ -15,68 +15,90 @@
 | 1C | chart_features.py — Hurst | 312-387 | DONE (5 feature) | R/S analysis |
 | 1C | chart_features.py — Path Sig | 394-441 | DONE (120 feature) | depth=4 (plandan fazla!) |
 | 1D | test_chart_features.py | 252 satir | DONE (23 test) | Plandan fazla (150→252) |
-| 2A | catboost_model.py | — | **YAPILMADI** | Standalone dosya yok. Sprint 2'ye borc |
-| 2B | CatBoost feature pipeline | — | KISMI | triple_perception.py icinde inference stub var (L275-340) |
-| 2C | CatBoost training script | — | **YAPILMADI** | Sprint 2'ye borc |
-| 2D | CatBoost deploy | — | **YAPILMADI** | Model dosyasi yok (catboost_signal_v1.cbm) |
+| 2A | catboost_model.py | — | DONE (Phase 28) | catboost_trainer.py: gather_training_data + train_catboost, walk-forward split |
+| 2B | CatBoost feature pipeline | — | DONE (Phase 28) | triple_perception._catboost_predict() + trainer feature alignment |
+| 2C | CatBoost training script | — | DONE (Phase 28) | 382 trade, 11 feature, 3-class (BULLISH/NEUTRAL/BEARISH) |
+| 2D | CatBoost deploy | — | DONE (Phase 28) | catboost_signal_v1.cbm (31KB) canli, haftalik retrain Pazar 03:00 |
 | 3A | ttm_perception.py | 298 satir | DONE | granite-timeseries-ttm-r2, 64-dim embedding |
 | 3B | chronos_perception.py | 225 satir | DONE | chronos-bolt-small, P10/P50/P90 |
 | 3C | triple_perception.py | 414 satir | DONE | TTM+Chronos+CatBoost fusion hub |
-| 3D | Triple Perception entegrasyon | — | KISMI | AIFreqtradeSizer DONE (L811-839), rag_graph.py YAPILMADI |
+| 3D | Triple Perception entegrasyon | — | DONE (Phase 28) | AIFreqtradeSizer (L811-839) + evidence_engine pheromone okuma + rag_graph flow |
 | 4A | ood_detector.py | 262 satir | DONE | MarketOODDetector, Mahalanobis |
 | 4B | conformal_calibrator.py | 252 satir | DONE | CQR+ACI, target_coverage=0.95 |
 | 4C | deep_ensemble.py | 284 satir | DONE | 5x SmallMLP(64→32→1) |
 | 4D | dual_axis_calibrator.py | 168 satir | DONE | CatBoost prob x CQR interval |
 | 5A | pheromone_field.py | 294 satir | DONE | deposit/read/cleanup, thread-safe |
-| 5B | Pheromone entegrasyon | — | KISMI | triple_perception+scheduler DONE, neural_organism+rag_graph YAPILMADI |
-| 5C | predictive_interoception.py | 299 satir | DONE | Proaktif alertler calisiyor. SmallMLP YOK (basit prediktor) |
-| 5D | Entegrasyon testi | — | **YAPILMADI** | Zero test coverage for Phase 26 modules (chart_features haric) |
-| 5E | requirements-phase26.txt | — | **YAPILMADI** | Dosya yok |
+| 5B | Pheromone entegrasyon | — | DONE (Phase 28) | triple_perception deposits + evidence_engine reads + neural_organism reads/writes + scheduler cleanup |
+| 5C | predictive_interoception.py | 299 satir | DONE | Proaktif alertler calisiyor. EWMA+trend (plan MLP idi — Sprint 2'de upgrade) |
+| 5D | Entegrasyon testi | 463 satir | DONE (Phase 28) | 43 test, 9 modul: test_phase26_modules.py |
+| 5E | requirements-phase26.txt | — | DONE (Phase 28) | Dockerfile.ai'ye baglanmis, sunucuda kurulu |
 
-**Sprint 1 Ozet:**
-- 11/24 task DONE, 3/24 KISMI, 5/24 YAPILMADI
-- Toplam yeni kod: ~3046 satir (plan: ~1800 — %69 fazla)
-- Toplam test: 252 satir (sadece chart_features icin, geri kalan SIFIR)
-- 193 chart feature CALISIYOR (plan: 130-230)
-- TTM + Chronos CALISIYOR, CatBoost BEKLENIYOR (model yok)
-- Pheromone + Interoception CALISIYOR (scheduler'da 15dk/30dk job)
+**Sprint 1 Ozet (Phase 28 sonrasi guncellenmis — 11 Nisan 2026):**
+- 19/24 task DONE, 0 KISMI, 0 YAPILMADI (5 eski borc Phase 28'de kapatildi)
+- Toplam yeni kod: ~3046 satir + Phase 28 fix'leri
+- Toplam test: 252 (chart_features) + 463 (phase26_modules) = 715 satir
+- 193 chart feature CALISIYOR
+- TTM + Chronos + CatBoost CALISIYOR (model trained, haftalik retrain)
+- Pheromone CALISIYOR (triple_perception→evidence_engine→neural_organism zinciri)
+- sizing_multiplier CALISIYOR (custom_stake_amount'ta okunuyor)
 - Hormonlar: cortisol=1.0, dopamine=1.05, serotonin=0.786, adrenaline=1.0
 
-**Sprint 1 Borclari (Sprint 2'de veya Phase 28 sonrasi yapilacak):**
-1. CatBoost training pipeline (2A-2D) — model dosyasi olusturulmali
-2. rag_graph.py entegrasyonu — Triple Perception ve Pheromone sadece comment var
-3. neural_organism.py pheromone entegrasyonu — sifir kod
-4. Entegrasyon testleri — chart_features haric hicbir Phase 26 modulu test edilmedi
-5. requirements-phase26.txt — dependency dosyasi olusturulmali
-6. Interoception SmallMLP — basit prediktor kullanildi, plan MLP idi
+**Sprint 1 Borc Kapatma Kaydi (Phase 28'de cozulenler):**
+1. CatBoost training → KAPATILDI: catboost_trainer.py yazildi, model trained (382 trade), haftalik retrain zamanlanmis
+2. rag_graph.py entegrasyonu → KAPATILDI: evidence_engine pheromone'dan perception okuyarak confidence ayarliyor
+3. neural_organism pheromone → KAPATILDI: Step 0 okuma (prediction/uncertainty/health) + Step 4-5 yazma (HORMONE_STATE/FEAR_LEVEL)
+4. Entegrasyon testleri → KAPATILDI: 43 test, 9 modul (test_phase26_modules.py, 463 satir)
+5. requirements-phase26.txt → KAPATILDI: Dockerfile.ai'ye baglanmis
+6. sizing_multiplier → KAPATILDI: custom_stake_amount() artik okuyor ve trade size'i etkiliyor
+7. Pheromone key mismatch → KAPATILDI: "prediction"/"uncertainty"/"organism_health" tutarli
+8. Scheduler retraining → KAPATILDI: 4 yeni job (CatBoost Pazar 03:00, OOD Pazar 04:00, Conformal 6h, Ensemble Pazar 05:00)
 
-### PHASE 28: DATABASE EVOLUTION — SPRINT 2'DEN ONCE YAPILACAK
+**Kalan tek sapma:** Interoception SmallMLP planlandi ama EWMA+linear trend prediktor kullanildi. Calisiyor ve proaktif alert veriyor — Sprint 2'de world_model.py ile birlikte MLP'ye upgrade edilebilir.
 
-Phase 28 araya giriyor (docs/PHASE28_DATABASE_EVOLUTION.md):
-- ChromaDB → LanceDB (vector search)
-- Grafeo (graph DB — Causal, MAGMA, Agent networks)
-- DuckDB (analytics — backtest, OHLCV)
-- Zvec (Alibaba, experimental 1 collection)
-- SQLite connection pooling + db.py v2 merkezilestirme
-- Tahmini sure: 7-12 gun
-- **Sprint 2 bu bitmeden BASLAMAZ**
+### PHASE 28: DATABASE EVOLUTION — TAMAMLANDI (11 Nisan 2026)
 
-### SPRINT 2: KARAR + NEDENSELLIK + OTONOM YASAM — BEKLIYOR
+Phase 28 tamamlandi (docs/PHASE28_DATABASE_EVOLUTION.md):
+- ChromaDB → LanceDB: 23,087 doc tasinidi, 0 kayip, canli calisiyor
+- Grafeo: ZMQ IPC broker/client mimarisi, multi-process cozuldu, MAGMA Grafeo backend
+- DuckDB: analytics_engine.py, Sprint 2 tablolari hazir (rl_episodes, wm_states, dream...)
+- SQLite: db.py v2 connection pool, 37 dosya migrate, 0 "database is locked"
+- CatBoost: model trained (382 trade), haftalik retrain zamanlanmis
+- Phase 26 Sprint 1 borclari: 8/8 KAPATILDI
+- **Sprint 2 BASLAMAYA HAZIR**
+
+### SPRINT 2: KARAR + NEDENSELLIK + OTONOM YASAM — BASLAMAYA HAZIR
 
 Tum 20 task (6A-10E) BEKLIYOR durumda. Hicbiri baslamadi. Dosyalar olusturulmadi.
 
-**Sprint 2'de EK olarak yapilacaklar (Sprint 1 borclari):**
-- CatBoost training pipeline (2A-2D detaylari TANIMLANMALI)
-- rag_graph.py Phase 26 entegrasyonu
-- neural_organism.py pheromone entegrasyonu
-- Phase 26 modul testleri
+**Sprint 1 borclari KAPANDI** — Phase 28'de 8/8 borc kapatildi. Sprint 2 temiz altyapi uzerine basliyor:
+- DB: LanceDB (vector) + Grafeo (graph) + DuckDB (analytics) + SQLite-WAL (OLTP) HAZIR
+- Tablolar: causal_discoveries, rl_replay_buffer, world_model_states, dream_scenarios... HAZIR
+- Grafeo semalari: add_causal_edge, add_agent_node, export_for_gnn HAZIR
+- CatBoost: model canli, haftalik retrain aktif
+- Pheromone zinciri: deposit→read→react CALISIYOR
+- sizing_multiplier: custom_stake_amount'ta aktif
 
-**Sprint 2'de KAPSAMDA OLMAYAN isler (Sprint 3+ veya gelecek phase):**
-- Process 12: Evolutionary Architecture Search (priority #21)
-- Process 14: Market Microstructure Intelligence (priority #16)
-- Process 15: Cerebellum 24-slot timing (priority #22)
-- Novel Contribution #8: Hormonal Market Making (Process 14 gerektirir)
-- Model Risk Engine, Post-Trade Court, Ablation League Table (dokumanlanmis ama sprint'e atanmamis)
+**Sprint 2 EK TASK'LAR (Phase 26 2 sprint'te TAMAMEN bitmeli — hicbir sey Sprint 3'e KALMAZ):**
+
+| Gun | Task | Dosya | Aciklama |
+|-----|------|-------|----------|
+| 11A | architecture_evolver.py — Evolutionary Search (Process 12) | YENI | ArchitectureEvolver: evolve(), mutate(), crossover(). Haftalik scheduler job |
+| 11B | lob_encoder.py — LOB Microstructure (Process 14.1-14.2) | YENI | Level-2 order book encoding, bid-ask imbalance, depth features |
+| 11C | order_flow.py — CVD + Liquidation (Process 14.3-14.4) | YENI | Cumulative Volume Delta, liquidation heatmap, execution policy |
+| 11D | market_maker_mode.py — Hormonal MM (Novel #8, Process 14.6) | YENI | Cortisol → gamma modulation, bid-ask spread ayarlama |
+| 11E | slippage_forecaster.py — Execution Quality (Process 14.5) | YENI | Slippage prediction, optimal execution timing |
+| 11F | cerebellum_timing.py — 24-slot Performance (Process 15) | YENI | Hour-of-day trading, timing optimization, sirkadyen ritim |
+| 12A | ablation_league.py — Weekly Ablation Test | YENI | Modul ablation, Sharpe/DD/WinRate delta, KEEP/WATCH/PARK |
+| 12B | model_risk_engine.py — Model Health Guard | YENI | check_world_model_health(), check_counterfactual_bias() |
+| 12C | post_trade_court.py — Blame Assignment | YENI | investigate(), blame pipeline, trade autopsy |
+| 12D | decision_contract.py — Trade Audit Trail | YENI | JSON schema, organism_audit extension, full trade provenance |
+| 12E | Interoception SmallMLP upgrade (5C borcu) | predictive_interoception.py | EWMA → SmallMLP per metric |
+| 12F | sim2real_pipeline.py — Domain Randomization | YENI | Slippage/fee/spread noise injection, sim→live transfer |
+| 12G | phi_consciousness.py — IIT Phi Metric | YENI | Organism bilinclilik olcumu, integration score |
+| 12H | ATCB Benchmark Suite (10 senaryo) | YENI | Composite scoring, ablation baseline, Telegram rapor |
+| 13A | FreqUI AI Backend API'leri | api_ai.py | 10+ yeni endpoint: /organism, /graph, /pheromone, /analytics |
+
+**TOPLAM Sprint 2: 20 (6A-10E) + 15 (11A-13A) = 35 task**
 
 ---
 
