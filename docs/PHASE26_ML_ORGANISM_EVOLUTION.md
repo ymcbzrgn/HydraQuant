@@ -97,8 +97,10 @@ Tum 20 task (6A-10E) BEKLIYOR durumda. Hicbiri baslamadi. Dosyalar olusturulmadi
 | 12G | phi_consciousness.py — IIT Phi Metric | YENI | Organism bilinclilik olcumu, integration score |
 | 12H | ATCB Benchmark Suite (10 senaryo) | YENI | Composite scoring, ablation baseline, Telegram rapor |
 | 13A | FreqUI AI Backend API'leri | api_ai.py | 10+ yeni endpoint: /organism, /graph, /pheromone, /analytics |
+| 13B | **Backtest Auto-Training Pipeline** | YENI | OHLCV indir → backtest calistir → labeled trade uret → CatBoost train. 10+ pair, 2+ yil, 5000-20000 trade. Scheduler'da haftalik |
+| 13C | **Dis Veri Entegrasyonu** | YENI | Kaggle Multi-Exchange Labels + HuggingFace Binance Futures + Triple Barrier labeling. CatBoost feature zenginlestirme |
 
-**TOPLAM Sprint 2: 20 (6A-10E) + 15 (11A-13A) = 35 task**
+**TOPLAM Sprint 2: 20 (6A-10E) + 17 (11A-13C) = 37 task**
 
 ---
 
