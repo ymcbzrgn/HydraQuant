@@ -18,6 +18,11 @@ sys.path.append(os.path.dirname(__file__))
 
 logger = logging.getLogger(__name__)
 
+
+class _ConfidenceCalibratorGlobals:
+    """Module-level state to prevent log spam across instances."""
+    last_brier_warn = 0.0
+
 from ai_config import AI_DB_PATH as DB_PATH
 from db import get_connection, get_db_connection
 
@@ -177,12 +182,14 @@ class ConfidenceCalibrator:
         if brier >= brier_thr:
             self._calibrated = False
             self._brier_disabled = True
-            # Phase 25: Log only ONCE per session, not every call (prevents log spam)
-            if not getattr(self, '_brier_warned', False):
+            # Phase 28: Log once per HOUR globally (not per instance)
+            import time as _time
+            _now = _time.time()
+            if _now - _ConfidenceCalibratorGlobals.last_brier_warn > 3600:
                 logger.warning(f"[Calibrator] Brier {brier:.4f} >= {brier_thr} (worse than random), "
                               f"passing raw confidence until re-fit improves. "
                               f"Need more trade outcomes with diverse confidence levels.")
-                self._brier_warned = True
+                _ConfidenceCalibratorGlobals.last_brier_warn = _now
             return raw_confidence
 
         z = self._platt_a * raw_confidence + self._platt_b
