@@ -17,7 +17,7 @@ except Exception as _e:
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
-from db import get_db_connection
+from db import get_db_connection, execute_with_retry
 
 
 def _load_gemini_keys() -> list:
@@ -192,45 +192,37 @@ class SemanticCache:
             return
 
         try:
-            with get_db_connection(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO semantic_cache 
-                    (query_text, query_embedding, response, pair, ttl_seconds) 
-                    VALUES (?, ?, ?, ?, ?)
-                """, (query, query_emb.tobytes(), response, pair, ttl))
-                conn.commit()
-                logger.info(f"Stored response in semantic cache for query: '{query[:30]}...' (TTL: {ttl}s)")
+            execute_with_retry(
+                """INSERT INTO semantic_cache
+                   (query_text, query_embedding, response, pair, ttl_seconds)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (query, query_emb.tobytes(), response, pair, ttl),
+                max_retries=5
+            )
+            logger.info(f"Stored response in semantic cache for query: '{query[:30]}...' (TTL: {ttl}s)")
         except Exception as e:
             logger.error(f"Error writing to semantic cache: {e}")
 
     def invalidate(self, pair: Optional[str] = None):
         """Invalidate cache entries for a specific pair, or all entries."""
         try:
-            with get_db_connection(self.db_path) as conn:
-                cursor = conn.cursor()
-                if pair:
-                    cursor.execute("DELETE FROM semantic_cache WHERE pair = ?", (pair,))
-                else:
-                    cursor.execute("DELETE FROM semantic_cache")
-                conn.commit()
-                logger.info(f"Invalidated semantic cache (pair: {pair})")
+            if pair:
+                execute_with_retry("DELETE FROM semantic_cache WHERE pair = ?", (pair,), max_retries=5)
+            else:
+                execute_with_retry("DELETE FROM semantic_cache", max_retries=5)
+            logger.info(f"Invalidated semantic cache (pair: {pair})")
         except Exception as e:
             logger.error(f"Error invalidating semantic cache: {e}")
 
     def cleanup_expired(self):
         """Remove expired entries based on TTL."""
         try:
-            with get_db_connection(self.db_path) as conn:
-                cursor = conn.cursor()
-                # Use basic datetime comparison
-                cursor.execute("""
-                    DELETE FROM semantic_cache 
-                    WHERE (strftime('%s', 'now') - strftime('%s', created_at)) > ttl_seconds
-                """)
-                deleted = cursor.rowcount
-                conn.commit()
-                if deleted > 0:
-                    logger.debug(f"Cleaned up {deleted} expired semantic cache entries.")
+            cursor = execute_with_retry(
+                """DELETE FROM semantic_cache
+                   WHERE (strftime('%s', 'now') - strftime('%s', created_at)) > ttl_seconds""",
+                max_retries=5
+            )
+            if cursor and cursor.rowcount > 0:
+                logger.debug(f"Cleaned up {cursor.rowcount} expired semantic cache entries.")
         except Exception as e:
             logger.error(f"Error cleaning up expired cache: {e}")

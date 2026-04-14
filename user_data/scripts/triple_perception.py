@@ -327,9 +327,11 @@ class TriplePerception:
         # Predict probability
         proba = self._catboost_model.predict_proba(feature_df)[0]
 
-        # Assume binary classification: [P(bearish), P(bullish)]
-        if len(proba) >= 2:
-            probability = float(proba[1])  # P(bullish)
+        # MultiClass: [P(bearish), P(neutral), P(bullish)]
+        if len(proba) >= 3:
+            probability = float(proba[2])  # P(bullish)
+        elif len(proba) >= 2:
+            probability = float(proba[1])  # Binary fallback: P(bullish)
         else:
             probability = float(proba[0])
 

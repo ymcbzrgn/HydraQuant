@@ -374,7 +374,49 @@ class PipelineScheduler:
         # Phase 28: ML Model Retraining Jobs
         self.scheduler.add_job(self._catboost_retrain, 'cron', day_of_week='sun', hour=3,
             id='catboost_retrain', name='CatBoost Weekly Retrain', max_instances=1, replace_existing=True)
-        self.scheduler.add_job(self._ood_refit, 'cron', day_of_week='sun', hour=4,
+        # Sprint 2 (6A): Causal discovery — weekly Saturday 02:00 UTC (before CatBoost retrain)
+        self.scheduler.add_job(self._causal_discovery, 'cron', day_of_week='sat', hour=2,
+            id='causal_discovery', name='Causal Engine Weekly Discovery', max_instances=1, replace_existing=True)
+        # Sprint 2 (6B): Counterfactual analysis — weekly Saturday 02:30 UTC (after causal discovery)
+        self.scheduler.add_job(self._counterfactual_analysis, 'cron', day_of_week='sat', hour=2, minute=30,
+            id='counterfactual_analysis', name='Counterfactual Weekly Analysis', max_instances=1, replace_existing=True)
+        # Sprint 2 (7B): IQL pre-training — weekly Sunday 02:00 UTC (before CatBoost at 03:00)
+        self.scheduler.add_job(self._rl_iql_retrain, 'cron', day_of_week='sun', hour=2,
+            id='iql_retrain', name='IQL Weekly Pre-training', max_instances=1, replace_existing=True)
+        # Sprint 2 (8B): Reptile meta-learning — weekly Sunday 01:00 UTC (before IQL)
+        self.scheduler.add_job(self._reptile_meta_update, 'cron', day_of_week='sun', hour=1,
+            id='reptile_meta', name='Reptile Weekly Meta-Update', max_instances=1, replace_existing=True)
+        # Sprint 2 (8C+8D): World model train + Dream session — weekly Sunday 01:30 UTC
+        self.scheduler.add_job(self._world_model_and_dream, 'cron', day_of_week='sun', hour=1, minute=30,
+            id='world_model_dream', name='World Model + Dream Session', max_instances=1, replace_existing=True)
+        # Sprint 2 (9A): Self-model introspection — weekly Saturday 03:00 UTC
+        self.scheduler.add_job(self._self_model_introspect, 'cron', day_of_week='sat', hour=3,
+            id='self_model', name='Self-Model Weekly Introspection', max_instances=1, replace_existing=True)
+        # Sprint 2 (9C): Autonomous lifecycle tick — every hour
+        self.scheduler.add_job(self._lifecycle_tick, 'interval', hours=1,
+            id='lifecycle_tick', name='Lifecycle Hourly Tick', max_instances=1, replace_existing=True)
+        # Sprint 2 (9D): GNN pattern discovery — weekly Saturday 03:30 UTC
+        self.scheduler.add_job(self._gnn_discovery, 'cron', day_of_week='sat', hour=3, minute=30,
+            id='gnn_discovery', name='GNN Weekly Pattern Discovery', max_instances=1, replace_existing=True)
+        # Sprint 2 (11A): Architecture evolution — weekly Saturday 04:00 UTC
+        self.scheduler.add_job(self._architecture_evolve, 'cron', day_of_week='sat', hour=4,
+            id='arch_evolve', name='Architecture Weekly Evolution', max_instances=1, replace_existing=True)
+        # Sprint 2 (11F): Cerebellum timing update — daily 00:30 UTC
+        self.scheduler.add_job(self._cerebellum_update, 'cron', hour=0, minute=30,
+            id='cerebellum_update', name='Cerebellum Daily Timing Update', max_instances=1, replace_existing=True)
+        # Sprint 2 (12A): Ablation league — weekly Saturday 04:30 UTC
+        self.scheduler.add_job(self._ablation_league_run, 'cron', day_of_week='sat', hour=4, minute=30,
+            id='ablation_league', name='Ablation League Weekly', max_instances=1, replace_existing=True)
+        # Sprint 2 (12B): Model risk assessment — daily 06:30 UTC
+        self.scheduler.add_job(self._model_risk_check, 'cron', hour=6, minute=30,
+            id='model_risk', name='Model Risk Daily Check', max_instances=1, replace_existing=True)
+        # Sprint 2 (12C): Post-trade court — every 6 hours
+        self.scheduler.add_job(self._post_trade_court_run, 'interval', hours=6,
+            id='post_trade_court', name='Post-Trade Court 6h', max_instances=1, replace_existing=True)
+        # Sprint 2 (12G): Phi consciousness — weekly Saturday 05:00 UTC
+        self.scheduler.add_job(self._phi_measurement, 'cron', day_of_week='sat', hour=5,
+            id='phi_measurement', name='Phi Consciousness Weekly', max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._ood_refit, 'cron', day_of_week='sun', hour=4, minute=15,
             id='ood_refit', name='OOD Detector Refit', max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._conformal_recalibrate, 'interval', hours=6,
             id='conformal_recal', name='Conformal Recalibration', max_instances=1, replace_existing=True)
@@ -382,7 +424,7 @@ class PipelineScheduler:
             id='ensemble_refit', name='Deep Ensemble Refit', max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 39 jobs (27 + 6 organism + 2 phase26 + 4 phase28)")
+        logger.info("[Scheduler] Started with 52 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2)")
         return True
 
     def stop(self):
@@ -1287,6 +1329,17 @@ class PipelineScheduler:
             except Exception as e:
                 logger.error(f"[Scheduler:AutoBacktest] Bootstrap failed: {e}")
 
+            # 6b. Sprint 2 (13B): Generate chart feature labels for CatBoost v2
+            try:
+                from backtest_label_generator import BacktestLabelGenerator
+                label_gen = BacktestLabelGenerator()
+                label_count = label_gen.generate_from_backtests(results_dir=bt_results_dir)
+                if label_count > 0:
+                    logger.info(f"[Scheduler:AutoBacktest] Generated {label_count} CatBoost training labels")
+                label_gen._ohlcv_cache.clear()
+            except Exception as e:
+                logger.error(f"[Scheduler:AutoBacktest] Label generation failed: {e}")
+
             # 7. Clean up temp config
             try:
                 os.unlink(override_path)
@@ -1494,18 +1547,468 @@ class PipelineScheduler:
 
     # ═══ Phase 28: ML Model Retraining Handlers ═══════════════════
 
+    def _self_model_introspect(self):
+        """Weekly Saturday 03:00 UTC: Self-model introspection + active learning."""
+        try:
+            from self_model import get_self_model
+            from active_learner import get_active_learner
+
+            # 9A: Introspection
+            sm = get_self_model()
+            result = sm.introspect(lookback_days=30)
+            if "error" not in result:
+                logger.info(f"[Sprint2:SelfModel] Introspection: {result.get('n_trades', 0)} trades, "
+                           f"{len(result.get('biases_detected', []))} biases, "
+                           f"{result.get('competence_entries', 0)} competence entries")
+
+            # 9B: Active learning suggestions
+            al = get_active_learner()
+            al.publish_suggestions()
+
+        except ImportError:
+            logger.info("[Sprint2:SelfModel] self_model/active_learner not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:SelfModel] Introspection failed: {e}")
+
+    def _lifecycle_tick(self):
+        """Hourly: Run autonomous lifecycle tick (all 13 layers)."""
+        try:
+            from autonomous_lifecycle import get_lifecycle
+
+            # Build market state from current pheromone readings
+            market_state = self._build_market_state_for_lifecycle()
+
+            lifecycle = get_lifecycle()
+            decisions = lifecycle.lifecycle_tick(market_state)
+
+            logger.debug(f"[Sprint2:Lifecycle] Tick {decisions.get('tick', '?')}: "
+                        f"sizing={decisions.get('final_sizing_mult', 1.0)}, "
+                        f"danger={decisions.get('danger', {}).get('response', 'NORMAL')}, "
+                        f"mode={decisions.get('circadian', {}).get('mode', 'normal')}")
+
+        except ImportError:
+            pass  # Silent — lifecycle is optional during initial deployment
+        except Exception as e:
+            logger.debug(f"[Sprint2:Lifecycle] Tick failed: {e}")
+
+    def _build_market_state_for_lifecycle(self) -> Dict:
+        """Build market state dict for lifecycle tick from available sources."""
+        state = {
+            "drawdown": 0.0,
+            "cortisol": 0.5,
+            "consecutive_losses": 0,
+            "ood_distance": 0,
+            "fng_value": 50,
+            "market_stress": 0.5,
+            "recent_pnl_list": [],
+            "param_changes": [],
+        }
+
+        try:
+            from pheromone_field import get_pheromone_field
+            pfield = get_pheromone_field()
+
+            # Read from pheromone field
+            health = pfield.read_float("organism_health", default=0.5)
+            state["market_stress"] = 1.0 - health
+
+            uncertainty = pfield.read_float("uncertainty", default=0.5)
+            state["cortisol"] = uncertainty
+        except Exception:
+            pass
+
+        try:
+            from db import get_connection
+            with get_connection() as conn:
+                # Recent PnL for hormesis
+                rows = conn.execute("""
+                    SELECT outcome_pnl FROM ai_decisions
+                    WHERE outcome_pnl IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 20
+                """).fetchall()
+                state["recent_pnl_list"] = [r["outcome_pnl"] for r in rows]
+
+                # Consecutive losses
+                losses = 0
+                for r in rows:
+                    if (r["outcome_pnl"] or 0) < 0:
+                        losses += 1
+                    else:
+                        break
+                state["consecutive_losses"] = losses
+        except Exception:
+            pass
+
+        return state
+
+    def _architecture_evolve(self):
+        """Weekly Saturday 04:00 UTC: Run evolutionary architecture search."""
+        try:
+            from architecture_evolver import get_evolver
+            evolver = get_evolver()
+            result = evolver.evolve(population_size=10, n_generations=5)
+            logger.info(f"[Sprint2:Evolver] Evolution: fitness={result.get('best_fitness', 0):.4f}, "
+                       f"organs={result.get('active_organs', 0)}, neurons={result.get('total_neurons', 0)}")
+        except ImportError:
+            logger.info("[Sprint2:Evolver] architecture_evolver not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:Evolver] Evolution failed: {e}")
+
+    def _cerebellum_update(self):
+        """Daily 00:30 UTC: Update cerebellum timing multipliers."""
+        try:
+            from cerebellum_timing import get_cerebellum
+            cerebellum = get_cerebellum()
+            cerebellum.update_from_trades(lookback_days=30)
+            cerebellum.publish_to_pheromone()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"[Sprint2:Cerebellum] Update failed: {e}")
+
+    def _ablation_league_run(self):
+        """Weekly Saturday 04:30 UTC: Run ablation league."""
+        try:
+            from ablation_league import get_ablation_league
+            league = get_ablation_league()
+            result = league.run_ablation(lookback_days=7)
+            if "error" not in result:
+                logger.info(f"[Sprint2:Ablation] League: {result.get('keep_count', 0)} KEEP, "
+                           f"{result.get('watch_count', 0)} WATCH, {result.get('park_count', 0)} PARK")
+        except ImportError:
+            logger.info("[Sprint2:Ablation] ablation_league not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:Ablation] Failed: {e}")
+
+    def _model_risk_check(self):
+        """Daily 06:30 UTC: Model risk assessment."""
+        try:
+            from model_risk_engine import get_model_risk_engine
+            mre = get_model_risk_engine()
+            result = mre.assess_risk()
+            logger.info(f"[Sprint2:ModelRisk] Overall risk: {result.get('overall_risk', 0):.3f}, "
+                       f"trust: {1 - result.get('overall_risk', 0):.3f}")
+            for rec in result.get("recommendations", []):
+                logger.warning(f"[Sprint2:ModelRisk] Recommendation: {rec}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"[Sprint2:ModelRisk] Check failed: {e}")
+
+    def _post_trade_court_run(self):
+        """Every 6 hours: Investigate recent completed trades."""
+        try:
+            from post_trade_court import get_court
+            court = get_court()
+            verdicts = court.investigate_recent(n_trades=5)
+            losses = [v for v in verdicts if v.get("outcome") == "LOSS"]
+            if losses:
+                logger.info(f"[Sprint2:Court] Investigated {len(verdicts)} trades, "
+                           f"{len(losses)} losses. Root causes: "
+                           f"{[l['blame']['root_cause'] for l in losses]}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"[Sprint2:Court] Investigation failed: {e}")
+
+    def _phi_measurement(self):
+        """Weekly Saturday 05:00 UTC: Measure organism consciousness (Phi)."""
+        try:
+            from phi_consciousness import get_phi
+            phi = get_phi()
+            result = phi.compute_phi()
+            logger.info(f"[Sprint2:Phi] Φ = {result.get('phi', 0):.4f} "
+                       f"({result.get('interpretation', 'unknown')})")
+        except ImportError:
+            logger.info("[Sprint2:Phi] phi_consciousness not available")
+        except Exception as e:
+            logger.debug(f"[Sprint2:Phi] Measurement failed: {e}")
+
+    def _gnn_discovery(self):
+        """Weekly Saturday 03:30 UTC: GNN pattern discovery on knowledge graph."""
+        try:
+            from gnn_organism import get_gnn
+
+            gnn = get_gnn()
+            patterns = gnn.discover_hidden_patterns()
+
+            if patterns:
+                gnn.persist_patterns(patterns)
+                logger.info(f"[Sprint2:GNN] Discovered {len(patterns)} patterns, "
+                           f"top: {patterns[0]['source']}→{patterns[0]['target']} "
+                           f"(att={patterns[0]['attention']:.3f})")
+            else:
+                logger.info("[Sprint2:GNN] No patterns discovered (graph may be empty)")
+
+        except ImportError:
+            logger.info("[Sprint2:GNN] gnn_organism not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:GNN] Discovery failed: {e}")
+
+    def _reptile_meta_update(self):
+        """Weekly Sunday 01:00 UTC: Reptile meta-learning update.
+
+        Learns a parameter initialization that adapts to any regime in 5 steps.
+        Also registers current regime with EWC to prevent catastrophic forgetting.
+        """
+        try:
+            from reptile_meta import get_reptile
+            from ewc_continual import get_ewc
+
+            reptile = get_reptile()
+            ewc = get_ewc()
+
+            # Run meta-training
+            metrics = reptile.meta_train(n_episodes=30)  # Conservative for CPU
+            logger.info(f"[Sprint2:Reptile] Meta-update: loss={metrics.get('final_loss', 'N/A'):.4f}")
+
+            # Register current params with EWC for continual learning
+            meta_params = reptile.get_meta_params()
+            if meta_params is not None:
+                # Detect current regime from recent trades
+                from db import get_connection
+                with get_connection() as conn:
+                    regime_row = conn.execute("""
+                        SELECT regime FROM ai_decisions
+                        WHERE outcome_pnl IS NOT NULL
+                        ORDER BY timestamp DESC LIMIT 1
+                    """).fetchone()
+                regime = regime_row["regime"] if regime_row else "transitional"
+
+                ewc.register_regime(regime, meta_params)
+                logger.info(f"[Sprint2:EWC] Registered regime '{regime}' with {len(meta_params)} params")
+
+        except ImportError:
+            logger.info("[Sprint2:Reptile] reptile_meta not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:Reptile] Meta-update failed: {e}")
+
+    def _world_model_and_dream(self):
+        """Weekly Sunday 01:30 UTC: Train world model + run dream session.
+
+        Flow:
+          1. Train world model on accumulated replay buffer
+          2. Run dream session (100 imagined trajectories)
+          3. Filter dreams (3-layer anomaly detection)
+          4. Valid dreams → RL replay buffer (source='dream')
+        """
+        try:
+            from world_model import get_world_model
+            from dream_engine import get_dream_engine
+
+            # 1. Train world model
+            wm = get_world_model()
+            train_result = wm.train_from_buffer(n_epochs=30, batch_size=64)
+            if "error" in train_result:
+                logger.info(f"[Sprint2:WorldModel] {train_result['error']}")
+            else:
+                logger.info(f"[Sprint2:WorldModel] Trained: "
+                           f"pred_loss={train_result.get('pred_loss', 'N/A'):.4f}")
+
+            # 2. Run dream session
+            dream_engine = get_dream_engine()
+            dream_result = dream_engine.dream_session(n_dreams=100, horizon=5)
+
+            if "error" in dream_result:
+                logger.info(f"[Sprint2:Dream] {dream_result['error']}")
+            else:
+                logger.info(f"[Sprint2:Dream] Session: "
+                           f"{dream_result['valid_dreams']}/{dream_result['total_dreams']} valid, "
+                           f"pass_rate={dream_result['pass_rate']:.1%}, "
+                           f"stored={dream_result['stored_in_buffer']}")
+
+        except ImportError:
+            logger.info("[Sprint2:WorldModel] world_model/dream_engine not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:WorldModel] Failed: {e}")
+
+    def _rl_iql_retrain(self):
+        """Weekly Sunday 02:00 UTC: Generate episodes + retrain IQL.
+
+        Flow:
+          1. Generate offline episodes from backtest replay
+          2. Train IQL on accumulated replay buffer
+          3. Save checkpoint for SAC online fine-tuning
+        """
+        try:
+            from iql_pretrain import run_iql_training
+
+            metrics = run_iql_training(
+                generate_episodes=100,  # Generate 100 new episodes
+                n_epochs=50,           # 50 epochs (conservative for CPU)
+            )
+
+            if "error" not in metrics:
+                logger.info(f"[Sprint2:IQL] Training complete: "
+                           f"V_loss={metrics.get('final_v_loss', 'N/A'):.4f}, "
+                           f"Q_loss={metrics.get('final_q_loss', 'N/A'):.4f}")
+            else:
+                logger.info(f"[Sprint2:IQL] {metrics.get('error', 'skipped')}")
+
+        except ImportError:
+            logger.info("[Sprint2:IQL] iql_pretrain not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:IQL] Training failed: {e}")
+
+    def _counterfactual_analysis(self):
+        """Weekly Saturday 02:30 UTC: Run counterfactual analysis on recent trades.
+
+        Uses causal graph from 6A to estimate "what if" scenarios.
+        Results feed into parameter optimization insights.
+        """
+        try:
+            from counterfactual_engine import run_counterfactual_analysis
+
+            result = run_counterfactual_analysis(
+                regime=None,
+                lookback_days=60,
+                persist=True,
+            )
+
+            if "error" not in result:
+                logger.info(f"[Sprint2:Counterfactual] Analysis complete: "
+                           f"{result.get('n_trades', 0)} trades, "
+                           f"{result.get('n_counterfactuals', 0)} scenarios")
+
+                # 6C: Update organism synapse weights from causal discoveries
+                self._update_organism_from_causal()
+            else:
+                logger.info(f"[Sprint2:Counterfactual] {result.get('error', 'skipped')}")
+
+        except ImportError:
+            logger.info("[Sprint2:Counterfactual] counterfactual_engine not available")
+        except Exception as e:
+            logger.warning(f"[Sprint2:Counterfactual] Analysis failed: {e}")
+
+    def _update_organism_from_causal(self):
+        """6C: Update neural organism synapse weights from causal discoveries.
+
+        Bridges causal engine discoveries → organism synapse weights.
+        Strong causal links get stronger synapses, refuted links get weakened.
+        """
+        try:
+            from causal_engine import CausalEngine
+            from neural_organism import get_organism
+
+            engine = CausalEngine()
+            organism = get_organism()
+
+            # Get active causal edges
+            edges = engine.get_active_edges()
+            if not edges:
+                logger.info("[Sprint2:6C] No causal edges to apply to organism")
+                return
+
+            updated = 0
+            for edge in edges:
+                src = edge["source_var"]
+                tgt = edge["target_var"]
+                strength = edge["causal_strength"]
+
+                # Map causal variable names to organism neuron parameter IDs
+                # The organism has neurons with params like "synapse_funding_rate_to_pnl"
+                synapse_id = f"synapse_{src}_to_{tgt}"
+
+                try:
+                    # Update synapse weight in organism
+                    # Strength from PCMCI+ is [0, 1] — map to synapse weight
+                    organism.set_param(synapse_id, strength, regime="_global")
+                    updated += 1
+                except Exception:
+                    # Synapse doesn't exist yet — organism will create it in morphogenesis (9C)
+                    pass
+
+            if updated > 0:
+                logger.info(f"[Sprint2:6C] Updated {updated} organism synapse weights from causal graph")
+
+        except ImportError:
+            logger.debug("[Sprint2:6C] neural_organism not available for synapse update")
+        except Exception as e:
+            logger.debug(f"[Sprint2:6C] Organism update failed: {e}")
+
+    def _causal_discovery(self):
+        """Weekly Saturday 02:00 UTC: Run PCMCI+ causal discovery.
+
+        Discovers temporal causal relationships from accumulated trade data.
+        Results feed into Grafeo graph + SQLite causal_discoveries.
+        Runs before CatBoost retrain so causal features are available.
+        """
+        try:
+            from causal_engine import run_multi_regime_discovery
+
+            results = run_multi_regime_discovery(lookback_days=30)
+
+            total_edges = sum(
+                r.get("n_edges", 0) for r in results.values()
+                if isinstance(r, dict) and "error" not in r
+            )
+            regimes_done = sum(
+                1 for r in results.values()
+                if isinstance(r, dict) and "error" not in r
+            )
+
+            logger.info(f"[Sprint2:Causal] Discovery complete: "
+                       f"{total_edges} edges across {regimes_done} regimes")
+
+        except ImportError:
+            logger.info("[Sprint2:Causal] causal_engine not available (tigramite not installed?)")
+        except Exception as e:
+            logger.warning(f"[Sprint2:Causal] Discovery failed: {e}")
+
     def _catboost_retrain(self):
-        """Weekly: Retrain CatBoost on accumulated trade data."""
+        """Weekly: Retrain CatBoost with full 13B pipeline.
+
+        Flow:
+          1. Generate labels from backtest results (193 chart features)
+          2. Enrich with live trade data
+          3. Train CatBoost v2 (193 features, 500 iterations)
+          4. Falls back to v1 (11 features) if insufficient backtest data
+        """
+        try:
+            # Try v2 pipeline first (13B: backtest + chart features)
+            from backtest_label_generator import BacktestLabelGenerator
+            from catboost_trainer import train_catboost_v2
+
+            gen = BacktestLabelGenerator()
+
+            # Generate labels from any new backtest results
+            new_labels = gen.generate_from_backtests()
+            if new_labels > 0:
+                logger.info(f"[Sprint2:CatBoost] Generated {new_labels} new training labels")
+
+            # Enrich with live trades
+            live_enriched = gen.enrich_from_live_trades(min_trades=10)
+            if live_enriched > 0:
+                logger.info(f"[Sprint2:CatBoost] Enriched {live_enriched} live trade labels")
+
+            # Get full dataset and train
+            X, y, feature_names = gen.get_training_dataset(min_samples=50)
+            if X is not None:
+                result = train_catboost_v2(X, y, feature_names, test_ratio=0.2)
+                logger.info(f"[Sprint2:CatBoost] v2 retrained: "
+                           f"acc={result.get('test_accuracy', 'N/A')}, "
+                           f"f1={result.get('test_f1', 'N/A')}, "
+                           f"features={result.get('n_features', 'N/A')}")
+                return
+
+            logger.info("[Sprint2:CatBoost] Insufficient v2 data, falling back to v1")
+
+        except ImportError:
+            logger.info("[Sprint2:CatBoost] v2 pipeline not available, using v1")
+        except Exception as e:
+            logger.warning(f"[Sprint2:CatBoost] v2 pipeline failed: {e}, falling back to v1")
+
+        # Fallback: v1 pipeline (11 features from ai_decisions)
         try:
             from catboost_trainer import gather_training_data, train_catboost
             X, y, feature_names = gather_training_data(min_trades=50)
             if X is not None:
                 result = train_catboost(X, y, feature_names, test_ratio=0.2)
-                logger.info(f"[Phase28:CatBoost] Retrained: acc={result.get('test_accuracy', 'N/A')}")
+                logger.info(f"[Sprint2:CatBoost] v1 retrained: acc={result.get('test_accuracy', 'N/A')}")
             else:
-                logger.info("[Phase28:CatBoost] Insufficient data for retraining")
+                logger.info("[Sprint2:CatBoost] Insufficient data for retraining")
         except Exception as e:
-            logger.warning(f"[Phase28:CatBoost] Retrain failed: {e}")
+            logger.warning(f"[Sprint2:CatBoost] v1 retrain also failed: {e}")
 
     def _ood_refit(self):
         """Weekly: Refit OOD detector reference distributions with recent data."""

@@ -90,7 +90,10 @@ class _ConnectionPool:
         with self._pool_lock:
             for conn in self._pool:
                 try:
-                    conn.close()
+                    # Close raw connection directly to avoid deadlock
+                    # (conn.close() would call release() which re-acquires _pool_lock)
+                    raw = conn._conn if isinstance(conn, _PooledConnection) else conn
+                    raw.close()
                 except Exception:
                     pass
             self._pool.clear()
@@ -108,11 +111,29 @@ class _ConnectionPool:
 
 
 class _PooledConnection:
-    """Wrapper: conn.close() returns connection to pool instead of destroying it."""
+    """Wrapper: conn.close() returns connection to pool instead of destroying it.
+    Includes automatic retry on 'database is locked' for commit/execute operations.
+    """
+
+    _RETRY_MAX = 5
+    _RETRY_BASE_WAIT = 0.3  # seconds
 
     def __init__(self, conn: sqlite3.Connection, pool: '_ConnectionPool'):
         self._conn = conn
         self._pool = pool
+
+    def _retry_on_locked(self, func, *args, **kwargs):
+        """Retry a database operation on 'database is locked' errors."""
+        for attempt in range(self._RETRY_MAX):
+            try:
+                return func(*args, **kwargs)
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt < self._RETRY_MAX - 1:
+                    wait = self._RETRY_BASE_WAIT * (attempt + 1)
+                    logger.warning(f"[DB] database is locked, retry {attempt+1}/{self._RETRY_MAX} in {wait:.1f}s")
+                    time.sleep(wait)
+                else:
+                    raise
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -121,29 +142,26 @@ class _PooledConnection:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Match sqlite3.Connection behavior: commit on success, rollback on error.
-        # Do NOT close/release here — only explicit close() returns to pool.
-        # This prevents race conditions when code uses conn after 'with' block.
         if exc_type:
             self._conn.rollback()
         else:
-            self._conn.commit()
+            self._retry_on_locked(self._conn.commit)
 
     def close(self):
         """Return to pool instead of destroying."""
         self._pool.release(self)
 
     def execute(self, *args, **kwargs):
-        return self._conn.execute(*args, **kwargs)
+        return self._retry_on_locked(self._conn.execute, *args, **kwargs)
 
     def executemany(self, *args, **kwargs):
-        return self._conn.executemany(*args, **kwargs)
+        return self._retry_on_locked(self._conn.executemany, *args, **kwargs)
 
     def cursor(self):
         return self._conn.cursor()
 
     def commit(self):
-        return self._conn.commit()
+        return self._retry_on_locked(self._conn.commit)
 
     def rollback(self):
         return self._conn.rollback()
@@ -397,7 +415,8 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS organism_audit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_pair TEXT, trade_pnl REAL, hormones TEXT,
-            fear_tier TEXT, overrides TEXT, phase TEXT, timestamp TEXT)''')
+            fear_tier TEXT, overrides TEXT, phase TEXT, timestamp TEXT,
+            event_type TEXT, details_json TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS cerebellum_hours (
             hour INTEGER PRIMARY KEY, wins INTEGER DEFAULT 1,
@@ -620,6 +639,49 @@ def init_db():
             sample_size INTEGER, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(profile_type, key))''')
 
+        # === PHASE 26 SPRINT 2: Backtest Training Pipeline (13B) ===
+        c.execute('''CREATE TABLE IF NOT EXISTS backtest_training_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            open_date TEXT NOT NULL,
+            close_date TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'long',
+            profit_pct REAL NOT NULL,
+            trade_duration_hours REAL,
+            exit_reason TEXT,
+            label INTEGER NOT NULL,
+            label_name TEXT NOT NULL,
+            features_json TEXT NOT NULL,
+            n_features INTEGER,
+            source TEXT DEFAULT 'backtest',
+            strategy TEXT,
+            regime TEXT,
+            timeframe TEXT DEFAULT '1h',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(pair, open_date, source, strategy))''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS catboost_training_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_version TEXT NOT NULL,
+            n_train INTEGER, n_test INTEGER,
+            n_features INTEGER,
+            train_accuracy REAL, test_accuracy REAL,
+            train_f1 REAL, test_f1 REAL,
+            feature_importance_json TEXT,
+            label_distribution_json TEXT,
+            model_path TEXT,
+            hyperparams_json TEXT,
+            data_sources_json TEXT,
+            trained_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # === PHASE 26 SPRINT 2: Trinity RL→RAG Feedback (10B) ===
+        c.execute('''CREATE TABLE IF NOT EXISTS rl_relevance_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL UNIQUE,
+            trade_pnl REAL,
+            relevance_delta REAL DEFAULT 0,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
         # === INDICES ===
         for idx_sql in [
             'CREATE INDEX IF NOT EXISTS idx_market_news_published ON market_news(published_at)',
@@ -653,6 +715,10 @@ def init_db():
             'CREATE INDEX IF NOT EXISTS idx_organ_perf ON organ_performance_history(organ, regime, timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_hormone_ts ON hormone_history(timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_selfmodel ON self_model_profile(profile_type, key)',
+            # Backtest Training Pipeline
+            'CREATE INDEX IF NOT EXISTS idx_bt_train_pair ON backtest_training_data(pair, open_date)',
+            'CREATE INDEX IF NOT EXISTS idx_bt_train_source ON backtest_training_data(source, strategy)',
+            'CREATE INDEX IF NOT EXISTS idx_bt_train_label ON backtest_training_data(label)',
         ]:
             c.execute(idx_sql)
 
@@ -660,6 +726,13 @@ def init_db():
         for col, typedef in [("title_hash", "TEXT"), ("is_embedded", "BOOLEAN DEFAULT 0")]:
             try:
                 c.execute(f"ALTER TABLE market_news ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+
+        # Sprint 2: Ensure organism_audit has event_type + details_json columns
+        for col, typedef in [("event_type", "TEXT"), ("details_json", "TEXT")]:
+            try:
+                c.execute(f"ALTER TABLE organism_audit ADD COLUMN {col} {typedef}")
             except sqlite3.OperationalError:
                 pass
 
