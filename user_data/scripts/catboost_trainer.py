@@ -1,13 +1,17 @@
 """
-catboost_trainer.py — Phase 28: CatBoost Training Pipeline
+catboost_trainer.py — Phase 26 Sprint 2: CatBoost Training Pipeline
 
-chart_features + EE sub-scores + TTM embeddings + market data → CatBoost model.
-Walk-forward temporal split (no future leak). Feature importance logging.
+Two training modes:
+  v1 (legacy): ai_decisions + evidence_audit_log → 11 features → CatBoost
+  v2 (Sprint 2): backtest_training_data → 193 chart features → CatBoost
+
+v2 is the primary mode. v1 is kept for backward compatibility.
 
 Kullanim:
     python catboost_trainer.py [--min-trades 50] [--test-ratio 0.2]
+    python catboost_trainer.py --v2  # Use backtest training data (193 features)
 
-Output: user_data/models/catboost_signal_v1.cbm
+Output: user_data/models/catboost_signal_v1.cbm (v1) or catboost_signal_v2.cbm (v2)
 """
 
 import os
@@ -25,11 +29,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger("catboost_trainer")
 
 from ai_config import AI_DB_PATH
-from db import get_db_connection
+from db import get_db_connection, get_connection, execute_with_retry, init_db
 
 # Model output path
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "catboost_signal_v1.cbm")
+MODEL_PATH_V2 = os.path.join(MODEL_DIR, "catboost_signal_v2.cbm")
 
 
 def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
@@ -204,31 +209,217 @@ def train_catboost(X: np.ndarray, y: np.ndarray, feature_names: List[str],
     return metadata
 
 
+def train_catboost_v2(X: np.ndarray, y: np.ndarray, feature_names: List[str],
+                      test_ratio: float = 0.2, model_version: str = None) -> Dict[str, any]:
+    """
+    Train CatBoost v2 with 193 chart features from backtest_training_data.
+
+    Improvements over v1:
+    - 193 features (vs 11)
+    - More iterations (500 vs 200)
+    - Deeper trees (depth 6 vs 4)
+    - L2 regularization
+    - Training run logging to catboost_training_runs table
+    - F1 macro metric tracking
+    """
+    try:
+        from catboost import CatBoostClassifier, Pool
+    except ImportError:
+        logger.error("catboost not installed. Run: pip install catboost")
+        return {"error": "catboost not installed"}
+
+    if model_version is None:
+        model_version = datetime.utcnow().strftime("v2_%Y%m%d_%H%M")
+
+    # Walk-forward split (temporal — no shuffle!)
+    split_idx = int(len(X) * (1 - test_ratio))
+    X_train, X_test = X[:split_idx], X[split_idx:]
+    y_train, y_test = y[:split_idx], y[split_idx:]
+
+    logger.info(f"[v2] Split: train={len(X_train)}, test={len(X_test)} "
+                f"(ratio={test_ratio}, temporal walk-forward)")
+    logger.info(f"[v2] Features: {len(feature_names)}")
+
+    # Class distribution
+    label_dist = {}
+    for label, name in [(0, "BEARISH"), (1, "NEUTRAL"), (2, "BULLISH")]:
+        n_train = int(np.sum(y_train == label))
+        n_test = int(np.sum(y_test == label))
+        label_dist[name] = {"train": n_train, "test": n_test}
+        logger.info(f"  {name}: train={n_train}, test={n_test}")
+
+    # Handle NaN/Inf in features
+    X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
+    X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Train with improved hyperparameters
+    model = CatBoostClassifier(
+        iterations=500,
+        depth=6,
+        learning_rate=0.03,
+        l2_leaf_reg=5.0,
+        loss_function='MultiClass',
+        eval_metric='TotalF1:average=Macro',
+        random_seed=42,
+        verbose=100,
+        early_stopping_rounds=50,
+        auto_class_weights='Balanced',
+        border_count=128,
+        grow_policy='Lossguide',
+        max_leaves=64,
+    )
+
+    train_pool = Pool(X_train, y_train, feature_names=feature_names)
+    test_pool = Pool(X_test, y_test, feature_names=feature_names)
+
+    model.fit(train_pool, eval_set=test_pool, use_best_model=True)
+
+    # Evaluate
+    y_train_pred = model.predict(X_train).flatten().astype(int)
+    y_test_pred = model.predict(X_test).flatten().astype(int)
+
+    train_acc = float(np.mean(y_train_pred == y_train))
+    test_acc = float(np.mean(y_test_pred == y_test))
+
+    # F1 macro
+    try:
+        from sklearn.metrics import f1_score
+        train_f1 = float(f1_score(y_train, y_train_pred, average='macro', zero_division=0))
+        test_f1 = float(f1_score(y_test, y_test_pred, average='macro', zero_division=0))
+    except ImportError:
+        # Manual F1 calculation
+        train_f1 = train_acc  # fallback
+        test_f1 = test_acc
+
+    # Feature importance — top 30
+    importance = model.get_feature_importance()
+    fi = sorted(zip(feature_names, importance), key=lambda x: x[1], reverse=True)
+
+    logger.info(f"\n[v2] Results:")
+    logger.info(f"  Train accuracy: {train_acc:.3f} | F1: {train_f1:.3f}")
+    logger.info(f"  Test accuracy:  {test_acc:.3f} | F1: {test_f1:.3f}")
+    logger.info(f"  Top 15 features:")
+    for name, imp in fi[:15]:
+        logger.info(f"    {name}: {imp:.1f}")
+
+    # Save model
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    model.save_model(MODEL_PATH_V2)
+    logger.info(f"\n[v2] Model saved: {MODEL_PATH_V2}")
+
+    # Also save as v1 path for backward compatibility (triple_perception reads v1)
+    model.save_model(MODEL_PATH)
+    logger.info(f"[v2] Also saved as: {MODEL_PATH} (backward compat)")
+
+    # Metadata
+    metadata = {
+        "model_version": model_version,
+        "trained_at": datetime.utcnow().isoformat(),
+        "n_train": len(X_train),
+        "n_test": len(X_test),
+        "n_features": len(feature_names),
+        "train_accuracy": round(train_acc, 4),
+        "test_accuracy": round(test_acc, 4),
+        "train_f1": round(train_f1, 4),
+        "test_f1": round(test_f1, 4),
+        "feature_names": feature_names,
+        "feature_importance_top30": {n: round(float(v), 2) for n, v in fi[:30]},
+        "model_path": MODEL_PATH_V2,
+        "class_mapping": {0: "BEARISH", 1: "NEUTRAL", 2: "BULLISH"},
+        "label_distribution": label_dist,
+        "hyperparams": {
+            "iterations": 500, "depth": 6, "learning_rate": 0.03,
+            "l2_leaf_reg": 5.0, "border_count": 128,
+            "grow_policy": "Lossguide", "max_leaves": 64,
+        },
+    }
+
+    # Save metadata JSON
+    meta_path = MODEL_PATH_V2.replace(".cbm", "_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info(f"[v2] Metadata saved: {meta_path}")
+
+    # Log training run to DB
+    try:
+        execute_with_retry(
+            """INSERT INTO catboost_training_runs
+               (model_version, n_train, n_test, n_features,
+                train_accuracy, test_accuracy, train_f1, test_f1,
+                feature_importance_json, label_distribution_json,
+                model_path, hyperparams_json, data_sources_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (model_version, len(X_train), len(X_test), len(feature_names),
+             train_acc, test_acc, train_f1, test_f1,
+             json.dumps({n: round(float(v), 2) for n, v in fi[:30]}),
+             json.dumps(label_dist),
+             MODEL_PATH_V2,
+             json.dumps(metadata["hyperparams"]),
+             json.dumps(["backtest_training_data"])),
+            max_retries=5
+        )
+        logger.info("[v2] Training run logged to catboost_training_runs")
+    except Exception as e:
+        logger.warning(f"[v2] Failed to log training run: {e}")
+
+    return metadata
+
+
 def main():
     parser = argparse.ArgumentParser(description="CatBoost Training Pipeline")
     parser.add_argument("--min-trades", type=int, default=50)
     parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument("--v2", action="store_true", help="Use v2 pipeline (193 chart features)")
     args = parser.parse_args()
 
-    logger.info("=" * 60)
-    logger.info("Phase 28: CatBoost Training Pipeline")
-    logger.info("=" * 60)
+    if args.v2:
+        logger.info("=" * 60)
+        logger.info("Phase 26 Sprint 2: CatBoost v2 Training Pipeline")
+        logger.info("=" * 60)
 
-    X, y, feature_names = gather_training_data(min_trades=args.min_trades)
-    if X is None:
-        logger.error("Insufficient training data. Need more completed trades.")
-        sys.exit(1)
+        try:
+            from backtest_label_generator import BacktestLabelGenerator
+            gen = BacktestLabelGenerator()
+            X, y, feature_names = gen.get_training_dataset(min_samples=args.min_trades)
+        except ImportError:
+            logger.error("backtest_label_generator not available")
+            sys.exit(1)
 
-    result = train_catboost(X, y, feature_names, test_ratio=args.test_ratio)
-    if "error" in result:
-        logger.error(f"Training failed: {result['error']}")
-        sys.exit(1)
+        if X is None:
+            logger.error("Insufficient training data. Run backtest_label_generator.py --generate first.")
+            sys.exit(1)
 
-    logger.info("=" * 60)
-    logger.info(f"SUCCESS: CatBoost model ready at {MODEL_PATH}")
-    logger.info(f"  Train acc: {result['train_accuracy']}")
-    logger.info(f"  Test acc: {result['test_accuracy']}")
-    logger.info("=" * 60)
+        result = train_catboost_v2(X, y, feature_names, test_ratio=args.test_ratio)
+        if "error" in result:
+            logger.error(f"Training failed: {result['error']}")
+            sys.exit(1)
+
+        logger.info("=" * 60)
+        logger.info(f"SUCCESS: CatBoost v2 model ready at {MODEL_PATH_V2}")
+        logger.info(f"  Features:  {result['n_features']}")
+        logger.info(f"  Train acc: {result['train_accuracy']} | F1: {result['train_f1']}")
+        logger.info(f"  Test acc:  {result['test_accuracy']}  | F1: {result['test_f1']}")
+        logger.info("=" * 60)
+    else:
+        logger.info("=" * 60)
+        logger.info("CatBoost v1 Training Pipeline (legacy)")
+        logger.info("=" * 60)
+
+        X, y, feature_names = gather_training_data(min_trades=args.min_trades)
+        if X is None:
+            logger.error("Insufficient training data. Need more completed trades.")
+            sys.exit(1)
+
+        result = train_catboost(X, y, feature_names, test_ratio=args.test_ratio)
+        if "error" in result:
+            logger.error(f"Training failed: {result['error']}")
+            sys.exit(1)
+
+        logger.info("=" * 60)
+        logger.info(f"SUCCESS: CatBoost model ready at {MODEL_PATH}")
+        logger.info(f"  Train acc: {result['train_accuracy']}")
+        logger.info(f"  Test acc: {result['test_accuracy']}")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":

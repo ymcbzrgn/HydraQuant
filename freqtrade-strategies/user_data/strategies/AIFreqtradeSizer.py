@@ -1147,6 +1147,86 @@ class AIFreqtradeSizer(IStrategy):
                     f"${old_stake:.2f} × {sizing_mult:.2f} = ${final_stake:.2f}"
                 )
             
+            # ═══ SPRINT 2: Constitution Check ═══
+            try:
+                from constitution import get_constitution
+                enforcer = get_constitution()
+                atr_val = last_candle.get('atr', 0) / current_rate if current_rate > 0 else 0.02
+                portfolio_val_c = self.risk_budget.portfolio_value
+                sizing_pct = (final_stake / portfolio_val_c * 100) if portfolio_val_c > 0 else 1.0
+                const_check = enforcer.check_trade({
+                    "sizing_pct": sizing_pct,
+                    "leverage": float(leverage),
+                    "portfolio_drawdown_pct": getattr(self.risk_budget, '_current_drawdown_pct', 0),
+                    "portfolio_heat_pct": getattr(self.risk_budget, '_portfolio_heat_pct', 0),
+                    "atr_pct": atr_val * 100,
+                    "consecutive_losses": getattr(self, '_consecutive_losses', 0),
+                    "market_stress": ai_decision.get("market_stress", 0.3),
+                })
+                if not const_check["allowed"]:
+                    logger.warning(f"[Sprint2:Constitution] {pair} BLOCKED: {const_check['violations']}")
+                    return min_stake
+            except Exception as e:
+                logger.debug(f"[Sprint2:Constitution] Check skipped: {e}")
+
+            # ═══ SPRINT 2: Order Flow Sizing ═══
+            try:
+                from order_flow import get_order_flow
+                of = get_order_flow()
+                signal_type = "BULLISH" if side == "long" else "BEARISH"
+                veto, veto_reason = of.should_veto_trade(pair, signal_type)
+                if veto:
+                    logger.warning(f"[Sprint2:OrderFlow] {pair} VETO: {veto_reason}")
+                    return min_stake
+                of_sizing = of.get_sizing_adjustment(pair)
+                if of_sizing < 1.0:
+                    final_stake *= of_sizing
+                    logger.info(f"[Sprint2:OrderFlow] {pair} sizing: ×{of_sizing:.2f}")
+            except Exception as e:
+                logger.debug(f"[Sprint2:OrderFlow] Check skipped: {e}")
+
+            # ═══ SPRINT 2: Cerebellum Timing ═══
+            try:
+                from cerebellum_timing import get_cerebellum
+                cerebellum = get_cerebellum()
+                timing_mult = cerebellum.get_timing_multiplier()
+                if timing_mult != 1.0:
+                    final_stake *= timing_mult
+                    logger.info(f"[Sprint2:Cerebellum] {pair} timing: ×{timing_mult:.2f}")
+            except Exception as e:
+                logger.debug(f"[Sprint2:Cerebellum] Check skipped: {e}")
+
+            # ═══ SPRINT 2: Lifecycle Sizing (from pheromone) ═══
+            try:
+                from pheromone_field import get_pheromone_field
+                pfield = get_pheromone_field()
+                lc_state = pfield.read("lifecycle_state")
+                if lc_state and isinstance(lc_state, dict):
+                    lc_sizing = lc_state.get("sizing_mult", 1.0)
+                    if lc_sizing != 1.0:
+                        final_stake *= lc_sizing
+                        logger.info(f"[Sprint2:Lifecycle] {pair} sizing: ×{lc_sizing:.2f} "
+                                   f"(danger={lc_state.get('danger_response', 'NORMAL')})")
+            except Exception as e:
+                logger.debug(f"[Sprint2:Lifecycle] Check skipped: {e}")
+
+            # ═══ SPRINT 2: Self-Model Competence ═══
+            try:
+                from self_model import get_self_model
+                sm = get_self_model()
+                regime = ai_decision.get("regime", "transitional")
+                should_trade, sm_reason, conf_mod = sm.should_i_trade(
+                    pair, regime, current_time.hour
+                )
+                if not should_trade:
+                    logger.info(f"[Sprint2:SelfModel] {pair} low competence: {sm_reason}")
+                    return min_stake
+                if conf_mod < 1.0:
+                    final_stake *= conf_mod
+                    logger.info(f"[Sprint2:SelfModel] {pair} competence mod: ×{conf_mod:.2f}")
+            except Exception as e:
+                logger.debug(f"[Sprint2:SelfModel] Check skipped: {e}")
+
             # Phase 3.5.3: Risk Budget scaling — shrink if budget running low
             final_stake = self.risk_budget.scale_position(final_stake)
 
@@ -1271,6 +1351,21 @@ class AIFreqtradeSizer(IStrategy):
         except Exception:
             pass
 
+        # ═══ SPRINT 2: Decision Contract ═══
+        try:
+            from decision_contract import get_decision_contract
+            dc = get_decision_contract()
+            dc.create_contract(
+                pair=pair, signal=signal_type, confidence=confidence,
+                sizing_multiplier=ai_decision.get("sizing_multiplier", 1.0),
+                regime=ai_decision.get("regime", "transitional"),
+                modules_active=list(ai_decision.get("active_modules", ["evidence_engine"])),
+                evidence=ai_decision,
+                perception=self._perception_cache.get(pair, {}) if hasattr(self, '_perception_cache') else None,
+            )
+        except Exception as e:
+            logger.debug(f"[Sprint2:Contract] Creation skipped: {e}")
+
         logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} stake=${amount*rate:.2f} — {reasoning}")
         return True
 
@@ -1316,6 +1411,34 @@ class AIFreqtradeSizer(IStrategy):
             self.forgone_engine.record_trade_for_portfolio(pair, portfolio_pnl_pct)
         except Exception as e:
             logger.warning(f"[Portfolio] Update failed: {e}")
+
+        # ═══ SPRINT 2: Post-Trade Court Investigation ═══
+        try:
+            from post_trade_court import get_court
+            court = get_court()
+            # Find the ai_decisions row for this trade
+            from db import get_db_connection
+            conn = get_db_connection()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM ai_decisions WHERE pair = ? ORDER BY timestamp DESC LIMIT 1",
+                    (pair,)
+                ).fetchone()
+                if row:
+                    court.investigate_trade(row["id"])
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"[Sprint2:Court] Investigation skipped: {e}")
+
+        # ═══ SPRINT 2: Track consecutive losses for constitution ═══
+        try:
+            if pnl_pct < 0:
+                self._consecutive_losses = getattr(self, '_consecutive_losses', 0) + 1
+            else:
+                self._consecutive_losses = 0
+        except Exception:
+            pass
 
         # ══════════════════════════════════════════════════════════════
         # LIVE FEEDBACK LOOP: Update ALL learning modules on trade close

@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
-from db import get_db_connection
+from db import get_db_connection, execute_with_retry
 
 class LLMCostTracker:
     """
@@ -114,27 +114,16 @@ class LLMCostTracker:
     def log_call(self, model: str, provider: str, input_tokens: int, output_tokens: int,
                  cost_usd: float, latency_ms: float, agent_name: str = "",
                  cache_hit: bool = False, pair: str = "", status: str = "success"):
-        import time as _time
-        for attempt in range(3):
-            try:
-                with get_db_connection(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO llm_calls
-                        (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair))
-                    conn.commit()
-                return  # Success
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e) and attempt < 2:
-                    _time.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"Error logging LLM call: {e}")
-                    return
-            except Exception as e:
-                logger.error(f"Error logging LLM call: {e}")
-                return
+        try:
+            execute_with_retry(
+                """INSERT INTO llm_calls
+                   (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair),
+                max_retries=5
+            )
+        except Exception as e:
+            logger.error(f"Error logging LLM call: {e}")
 
     def get_daily_cost(self, target_date: Optional[str] = None) -> float:
         """Get the total cost for a specific date (YYYY-MM-DD). Defaults to today."""

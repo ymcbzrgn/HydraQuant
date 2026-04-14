@@ -144,33 +144,93 @@ class PredictiveInteroception:
         return result
 
     def _predict_next(self, values: List[float]) -> float:
-        """Simple linear extrapolation for next value.
-        Uses exponentially weighted moving average + trend.
+        """Predict next value using SmallMLP (Sprint 2, Task 12E upgrade from EWMA).
+
+        Falls back to EWMA+trend if PyTorch unavailable or insufficient data.
+        MLP input: last 10 normalized values → predicted next value.
+        Online SGD training on each call for continuous adaptation.
         """
         if len(values) < 3:
             return values[-1] if values else 0.0
 
-        recent = np.array(values[-20:])
+        recent = np.array(values[-20:], dtype=np.float32)
 
-        # EWMA
+        # Try SmallMLP first (Sprint 2 upgrade)
+        if len(recent) >= 10:
+            try:
+                prediction = self._mlp_predict(recent)
+                if prediction is not None:
+                    return prediction
+            except Exception:
+                pass
+
+        # Fallback: EWMA + trend
         alpha = 0.3
-        ewma = recent[0]
+        ewma = float(recent[0])
         for v in recent[1:]:
-            ewma = alpha * v + (1 - alpha) * ewma
+            ewma = alpha * float(v) + (1 - alpha) * ewma
 
-        # Trend (slope of last 10 points)
         if len(recent) >= 5:
             x = np.arange(len(recent[-10:]))
             y = recent[-10:]
             try:
-                slope = np.polyfit(x, y, 1)[0]
+                slope = float(np.polyfit(x, y, 1)[0])
             except (np.linalg.LinAlgError, ValueError):
                 slope = 0.0
         else:
             slope = 0.0
 
-        # Predicted next = EWMA + trend
         return float(ewma + slope)
+
+    def _mlp_predict(self, recent: np.ndarray) -> Optional[float]:
+        """SmallMLP prediction — 3-layer MLP: 10 → 32 → 16 → 1.
+
+        Trained online with MSE loss on sequential predictions.
+        Sprint 2 Task 12E: replaces pure EWMA with learned predictor.
+        """
+        try:
+            import torch
+            import torch.nn as nn
+        except ImportError:
+            return None
+
+        # Lazy init MLP
+        if not hasattr(self, '_mlp_model'):
+            self._mlp_model = nn.Sequential(
+                nn.Linear(10, 32), nn.ReLU(),
+                nn.Linear(32, 16), nn.ReLU(),
+                nn.Linear(16, 1),
+            )
+            self._mlp_optimizer = torch.optim.Adam(self._mlp_model.parameters(), lr=1e-3)
+            self._mlp_trained = False
+
+        window = recent[-10:]
+        mean_val = float(window.mean())
+        std_val = float(window.std()) + 1e-8
+        normalized = (window - mean_val) / std_val
+
+        x = torch.FloatTensor(normalized).unsqueeze(0)
+
+        # Online training: use last transition as training signal
+        if len(recent) >= 11 and self._mlp_trained:
+            train_window = recent[-11:-1]
+            t_mean = float(train_window.mean())
+            t_std = float(train_window.std()) + 1e-8
+            train_norm = (train_window - t_mean) / t_std
+            train_x = torch.FloatTensor(train_norm).unsqueeze(0)
+            target = torch.FloatTensor([(recent[-1] - mean_val) / std_val])
+
+            pred = self._mlp_model(train_x).squeeze()
+            loss = (pred - target) ** 2
+            self._mlp_optimizer.zero_grad()
+            loss.backward()
+            self._mlp_optimizer.step()
+
+        with torch.no_grad():
+            pred_norm = self._mlp_model(x).item()
+
+        self._mlp_trained = True
+        return float(pred_norm * std_val + mean_val)
 
     def _check_threshold(self, metric: str, predicted: float, history: List[float]) -> Optional[Dict]:
         """Check if predicted value crosses a danger threshold."""

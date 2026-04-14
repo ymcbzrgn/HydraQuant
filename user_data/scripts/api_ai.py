@@ -647,6 +647,197 @@ def get_cross_pair_intel():
         return {"error": str(e)}
 
 
+# ═══════════════════════════════════════════════════════════
+# SPRINT 2: Phase 26 AI Organism Endpoints
+# ═══════════════════════════════════════════════════════════
+
+
+@app.get("/api/ai/organism")
+def get_organism_status():
+    """Sprint 2: Full organism status — lifecycle, hormones, phi."""
+    result = {}
+    try:
+        from autonomous_lifecycle import get_lifecycle
+        lc = get_lifecycle()
+        result["lifecycle"] = lc.get_status()
+    except Exception:
+        result["lifecycle"] = {"error": "not available"}
+
+    try:
+        from phi_consciousness import get_phi
+        result["phi"] = get_phi().compute_phi()
+    except Exception:
+        result["phi"] = {"error": "not available"}
+
+    try:
+        from self_model import get_self_model
+        sm = get_self_model()
+        result["self_model"] = sm.get_status()
+    except Exception:
+        result["self_model"] = {"error": "not available"}
+
+    return result
+
+
+@app.get("/api/ai/causal-graph")
+def get_causal_graph():
+    """Sprint 2: Active causal discoveries from PCMCI+."""
+    try:
+        from causal_engine import CausalEngine
+        engine = CausalEngine()
+        edges = engine.get_active_edges()
+        return {"edges": edges, "count": len(edges)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/causal-parents/{variable}")
+def get_causal_parents(variable: str):
+    """Sprint 2: Get causal parents of a variable."""
+    try:
+        from causal_engine import CausalEngine
+        engine = CausalEngine()
+        parents = engine.get_causal_parents(variable)
+        return {"variable": variable, "parents": parents}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/pheromone")
+def get_pheromone_state():
+    """Sprint 2: Current pheromone field state."""
+    try:
+        from pheromone_field import get_pheromone_field
+        pfield = get_pheromone_field()
+        keys = ["prediction", "uncertainty", "organism_health",
+                "HORMONE_STATE", "FEAR_LEVEL", "lifecycle_state",
+                "multimodal_fusion", "cerebellum_timing",
+                "exploration_suggestions", "lob_state",
+                "order_flow_state", "mm_state"]
+        state = {}
+        for key in keys:
+            val = pfield.read(key)
+            if val is not None:
+                state[key] = val
+        return {"signals": state, "active_count": len(state)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/constitution")
+def get_constitution_status():
+    """Sprint 2: Constitution enforcer status."""
+    try:
+        from constitution import get_constitution
+        return get_constitution().get_status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/cerebellum")
+def get_cerebellum_schedule():
+    """Sprint 2: 24-hour performance schedule."""
+    try:
+        from cerebellum_timing import get_cerebellum
+        cerebellum = get_cerebellum()
+        return {
+            "schedule": cerebellum.get_full_schedule(),
+            "best_hours": cerebellum.get_best_hours(5),
+            "worst_hours": cerebellum.get_worst_hours(5),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/ablation")
+def get_ablation_league():
+    """Sprint 2: Module ablation league table."""
+    try:
+        from ablation_league import get_ablation_league
+        league = get_ablation_league()
+        return {"league": league.get_league_table()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/model-risk")
+def get_model_risk():
+    """Sprint 2: Model risk assessment."""
+    try:
+        from model_risk_engine import get_model_risk_engine
+        return get_model_risk_engine().assess_risk()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/training-status")
+def get_training_status():
+    """Sprint 2: CatBoost + IQL training pipeline status."""
+    result = {}
+    try:
+        from backtest_label_generator import BacktestLabelGenerator
+        gen = BacktestLabelGenerator()
+        result["training_data"] = gen.get_status()
+    except Exception:
+        result["training_data"] = {"error": "not available"}
+
+    try:
+        conn = __import__('db').get_db_connection(AI_DB_PATH)
+        try:
+            row = conn.execute("""
+                SELECT model_version, n_train, n_features,
+                       train_accuracy, test_accuracy, test_f1, trained_at
+                FROM catboost_training_runs
+                ORDER BY trained_at DESC LIMIT 1
+            """).fetchone()
+            result["catboost_latest"] = dict(row) if row else None
+        finally:
+            conn.close()
+    except Exception:
+        result["catboost_latest"] = None
+
+    return result
+
+
+@app.get("/api/ai/benchmark")
+def get_atcb_benchmark():
+    """Sprint 2: ATCB benchmark results."""
+    try:
+        import os, json
+        report_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "models", "atcb_benchmark_latest.json"
+        )
+        if os.path.exists(report_path):
+            with open(report_path) as f:
+                return json.load(f)
+        return {"error": "no benchmark results yet"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/decision-contracts")
+def get_recent_contracts():
+    """Sprint 2: Recent decision contracts (provenance trail)."""
+    try:
+        from decision_contract import get_decision_contract
+        dc = get_decision_contract()
+        return {"contracts": dc.get_recent_contracts(10)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/ai/counterfactuals")
+def get_counterfactual_insights():
+    """Sprint 2: Counterfactual analysis insights."""
+    try:
+        from counterfactual_engine import CounterfactualEngine
+        engine = CounterfactualEngine()
+        return {"optimal_params": engine.get_optimal_params()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8890)
