@@ -1591,7 +1591,7 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[Sprint2:Lifecycle] Tick failed: {e}")
 
-    def _build_market_state_for_lifecycle(self) -> Dict:
+    def _build_market_state_for_lifecycle(self) -> dict:
         """Build market state dict for lifecycle tick from available sources."""
         state = {
             "drawdown": 0.0,
