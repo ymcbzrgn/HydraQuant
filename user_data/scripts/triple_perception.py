@@ -46,6 +46,7 @@ class TriplePerception:
         # Phase 27 Task 13 — attributes exist immediately so callers that check
         # availability before the first perceive() don't AttributeError.
         self._kronos_model = None
+        self._kronos_predictor = None
         self._kronos_available = False
         self._initialized = False
 
@@ -80,87 +81,90 @@ class TriplePerception:
         self._try_load_kronos()
 
     def _try_load_kronos(self) -> None:
-        """Phase 27 Task 13 (default-on): try HuggingFace NeoQuasar/Kronos-mini.
-
-        Default behaviour is opt-in (env var `HQ_ENABLE_KRONOS=0`) — Kronos uses
-        a custom model_type that AutoModel can't recognise, so loading fails on
-        most installs. We try `trust_remote_code=True` once, log a clear skip
-        message if the model class is incompatible, and continue with triple
-        perception. Per-cycle latency budget (200ms) is enforced when load
-        succeeds.
+        """Phase 27 Task 13 (default-on): load NeoQuasar/Kronos-mini via the
+        vendored loader (kronos_vendor) — upstream HF AutoModel can't dispatch
+        the custom Kronos model_type, so we use the upstream classes via
+        snapshot_download + dynamic import. Falls back to a small Transformer
+        encoder if the snapshot mirror strips the Python source.
         """
         if os.environ.get("HQ_ENABLE_KRONOS", "1") == "0":
             logger.debug("[TriplePerception:Kronos] explicitly disabled (HQ_ENABLE_KRONOS=0)")
             return
         try:
             import time as _time
-            import torch as _torch
-            from transformers import AutoModel  # type: ignore
+            from kronos_vendor import Kronos, KronosTokenizer, KronosPredictor
         except Exception as e:
-            logger.info(f"[TriplePerception:Kronos] deps unavailable ({e}); skipping")
+            logger.info(f"[TriplePerception:Kronos] vendor import failed: {e}; skipping")
             return
         try:
-            model = AutoModel.from_pretrained(
-                "NeoQuasar/Kronos-mini", trust_remote_code=True
+            tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-2k")
+            model = Kronos.from_pretrained("NeoQuasar/Kronos-mini")
+            self._kronos_predictor = KronosPredictor(
+                model, tokenizer, device="cpu", max_context=2048,
             )
-            model.eval()
         except Exception as e:
-            # Custom model_type → AutoModel can't dispatch. Log once + skip.
-            msg = str(e)[:140]
             logger.warning(
-                f"[TriplePerception:Kronos] Kronos model incompatible, skipping ({msg})"
+                f"[TriplePerception:Kronos] vendor load failed ({str(e)[:140]}); "
+                "staying with triple perception"
             )
             return
+        # CPU benchmark — single dummy predict to enforce the 200ms budget.
         try:
-            with _torch.no_grad():
-                dummy = _torch.randn(1, 64, 5)
-                t0 = _time.perf_counter()
-                try:
-                    model(dummy)
-                except Exception:
-                    pass
-                elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            import pandas as _pd
+            dummy_df = _pd.DataFrame({
+                "open": [1.0] * 64, "high": [1.01] * 64,
+                "low": [0.99] * 64, "close": [1.0] * 64,
+                "volume": [1000.0] * 64,
+            })
+            t0 = _time.perf_counter()
+            self._kronos_predictor.predict(dummy_df, pred_len=4)
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
             if elapsed_ms > 200.0:
                 logger.warning(
                     f"[TriplePerception:Kronos] benchmark {elapsed_ms:.0f}ms > 200ms; disabling"
                 )
+                self._kronos_predictor = None
                 return
             self._kronos_model = model
             self._kronos_available = True
-            logger.info(f"[TriplePerception:Kronos] loaded (benchmark {elapsed_ms:.0f}ms)")
+            upstream = (model.upstream_loaded if hasattr(model, "upstream_loaded") else False)
+            logger.info(
+                f"[TriplePerception:Kronos] loaded via vendor (upstream={upstream}, "
+                f"benchmark {elapsed_ms:.0f}ms)"
+            )
         except Exception as e:
             logger.warning(
                 f"[TriplePerception:Kronos] benchmark failed ({e}); staying with triple perception"
             )
+            self._kronos_predictor = None
 
     def _kronos_predict(self, df) -> Optional[float]:
-        """Run Kronos-mini over the last 64 candles. Returns a scalar direction
-        score in [-1, +1] or None if the model is unavailable / inference fails."""
-        if not self._kronos_available or self._kronos_model is None:
+        """Run Kronos via the vendored predictor over the last 64 candles.
+
+        Returns a scalar direction score in [-1, +1]: (predicted_close /
+        last_close − 1) of the 4-step horizon mean, clamped. None when the
+        predictor isn't loaded or inference fails.
+        """
+        predictor = getattr(self, "_kronos_predictor", None)
+        if not self._kronos_available or predictor is None:
             return None
         try:
-            import torch as _torch
             tail = df.tail(64)
-            feats = tail[["open", "high", "low", "close", "volume"]].to_numpy(dtype=np.float32)
-            if feats.shape[0] < 10:
+            if len(tail) < 10:
                 return None
-            tensor = _torch.tensor(feats).unsqueeze(0)
-            with _torch.no_grad():
-                out = self._kronos_model(tensor)
-            # The model exposes different heads depending on the HF revision —
-            # try a couple of canonical attributes, default to mean of logits.
-            vec = None
-            for attr in ("prediction", "last_hidden_state", "logits"):
-                if hasattr(out, attr):
-                    vec = getattr(out, attr)
-                    break
-            if vec is None and isinstance(out, tuple):
-                vec = out[0]
-            if vec is None:
+            forecast = predictor.predict(tail, pred_len=4)
+            if forecast is None or len(forecast) == 0:
                 return None
-            scalar = float(vec.mean().item())
-            # Clamp into [-1, 1]
-            return max(-1.0, min(1.0, scalar))
+            try:
+                last_close = float(tail["close"].iloc[-1])
+            except Exception:
+                return None
+            if last_close <= 0:
+                return None
+            mean_pred = float(forecast.mean()) if hasattr(forecast, "mean") else float(forecast[-1])
+            direction = (mean_pred / last_close) - 1.0
+            # Scale into [-1, +1] — anything beyond ±5% caps to the boundary.
+            return max(-1.0, min(1.0, direction * 20.0))
         except Exception as e:
             logger.debug(f"[TriplePerception:Kronos] predict failed: {e}")
             return None

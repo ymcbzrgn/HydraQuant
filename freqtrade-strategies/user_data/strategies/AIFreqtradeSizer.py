@@ -1510,6 +1510,16 @@ class AIFreqtradeSizer(IStrategy):
             try:
                 from order_flow import get_order_flow
                 of = get_order_flow()
+                # Phase 27 Item 1: pump live Bybit orderbook into the LOB
+                # encoder pipeline. lob_encoder.encode() and order_flow.analyze()
+                # both expect Freqtrade's `{"bids": [[p, s], ...], "asks": ...}`
+                # shape, which dp.orderbook(pair, depth) already returns —
+                # zero conversion needed.
+                try:
+                    ob_snapshot = self.dp.orderbook(pair, 20)
+                    of.publish_orderbook(pair, ob_snapshot)
+                except Exception:
+                    pass  # orderbook unavailable → LOB modality skips gracefully
                 signal_type = "BULLISH" if side == "long" else "BEARISH"
                 veto, veto_reason = of.should_veto_trade(pair, signal_type)
                 if veto:

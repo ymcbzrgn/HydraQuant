@@ -512,19 +512,22 @@ class HybridRetriever:
         final_results = self._ensemble_rerank(passages, flashrank_results, colbert_results)
 
         # Phase 27 Item 14: graph-augmented retrieval. Pull top GAM-RAG winning
-        # patterns for the regime hinted in the query and merge them at the
-        # FRONT of the result list (de-duplicated by id). This injects the
-        # organism's own historical winning logic alongside news/RAG context.
+        # patterns for the CURRENT pheromone regime (not a query-text guess —
+        # regime_classifier deposits SIGNAL_REGIME on every cycle) and merge
+        # them at the FRONT of the result list (de-duplicated by id).
         try:
-            regime_hint = None
-            for cand_regime in ("trending_bull", "trending_bear", "ranging",
-                                "high_volatility", "transitional"):
-                if cand_regime.replace("_", " ") in original_query.lower() or \
-                   cand_regime in original_query.lower():
-                    regime_hint = cand_regime
-                    break
-            if regime_hint is None:
-                regime_hint = "trending_bull"  # default — broadest historical winners
+            regime_hint = "trending_bull"  # safe fallback when pheromone empty
+            try:
+                from pheromone_field import get_pheromone_field
+                regime_ph = get_pheromone_field().read("market_regime")
+                if isinstance(regime_ph, str) and regime_ph.strip():
+                    regime_hint = regime_ph.strip()
+                elif isinstance(regime_ph, dict):
+                    cand = regime_ph.get("regime") or regime_ph.get("value")
+                    if isinstance(cand, str) and cand.strip():
+                        regime_hint = cand.strip()
+            except Exception:
+                pass
             from gam_rag import GamRAG
             gam = GamRAG()
             gam_docs = gam.retrieve_past_wisdom(
