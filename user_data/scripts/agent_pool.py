@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 AGENT_REGISTRY = {
     "TrendFollower": {
         "best_regimes": ["trending_bull", "trending_bear"],
+        "rag_keywords": "trend momentum EMA ADX continuation breakout higher-highs",
+        "rag_event_types": ["trend_reversal", "breakout"],
         "system_prompt": (
             "You are TrendFollower — a trend-following trading agent. "
             "You advocate for entering trades IN THE DIRECTION of the established trend. "
@@ -57,6 +59,8 @@ AGENT_REGISTRY = {
     },
     "MeanReverter": {
         "best_regimes": ["ranging"],
+        "rag_keywords": "mean reversion range oversold overbought Bollinger RSI extremes",
+        "rag_event_types": ["range_bound", "reversal"],
         "system_prompt": (
             "You are MeanReverter — a mean-reversion trading agent. "
             "You advocate for fading extreme moves and trading AGAINST the crowd at extremes. "
@@ -67,6 +71,8 @@ AGENT_REGISTRY = {
     },
     "MomentumRider": {
         "best_regimes": ["trending_bull"],
+        "rag_keywords": "momentum acceleration MACD histogram volume confirmation higher-timeframe",
+        "rag_event_types": ["momentum_surge", "breakout"],
         "system_prompt": (
             "You are MomentumRider — a momentum-based trading agent. "
             "You advocate for joining ACCELERATING momentum, not just existing trends. "
@@ -77,6 +83,8 @@ AGENT_REGISTRY = {
     },
     "FundingContrarian": {
         "best_regimes": ["high_volatility", "ranging"],
+        "rag_keywords": "funding rate squeeze long short ratio liquidation open interest",
+        "rag_event_types": ["funding_extreme", "liquidation_cascade"],
         "system_prompt": (
             "You are FundingContrarian — a contrarian agent that fades crowded trades. "
             "You advocate for positions OPPOSITE to extreme funding rates and L/S ratios. "
@@ -88,6 +96,8 @@ AGENT_REGISTRY = {
     },
     "RiskMinimizer": {
         "best_regimes": ["high_volatility", "transitional"],
+        "rag_keywords": "risk volatility drawdown liquidation ATR crash VIX preservation",
+        "rag_event_types": ["flash_crash", "volatility_spike"],
         "system_prompt": (
             "You are RiskMinimizer — a risk-first agent that prioritizes capital preservation. "
             "You advocate for SMALLER positions or NEUTRAL when risk is elevated. "
@@ -99,6 +109,8 @@ AGENT_REGISTRY = {
     },
     "DevilsAdvocate": {
         "best_regimes": ["*"],  # ALWAYS included
+        "rag_keywords": "counter-argument contrarian bearish-case bullish-case divergence failure",
+        "rag_event_types": ["reversal", "regime_shift"],
         "system_prompt": (
             "You are DevilsAdvocate — your ONLY job is to argue AGAINST the majority. "
             "If most agents say BULLISH → construct the STRONGEST bearish argument. "
@@ -111,6 +123,8 @@ AGENT_REGISTRY = {
     },
     "EvidenceValidator": {
         "best_regimes": ["*"],  # ALWAYS included
+        "rag_keywords": "factcheck verification data-quality indicator-reading raw-numbers",
+        "rag_event_types": [],
         "system_prompt": (
             "You are EvidenceValidator — your ONLY job is to FACT-CHECK other agents' claims. "
             "You have the Evidence Engine FactSheet with RAW NUMBERS. "
@@ -123,6 +137,8 @@ AGENT_REGISTRY = {
     },
     "MacroCorrelator": {
         "best_regimes": ["*"],  # Always relevant — macro affects all regimes
+        "rag_keywords": "macro DXY VIX treasury yields correlation risk-on risk-off FOMC CPI",
+        "rag_event_types": ["fomc", "cpi_release", "fed_decision"],
         "system_prompt": (
             "You are MacroCorrelator — you analyze cross-asset macro correlations. "
             "Your weapons: DXY-BTC correlation (21-27x stronger than Gold-BTC per research), "
@@ -137,6 +153,8 @@ AGENT_REGISTRY = {
     },
     "TemporalAnalyst": {
         "best_regimes": ["ranging", "transitional"],
+        "rag_keywords": "seasonality day-of-week session hour-of-day expiry unlock options",
+        "rag_event_types": ["token_unlock", "options_expiry", "halving"],
         "system_prompt": (
             "You are TemporalAnalyst — you analyze time-based patterns and seasonality. "
             "Your weapons: Day-of-week effects (crypto tends to dip Sunday-Monday, "
@@ -151,6 +169,8 @@ AGENT_REGISTRY = {
     },
     "ReflectionAgent": {
         "best_regimes": ["*"],  # Always relevant — meta-learning
+        "rag_keywords": "performance history accuracy win-rate past-mistakes retrospective",
+        "rag_event_types": [],
         "system_prompt": (
             "You are ReflectionAgent — you analyze PAST MISTAKES and SUCCESSES from agent history. "
             "Before every debate, you review: What did our agents predict last time for this pair? "
@@ -167,6 +187,28 @@ AGENT_REGISTRY = {
             "mistakes repeatedly. With you, the team learns and improves."
         ),
     },
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase 27 Fix 2C (J4): Argument pattern extraction for quality scoring
+# ═══════════════════════════════════════════════════════════════
+# Bucket each agent's key_argument into one of these canonical patterns (by regex)
+# so that the quality table can accumulate win-rate + avg PnL per (agent, pattern, regime).
+ARGUMENT_PATTERNS = {
+    "adx_trend":       r"\badx\s*[><=]\s*\d+|\btrend.*strong|\bstrong.*trend",
+    "rsi_oversold":    r"\brsi\b.*(oversold|below\s*30|<\s*30)",
+    "rsi_overbought":  r"\brsi\b.*(overbought|above\s*70|>\s*70)",
+    "funding_extreme": r"\bfunding\b.*(extreme|>\s*0?\.0[5-9]|squeeze)",
+    "macd_signal":     r"\bmacd\b.*(cross|histogram|diverg)",
+    "volume_anomaly":  r"\bvolume\b.*(spike|anomal|surge|confirm|diverg)",
+    "support_level":   r"\b(support|resistance)\b.*(level|zone|broken|held)",
+    "ema_alignment":   r"\bema\b.*(align|cross|above|below|stacked)",
+    "fng_extreme":     r"\b(fear|greed|f&g|fng)\b.*(extreme|panic|euphoria|<\s*\d+|>\s*\d+)",
+    "momentum_strong": r"\bmomentum\b.*(strong|accel|zone|building)",
+    "macro_risk_off":  r"\b(dxy|vix|risk-off|treasury)\b",
+    "regime_mismatch": r"\bregime\b.*(mismatch|wrong|against)",
+    "liquidation":     r"\b(liquidation|cascade|long/short|l/s)\b",
 }
 
 
@@ -191,6 +233,175 @@ class AgentPool:
     def _get_conn(self):
         conn = get_db_connection(self.db_path)
         return conn
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 27 Fix 2A/2C helpers — context injection for agents
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_reflection_context(self, pair: str, regime: str,
+                                 agents: List[str]) -> str:
+        """Fix 2A (J1): Real DB memory block for ReflectionAgent's R3 prompt.
+
+        Pulls 30-day performance per agent + 7-day memory rows for this pair so
+        R3 can generate meta-analysis from REAL numbers instead of hallucinating.
+        """
+        try:
+            conn = self._get_conn()
+            lines: List[str] = []
+
+            # Per-agent performance in this regime (last 30 days)
+            lines.append("=== AGENT PERFORMANCE (last 30 days, regime={}) ===".format(regime))
+            any_perf = False
+            for name in agents:
+                if name == "ReflectionAgent":
+                    continue
+                row = conn.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as wins,
+                           ROUND(AVG(outcome_pnl), 2) as avg_pnl
+                    FROM agent_performance
+                    WHERE agent_type = ? AND regime = ?
+                      AND timestamp > datetime('now', '-30 days')
+                """, (name, regime)).fetchone()
+                total = row["total"] or 0
+                wins = row["wins"] or 0
+                avg = row["avg_pnl"] or 0.0
+                wr = (wins / total * 100.0) if total > 0 else 0.0
+                if total > 0:
+                    any_perf = True
+                lines.append(
+                    f"  {name}: {total} signals, {wr:.0f}% WR, avg PnL {avg:+.2f}%"
+                )
+            if not any_perf:
+                lines.append("  (no recent performance rows — ReflectionAgent must "
+                             "acknowledge limited history and defer to live factsheet.)")
+
+            # Recent memory rows for this pair (last 7 days)
+            rows = conn.execute("""
+                SELECT agent_type, signal, strength, key_argument,
+                       final_outcome_pnl
+                FROM agent_memory
+                WHERE pair = ? AND timestamp > datetime('now', '-7 days')
+                ORDER BY timestamp DESC LIMIT 20
+            """, (pair,)).fetchall()
+
+            if rows:
+                lines.append(f"\n=== MEMORY: {pair} (last 7 days) ===")
+                for r in rows:
+                    outcome = (f"→ {r['final_outcome_pnl']:+.2f}%"
+                               if r['final_outcome_pnl'] is not None
+                               else "→ PENDING")
+                    arg = (r['key_argument'] or "")[:80]
+                    strength = r['strength'] if r['strength'] is not None else 0.0
+                    lines.append(
+                        f"  {r['agent_type']}: {r['signal']}(str={strength:.2f}) "
+                        f"{outcome} | {arg}"
+                    )
+            conn.close()
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"[AgentPool:R3] Reflection context failed: {e}")
+            return "Historical data unavailable this cycle."
+
+    def _get_argument_quality(self, agent_type: str, regime: str) -> str:
+        """Fix 2C (J4): Best/worst argument pattern for this agent+regime.
+
+        Injected into R1 prompt so the agent knows which of their historical
+        reasoning templates have actually worked.
+        """
+        try:
+            conn = self._get_conn()
+            rows = conn.execute("""
+                SELECT argument_pattern, times_used, times_correct,
+                       avg_pnl_when_used, quality_score
+                FROM argument_quality
+                WHERE agent_type = ? AND regime = ? AND times_used >= 3
+                ORDER BY quality_score DESC
+            """, (agent_type, regime)).fetchall()
+            conn.close()
+
+            if not rows or len(rows) == 0:
+                return ""  # not enough history yet
+
+            best = rows[0]
+            best_wr = (best["times_correct"] / best["times_used"] * 100.0
+                       if best["times_used"] > 0 else 0.0)
+            parts = [f"  BEST in {regime}: '{best['argument_pattern']}' "
+                     f"({best_wr:.0f}% acc, {best['times_used']} uses, "
+                     f"avg PnL {best['avg_pnl_when_used']:+.2f}%)"]
+
+            if len(rows) > 1:
+                worst = rows[-1]
+                worst_wr = (worst["times_correct"] / worst["times_used"] * 100.0
+                            if worst["times_used"] > 0 else 0.0)
+                parts.append(
+                    f"  WORST in {regime}: '{worst['argument_pattern']}' "
+                    f"({worst_wr:.0f}% acc, {worst['times_used']} uses — DO NOT rely on)"
+                )
+            return "\n".join(parts)
+        except Exception as e:
+            logger.debug(f"[AgentPool:R1] Argument quality fetch failed: {e}")
+            return ""
+
+    def _extract_argument_pattern(self, argument: str) -> Optional[str]:
+        """Fix 2C: Map a free-form key_argument to one of ARGUMENT_PATTERNS."""
+        if not argument:
+            return None
+        import re as _re
+        text = argument.lower()
+        for name, pattern in ARGUMENT_PATTERNS.items():
+            try:
+                if _re.search(pattern, text):
+                    return name
+            except _re.error:
+                continue
+        return None
+
+    def _update_argument_quality(self, agent_type: str, pattern: str,
+                                  regime: str, was_correct: bool,
+                                  outcome_pnl: float) -> None:
+        """Fix 2C: Upsert argument_quality row after an outcome is known."""
+        if not pattern:
+            return
+        try:
+            conn = self._get_conn()
+            row = conn.execute("""
+                SELECT times_used, times_correct, avg_pnl_when_used
+                FROM argument_quality
+                WHERE agent_type = ? AND argument_pattern = ? AND regime = ?
+            """, (agent_type, pattern, regime)).fetchone()
+
+            if row is None:
+                used = 1
+                correct = 1 if was_correct else 0
+                avg_pnl = float(outcome_pnl)
+            else:
+                used = (row["times_used"] or 0) + 1
+                correct = (row["times_correct"] or 0) + (1 if was_correct else 0)
+                prev_avg = row["avg_pnl_when_used"] or 0.0
+                avg_pnl = (prev_avg * (used - 1) + float(outcome_pnl)) / used
+
+            quality_score = (correct / used) if used > 0 else 0.5
+            from datetime import datetime as _dt, timezone as _tz
+            now = _dt.now(tz=_tz.utc).isoformat()
+
+            conn.execute("""
+                INSERT INTO argument_quality
+                    (agent_type, argument_pattern, regime, times_used,
+                     times_correct, avg_pnl_when_used, quality_score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(agent_type, argument_pattern, regime) DO UPDATE SET
+                    times_used = excluded.times_used,
+                    times_correct = excluded.times_correct,
+                    avg_pnl_when_used = excluded.avg_pnl_when_used,
+                    quality_score = excluded.quality_score,
+                    updated_at = excluded.updated_at
+            """, (agent_type, pattern, regime, used, correct, avg_pnl,
+                  quality_score, now))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[AgentPool:ArgQuality] Upsert failed: {e}")
 
     def _init_tables(self):
         """Ensure agent tables exist (idempotent)."""
@@ -307,6 +518,11 @@ class AgentPool:
                     f"{'Adjust your conviction based on where you historically perform well.' if perf['n_signals'] > 10 else 'No significant history yet — be humble in your conviction.'}"
                 )
 
+                # Phase 27 Fix 2C: inject argument-quality feedback so the agent
+                # biases toward reasoning patterns that have actually worked.
+                arg_feedback = self._get_argument_quality(agent_name, regime)
+                arg_block = f"\n\nYOUR ARGUMENT QUALITY HISTORY:\n{arg_feedback}\n" if arg_feedback else ""
+
                 # Agentic RAG: agent can request retrieval by including [RETRIEVE: type]
                 retrieval_hint = (
                     "\n\nYou can request evidence by including these tags in your response:\n"
@@ -322,6 +538,7 @@ class AgentPool:
                     f"{evidence_factsheet}\n\n"
                     f"Current regime: {regime}\n"
                     f"{perf_context}"
+                    f"{arg_block}"
                     f"{retrieval_hint}\n\n"
                     f"Respond in this EXACT JSON format (no other text):\n"
                     f'{{"direction": "BULLISH" or "BEARISH" or "NEUTRAL", '
@@ -336,9 +553,10 @@ class AgentPool:
                     temperature=0.4, priority="high"
                 )
 
-                # Agentic RAG: process any retrieval requests in response
+                # Agentic RAG: process any retrieval requests in response.
+                # Phase 27 Fix 2B: agent_name drives agent-specific RAG keywords.
                 raw_content = response.content
-                raw_content = self._process_retrieval_requests(raw_content, pair)
+                raw_content = self._process_retrieval_requests(raw_content, pair, agent_name)
 
                 parsed = self._parse_agent_response(raw_content)
                 positions[agent_name] = parsed
@@ -393,11 +611,16 @@ class AgentPool:
                                if p.get("round2", {}).get("revised_direction")
                                and p["round2"]["revised_direction"] != p.get("direction")]
 
+                # Phase 27 Fix 2A: REAL DB memory — stop making R3 hallucinate.
+                reflection_history = self._get_reflection_context(pair, regime, agents)
+
                 prompt_r3 = (
                     f"Round 3 — META-ANALYSIS for {pair}:\n"
                     f"Round 1 positions: {r1_summary}\n"
                     f"Round 2 revisions: {', '.join(r2_revisions) if r2_revisions else 'None — all defended'}\n\n"
-                    f"As ReflectionAgent, provide your meta-analysis in JSON:\n"
+                    f"HISTORICAL DATA (from agent_performance + agent_memory tables — REAL, not invented):\n"
+                    f"{reflection_history}\n\n"
+                    f"As ReflectionAgent, ground your meta-analysis in the numbers above. JSON only:\n"
                     f'{{"trust_most": "agent name with best recent track record", '
                     f'"trust_least": "agent name with worst recent track record", '
                     f'"meta_insight": "key lesson from recent agent performance", '
@@ -422,15 +645,31 @@ class AgentPool:
         # ── Record agent memories ──
         self._record_agent_memories(pair, regime, positions, result.get("confidence", 0))
 
+        # ── Phase 27 Fix 2D: MAGMA graph memory — argued/persuaded/resisted edges ──
+        self._record_debate_graph(pair, regime, positions)
+
+        # ── Phase 27 Fix 2E: pheromone deposit for downstream modules ──
+        self._deposit_debate_pheromones(pair, regime, positions, result)
+
         return result
 
-    def _process_retrieval_requests(self, response_text: str, pair: str) -> str:
-        """Agentic RAG: parse [RETRIEVE: X] tags and inject retrieval results."""
+    def _process_retrieval_requests(self, response_text: str, pair: str,
+                                     agent_name: str = "") -> str:
+        """Agentic RAG: parse [RETRIEVE: X] tags and inject retrieval results.
+
+        Phase 27 Fix 2B (J3): queries are PREFIXED with agent-specific keywords
+        from AGENT_REGISTRY[agent_name]['rag_keywords'] so TrendFollower actually
+        pulls trend-related news instead of the same generic 'pair latest analysis'
+        every agent was receiving.
+        """
         import re
         pattern = re.compile(r'\[RETRIEVE:\s*(\w+)\]')
         matches = pattern.findall(response_text)
         if not matches:
             return response_text
+
+        agent_kw = AGENT_REGISTRY.get(agent_name, {}).get("rag_keywords", "") if agent_name else ""
+        agent_event_types = AGENT_REGISTRY.get(agent_name, {}).get("rag_event_types", []) if agent_name else []
 
         for source in matches[:3]:  # Max 3 retrievals per agent
             retrieved = ""
@@ -438,7 +677,8 @@ class AgentPool:
                 if source == "news":
                     from hybrid_retriever import HybridRetriever
                     r = HybridRetriever()
-                    results = r.search(f"{pair} latest analysis", top_k=3)
+                    query = f"{pair} {agent_kw}".strip() if agent_kw else f"{pair} latest analysis"
+                    results = r.search(query, top_k=3)
                     retrieved = "\n".join(
                         doc.get("text", "")[:150] for doc in results[:3]
                     ) if results else "No news found."
@@ -448,6 +688,9 @@ class AgentPool:
                     from streaming_rag import detect_event_type
                     r = HybridRetriever()
                     event = detect_event_type(pair)
+                    # Phase 27 Fix 2B: prefer agent's own event types when generic detection is blank
+                    if event == "general" and agent_event_types:
+                        event = agent_event_types[0]
                     if event != "general":
                         results = r.search_similar_events(event, top_k=3)
                         retrieved = "\n".join(
@@ -476,7 +719,8 @@ class AgentPool:
                 f"[RETRIEVE: {source}]",
                 f"\n[Retrieved {source}]: {retrieved}\n"
             )
-            logger.info(f"[AgentPool:AgenticRAG] Retrieved {source} for {pair}")
+            logger.info(f"[AgentPool:AgenticRAG] Retrieved {source} for {pair} "
+                       f"(agent={agent_name or 'unknown'})")
 
         return response_text
 
@@ -564,6 +808,18 @@ class AgentPool:
         elif "evidence_strong" in ev_arg or "strong" in ev_arg:
             confidence *= 1.05
             logger.info(f"[AgentPool:Synth] EvidenceValidator confirmed STRONG evidence → +5%")
+
+        # Phase 27 Fix 2A: apply ReflectionAgent R3 confidence_modifier (was IGNORED).
+        # Clamped to ±0.10 so a single meta-agent can't veto the group.
+        r3 = positions.get("ReflectionAgent", {}).get("round3", {}) or {}
+        try:
+            raw_modifier = r3.get("confidence_modifier", 0)
+            r3_modifier = max(-0.10, min(0.10, float(raw_modifier or 0)))
+        except (TypeError, ValueError):
+            r3_modifier = 0.0
+        if r3_modifier != 0.0:
+            confidence += r3_modifier
+            logger.info(f"[AgentPool:Synth] R3 modifier {r3_modifier:+.2f} → conf={confidence:.4f}")
 
         confidence = round(max(0.01, min(confidence, 0.85)), 4)
 
@@ -662,6 +918,113 @@ class AgentPool:
     # MEMORY & TRACK RECORD
     # ═══════════════════════════════════════════════════════════
 
+    # ═══════════════════════════════════════════════════════════
+    # Phase 27 Fix 2D / 2E — MAGMA graph + pheromone outputs
+    # ═══════════════════════════════════════════════════════════
+
+    def _record_debate_graph(self, pair: str, regime: str, positions: Dict) -> None:
+        """Fix 2D (J2): Write `argued_*`, `persuaded`, `resisted` edges so the
+        graph_store's add_agent_interaction API is actually exercised (was dead
+        code before — magma_edges had 0 debate edges)."""
+        if not self._graph_store:
+            return
+        try:
+            pair_node = pair.lower().replace("/", "_").replace(":", "_")
+            from datetime import datetime as _dt
+            debate_id = f"{pair_node}_{_dt.now().strftime('%Y%m%d_%H%M')}"
+
+            # R1: every agent's declared direction becomes an edge (skip meta-agents)
+            for name, pos in positions.items():
+                if name == "ReflectionAgent":
+                    continue
+                direction = pos.get("direction", "neutral").lower()
+                strength = float(pos.get("strength", 0.5) or 0.5)
+                try:
+                    self._graph_store.add_edge(
+                        "entity", name.lower(),
+                        f"argued_{direction}", pair_node,
+                        weight=strength,
+                        metadata={
+                            "key_argument": (pos.get("key_argument", "") or "")[:200],
+                            "regime": regime,
+                            "debate_id": debate_id,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(f"[AgentPool:Graph] argued edge {name} failed: {e}")
+
+            # R2: was the agent persuaded by DevilsAdvocate or did they resist?
+            for name, pos in positions.items():
+                if name in ("DevilsAdvocate", "EvidenceValidator", "ReflectionAgent"):
+                    continue
+                r2 = pos.get("round2", {}) or {}
+                revised = r2.get("revised_direction")
+                if not revised:
+                    continue
+                try:
+                    if revised != pos.get("direction"):
+                        # Persuaded: devilsadvocate → name
+                        self._graph_store.add_agent_interaction(
+                            "devilsadvocate", name.lower(),
+                            interaction_type="persuaded", weight=1.0,
+                        )
+                    else:
+                        # Defended their position against DA — mutual resistance.
+                        self._graph_store.add_agent_interaction(
+                            name.lower(), "devilsadvocate",
+                            interaction_type="resisted", weight=1.0,
+                        )
+                except Exception as e:
+                    logger.debug(f"[AgentPool:Graph] R2 edge {name} failed: {e}")
+        except Exception as e:
+            logger.debug(f"[AgentPool:Graph] debate graph failed: {e}")
+
+    def _deposit_debate_pheromones(self, pair: str, regime: str,
+                                     positions: Dict, result: Dict) -> None:
+        """Fix 2E (J5): Publish debate outcome to the pheromone field so
+        downstream modules (sizing, organism) can read CONSENSUS / DISSENT."""
+        try:
+            from pheromone_field import get_pheromone_field, PheromoneField
+            pfield = get_pheromone_field()
+
+            pfield.deposit(
+                "agent_pool", PheromoneField.SIGNAL_AGENT_CONSENSUS,
+                {
+                    "signal": result.get("signal", "NEUTRAL"),
+                    "confidence": float(result.get("confidence", 0.0)),
+                    "n_agents": len(positions),
+                    "pair": pair,
+                    "regime": regime,
+                },
+                half_life=120.0,  # 2 minutes — visible to the next perception cycle
+            )
+
+            # Detect a meaningful two-sided split (Fix 2E dissent signal)
+            bull_s = sum(float(p.get("strength", 0) or 0)
+                         for name, p in positions.items()
+                         if p.get("direction") == "BULLISH"
+                         and name not in ("DevilsAdvocate", "EvidenceValidator"))
+            bear_s = sum(float(p.get("strength", 0) or 0)
+                         for name, p in positions.items()
+                         if p.get("direction") == "BEARISH"
+                         and name not in ("DevilsAdvocate", "EvidenceValidator"))
+            if bull_s > 0.3 and bear_s > 0.3:
+                pfield.deposit(
+                    "agent_pool", PheromoneField.SIGNAL_AGENT_DISSENT,
+                    {
+                        "bull_strength": round(bull_s, 3),
+                        "bear_strength": round(bear_s, 3),
+                        "pair": pair,
+                        "regime": regime,
+                    },
+                    half_life=120.0,
+                )
+                logger.info(
+                    f"[AgentPool:Pheromone] dissent deposited — bull={bull_s:.2f}, bear={bear_s:.2f}"
+                )
+        except Exception as e:
+            logger.debug(f"[AgentPool:Pheromone] deposit failed: {e}")
+
     def _record_agent_memories(self, pair: str, regime: str, positions: Dict,
                                 evidence_confidence: float):
         """Record what each agent said (for later outcome matching)."""
@@ -669,16 +1032,24 @@ class AgentPool:
             conn = self._get_conn()
             for agent_name, pos in positions.items():
                 direction = pos.get("direction", "NEUTRAL")
-                r2 = pos.get("round2", {})
+                strength = float(pos.get("strength", 0.5) or 0.5)
+                # Phase 27 audit fix: R2 revised_direction AND revised_strength must
+                # BOTH be taken into account — previously strength was pinned to R1.
+                r2 = pos.get("round2", {}) or {}
                 if r2.get("revised_direction"):
                     direction = r2["revised_direction"]
+                if r2.get("revised_strength") is not None:
+                    try:
+                        strength = float(r2["revised_strength"])
+                    except (TypeError, ValueError):
+                        pass
 
                 conn.execute("""
                     INSERT INTO agent_memory
                     (agent_type, pair, regime, signal, strength, key_argument, evidence_engine_confidence)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (agent_name, pair, regime, direction,
-                      pos.get("strength", 0.5),
+                      strength,
                       pos.get("key_argument", "")[:500],
                       evidence_confidence))
             conn.commit()
@@ -696,9 +1067,10 @@ class AgentPool:
         """
         try:
             conn = self._get_conn()
-            # Get recent agent memories for this pair
+            # Get recent agent memories for this pair (Phase 27: also fetch key_argument
+            # so we can update argument_quality with the outcome).
             rows = conn.execute("""
-                SELECT agent_type, signal, strength FROM agent_memory
+                SELECT agent_type, signal, strength, key_argument FROM agent_memory
                 WHERE pair = ? AND timestamp > datetime('now', '-6 hours')
                 ORDER BY timestamp DESC LIMIT 10
             """, (pair,)).fetchall()
@@ -720,6 +1092,16 @@ class AgentPool:
                 """, (row["agent_type"], pair, regime, row["signal"],
                       outcome_pnl, was_correct))
                 updated += 1
+
+                # Phase 27 Fix 2C: update argument_quality for the pattern this
+                # agent leaned on, so the R1 feedback loop learns which rationales
+                # actually win money in each regime.
+                pattern = self._extract_argument_pattern(row["key_argument"] or "")
+                if pattern:
+                    self._update_argument_quality(
+                        row["agent_type"], pattern, regime or "_global",
+                        bool(was_correct), float(outcome_pnl)
+                    )
 
             # Update memory records with outcome
             if rows:

@@ -1370,6 +1370,24 @@ def coordinator_debate(state: GraphState):
     except Exception as e:
         logger.debug(f"[Phase20:EvidenceEngine] {pair} FactSheet injection failed: {e}")
 
+    # Phase 27 Fix 4 (G3): inject CatBoost SHAP natural-language summary.
+    # triple_perception deposits "shap_narrative" into the pheromone field on
+    # every perception cycle; pick up the freshest one so MADAM can cross-check
+    # its bull/bear case against the neural model's actual top features.
+    try:
+        from pheromone_field import get_pheromone_field, PheromoneField
+        shap_ph = get_pheromone_field().read(PheromoneField.SIGNAL_SHAP)
+        shap_text = ""
+        if isinstance(shap_ph, str):
+            shap_text = shap_ph
+        elif isinstance(shap_ph, dict):
+            shap_text = str(shap_ph.get("value", shap_ph))
+        if shap_text:
+            raw_block += f"\n\n=== NEURAL MODEL ASSESSMENT (CatBoost SHAP) ===\n{shap_text}"
+            logger.info(f"[Phase27:SHAP] {pair} SHAP narrative injected into coordinator")
+    except Exception as e:
+        logger.debug(f"[Phase27:SHAP] {pair} injection failed: {e}")
+
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
 
 === AGENT REPORTS ===
