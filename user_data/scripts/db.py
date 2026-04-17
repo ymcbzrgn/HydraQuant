@@ -606,6 +606,76 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_hyp_deployed
             ON hypothesis_history(deployed)''')
 
+        # Phase 27 Task 23 (I2 Ajani): Adversarial exploit archive. Each
+        # ExploiterAgent-proposed scenario is stored with its target weakness
+        # and defensive counter so the nightly regression test can re-probe
+        # the strategy against every historical exploit.
+        c.execute('''CREATE TABLE IF NOT EXISTS exploit_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT, regime TEXT,
+            exploit_scenario TEXT NOT NULL,
+            target_weakness TEXT,
+            predicted_loss REAL,
+            was_defended INTEGER,
+            defense_description TEXT,
+            was_validated_by_outcome INTEGER,
+            created_at TEXT,
+            ttl_expiry TEXT)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_exploit_pair
+            ON exploit_archive(pair, regime)''')
+
+        # Phase 27 Task 24 (F3 Ajani): Autopoietic Integrity Index history.
+        # Four-layer identity drift monitor (Structural / Functional /
+        # Behavioral / Representational) — architecture_evolver queries
+        # the most recent composite AII before accepting any mutation.
+        c.execute('''CREATE TABLE IF NOT EXISTS autopoietic_integrity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            structural_score REAL,
+            functional_score REAL,
+            behavioral_score REAL,
+            representational_score REAL,
+            aii_composite REAL,
+            status TEXT,
+            action_taken TEXT)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_aii_timestamp
+            ON autopoietic_integrity(timestamp)''')
+
+        # Phase 27 Task 25 (I5 Ajani): Trade-as-language sequence patterns.
+        # N-gram, PrefixSpan, and conditional-grammar discoveries persisted so
+        # the pattern library survives restarts and can feed back into
+        # sizing / MADAM coordinator prompts. UNIQUE(pattern, regime) so the
+        # weekly cycle upserts instead of flooding the table each Sunday.
+        c.execute('''CREATE TABLE IF NOT EXISTS sequence_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern TEXT NOT NULL,
+            n_gram_size INTEGER,
+            occurrences INTEGER,
+            expected_occurrences REAL,
+            chi2_score REAL,
+            p_value REAL,
+            next_outcome_distribution TEXT,
+            regime TEXT DEFAULT '_any',
+            updated_at TEXT,
+            UNIQUE(pattern, regime))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_seq_pattern
+            ON sequence_patterns(pattern)''')
+        # Phase 27 Task 25 audit fix: CREATE TABLE IF NOT EXISTS won't add a
+        # UNIQUE constraint to a pre-existing table. A separate UNIQUE INDEX
+        # has the same semantics as the inline UNIQUE(pattern, regime) AND it
+        # works on legacy installs where the table was created before the
+        # constraint was added.
+        try:
+            c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS ux_seq_pattern_regime
+                ON sequence_patterns(pattern, regime)''')
+        except sqlite3.IntegrityError:
+            # Pre-existing duplicate rows — remove keeping the most recent.
+            c.execute('''DELETE FROM sequence_patterns WHERE id NOT IN (
+                SELECT MAX(id) FROM sequence_patterns GROUP BY pattern, regime
+            )''')
+            c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS ux_seq_pattern_regime
+                ON sequence_patterns(pattern, regime)''')
+
         # Phase 27 Fix 6: regime column on forgone_profit so the resolver /
         # adaptive-threshold jobs can group alpha-left-on-the-table by regime.
         # Idempotent ALTER — silently ignored if column already exists.

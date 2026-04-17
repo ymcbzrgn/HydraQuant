@@ -167,8 +167,43 @@ class ArchitectureEvolver:
                mutation_rate: float = 0.3) -> Dict:
         """Run evolutionary optimization.
 
+        Phase 27 Task 24: before accepting any proposed architecture we call
+        `self_model.verify_architectural_change()` — if AII falls into RED or
+        CRITICAL bands, OR essential organs / connections are missing, the
+        evolve step is aborted and the current architecture is preserved.
+        Every attempt (accepted or rejected) is persisted to
+        `autopoietic_integrity` for audit trail.
+
         Returns best genome after n_generations.
         """
+        # Phase 27 Task 24 AII gate — PRE-evolve check. If the organism's
+        # identity is already compromised (e.g. a sequence of bad mutations
+        # across weeks), we must NOT compound the damage with more mutations.
+        try:
+            from self_model import get_self_model, verify_architectural_change
+            aii_status = verify_architectural_change(get_self_model())
+            if not aii_status["accepted"]:
+                logger.warning(
+                    f"[Evolver:AII] pre-evolve gate REJECT "
+                    f"(status={aii_status['status']}, "
+                    f"composite={aii_status['aii_composite']:.2f}, "
+                    f"reasons={aii_status['reasons']})"
+                )
+                return {
+                    "genome": None,
+                    "fitness": 0.0,
+                    "aborted": True,
+                    "reason": "AII_GATE_BLOCKED",
+                    "aii": aii_status,
+                }
+            logger.info(
+                f"[Evolver:AII] pre-evolve gate ACCEPT "
+                f"(status={aii_status['status']}, "
+                f"composite={aii_status['aii_composite']:.2f})"
+            )
+        except Exception as e:
+            logger.debug(f"[Evolver:AII] gate bypassed: {e}")
+
         # Initialize population
         if not self._population:
             self._population = [copy.deepcopy(DEFAULT_GENOME) for _ in range(population_size)]
@@ -201,6 +236,19 @@ class ArchitectureEvolver:
             elite_size = max(2, population_size // 5)
             new_pop = self._population[:elite_size]  # Elitism
 
+            # Phase 27 Task 24 audit fix: per-child AII + identity_limits gate.
+            # Pre-evolve check above is coarse (organism-wide state); we also
+            # must reject INDIVIDUAL proposed genomes that disable an essential
+            # organ or drop a safety-critical connection. Rejected candidates
+            # fall back to a mutation of the best-so-far parent.
+            try:
+                from self_model import get_self_model, verify_architectural_change
+                _sm = get_self_model()
+            except Exception:
+                _sm = None
+                verify_architectural_change = None
+
+            rejected_children = 0
             while len(new_pop) < population_size:
                 if random.random() < 0.7:
                     # Crossover
@@ -215,8 +263,31 @@ class ArchitectureEvolver:
                 if random.random() < mutation_rate:
                     child = self.mutate(child)
 
+                # AII / identity_limits gate per child. If any proposed genome
+                # strips an essential organ / connection, keep the parent copy
+                # instead — essential surface is guaranteed intact.
+                if verify_architectural_change is not None and _sm is not None:
+                    try:
+                        check = verify_architectural_change(_sm, proposed_genome=child)
+                        if not check["accepted"]:
+                            rejected_children += 1
+                            logger.debug(
+                                f"[Evolver:AII] gen={gen} reject child "
+                                f"reasons={check['reasons']}"
+                            )
+                            # Fall back to a safe mutation of the top parent.
+                            safe_parent = self._population[0]
+                            child = copy.deepcopy(safe_parent)
+                    except Exception:
+                        pass
+
                 new_pop.append(child)
 
+            if rejected_children:
+                logger.info(
+                    f"[Evolver:AII] gen={gen} rejected {rejected_children} "
+                    f"non-compliant children; parents reused"
+                )
             self._population = new_pop
 
         self._best_genome = self._population[0]

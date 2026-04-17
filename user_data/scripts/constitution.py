@@ -79,6 +79,34 @@ CONSTITUTION = {
 }
 
 
+# Phase 27 Task 24 (F3 Ajani): Identity limits — unbreakable architectural
+# constants that architecture_evolver and self_model MUST NOT violate. These
+# are the Beer VSM System-5 "identity protection" rules: essential organs
+# can never be disabled, safety connections can never be removed, and any
+# drift beyond the limits rolls back to the last GREEN snapshot.
+IDENTITY_LIMITS: Dict[str, Any] = {
+    # Organs that CANNOT be disabled under any evolution proposal.
+    "essential_organs": [
+        "crowd_scoring",
+        "risk",
+        "sizing",
+    ],
+    # Connections that MUST exist in every genome — (source, target, type).
+    "essential_connections": [
+        ("risk", "sizing", "inhibitory"),  # risk always brakes sizing
+    ],
+    # Hard drift bounds — see self_model.compute_aii().
+    "max_structural_drift": 0.40,     # graph edit distance vs birth snapshot
+    "min_functional_score": 0.60,     # ATCB benchmark pass rate
+    "min_aii": 0.50,                  # weighted composite
+    "max_mutations_per_generation": 3,
+    # Status bands (for graduated response: GREEN/YELLOW/RED/CRITICAL).
+    "aii_green": 0.80,
+    "aii_yellow": 0.60,
+    "aii_red": 0.40,
+}
+
+
 class ConstitutionEnforcer:
     """Enforces unbreakable trading rules."""
 
@@ -86,6 +114,10 @@ class ConstitutionEnforcer:
         self._violation_count = 0
         self._freeze_until = None
         init_db()
+
+    def get_identity_limits(self) -> Dict[str, Any]:
+        """Phase 27 Task 24: single source of truth for identity constraints."""
+        return IDENTITY_LIMITS
 
     def check_trade(self, trade_params: Dict) -> Dict:
         """Check a proposed trade against constitutional limits.
