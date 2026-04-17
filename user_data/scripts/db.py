@@ -560,6 +560,52 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_regime_layers_pair
             ON regime_layers(pair, timestamp)''')
 
+        # Phase 27 Task 15 (C4 Ajani): RLAIF reward history — 5-dim rubric
+        # scores from 3 LLM judges (Gemini / Groq / Mistral) fused via WCO so
+        # a single sycophant judge cannot dominate.
+        c.execute('''CREATE TABLE IF NOT EXISTS rlaif_rewards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER,
+            pair TEXT,
+            timestamp TEXT,
+            signal_quality REAL,
+            sizing_quality REAL,
+            timing_quality REAL,
+            risk_management REAL,
+            regime_alignment REAL,
+            composite REAL,
+            provider_scores TEXT,
+            env_reward REAL,
+            total_reward REAL,
+            outcome_pnl REAL)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_rlaif_trade
+            ON rlaif_rewards(trade_id)''')
+
+        # Phase 27 Task 16 (G2 Ajani): Weekly LLM hypothesis history —
+        # research-loop candidates with 6-gate validation trail.
+        c.execute('''CREATE TABLE IF NOT EXISTS hypothesis_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id TEXT UNIQUE,
+            parameter TEXT,
+            current_value REAL,
+            proposed_value REAL,
+            mechanism TEXT,
+            falsification TEXT,
+            affected_pairs TEXT,
+            is_sharpe REAL,
+            oos_sharpe REAL,
+            deflated_sharpe REAL,
+            n_hypotheses_in_batch INTEGER,
+            validation_result TEXT,
+            deployed INTEGER DEFAULT 0,
+            deployed_at TEXT,
+            shadow_period_sharpe REAL,
+            live_period_sharpe REAL,
+            rolled_back INTEGER DEFAULT 0,
+            created_at TEXT)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_hyp_deployed
+            ON hypothesis_history(deployed)''')
+
         # Phase 27 Fix 6: regime column on forgone_profit so the resolver /
         # adaptive-threshold jobs can group alpha-left-on-the-table by regime.
         # Idempotent ALTER — silently ignored if column already exists.

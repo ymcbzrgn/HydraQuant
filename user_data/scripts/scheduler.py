@@ -434,9 +434,16 @@ class PipelineScheduler:
         self.scheduler.add_job(self._hawkes_mle_refit, 'interval', hours=1,
             id='hawkes_refit', name='Hawkes Intensity MLE Refit',
             max_instances=1, replace_existing=True)
+        # Phase 27 Task 16: Weekly LLM strategy researcher — Sunday 07:00 UTC,
+        # after CatBoost retrain (03:00) and OOD refit (04:15) so fresh numbers
+        # are in the context dump the LLM sees.
+        self.scheduler.add_job(self._hypothesis_generation_cycle,
+            'cron', day_of_week='sun', hour=7,
+            id='hypothesis_cycle', name='LLM Strategy Researcher Weekly',
+            max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 55 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2 + 3 phase27)")
+        logger.info("[Scheduler] Started with 56 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2 + 4 phase27)")
         return True
 
     def stop(self):
@@ -2176,6 +2183,28 @@ class PipelineScheduler:
             logger.info(f"[Phase27:Threshold] Weekly adapt: {adjusted} pairs adjusted")
         except Exception as e:
             logger.warning(f"[Phase27:Threshold] Adaptation failed: {e}")
+
+    def _hypothesis_generation_cycle(self):
+        """Phase 27 Task 16: weekly LLM strategy researcher cycle.
+
+        Capped at 5 LLM calls per cycle (see MAX_HYPOTHESES_PER_CYCLE in
+        hypothesis_generator.py). Skips automatically when RPD is tight.
+        """
+        try:
+            import asyncio
+            from hypothesis_generator import get_researcher
+            researcher = get_researcher()
+            # run_cycle is async; cron fires on a thread so we spin a loop.
+            result = asyncio.run(researcher.run_cycle())
+            logger.info(
+                f"[Phase27:Researcher] generated={result.get('generated', 0)}, "
+                f"accepted={result.get('accepted', 0)}, "
+                f"error={result.get('error')}"
+            )
+        except ImportError as e:
+            logger.debug(f"[Phase27:Researcher] disabled: {e}")
+        except Exception as e:
+            logger.warning(f"[Phase27:Researcher] cycle failed: {e}")
 
     def _hawkes_mle_refit(self):
         """Phase 27 Task 10: Hourly MLE refit of Hawkes (α, β) per pair.

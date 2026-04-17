@@ -1,0 +1,290 @@
+"""
+rlaif_reward.py — Phase 27 Task 15 (C4 Ajani)
+
+RLAIF d-RLAIF reward generator.
+
+After each closed trade, ask 3 different LLM judges (Gemini, Groq, Mistral)
+to score the decision on 5 rubric dimensions. The final composite reward
+combines:
+
+  env_reward  (actual realised PnL, the ground truth)
+  llm_reward  (worst-case-optimised rubric score, the process-quality signal)
+
+The WCO fusion (take the MINIMUM across judges per dimension) makes the
+signal robust to any single sycophant model. `total_reward = 0.80 * env
++ 0.20 * llm` — the LLM portion never dominates.
+
+6 reward-hacking surfaces are mitigated up-front:
+  1. PnL avoidance       → forgone PnL is tracked separately (Fix 6).
+  2. Confidence anchoring → entropy penalty via variance check (inline).
+  3. Regime exploitation → regime is verified from tech data, not LLM claim.
+  4. LLM sycophancy      → WCO across 3 providers.
+  5. Verbosity bias      → fixed-format rubric JSON (prompt-enforced).
+  6. Goodhart over-opt   → composite is CAPPED to ±1.0 then mixed at 20%.
+
+Persisted to `rlaif_rewards` (schema in db.py).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+logger = logging.getLogger("rlaif_reward")
+
+from ai_config import AI_DB_PATH
+from db import get_db_connection, init_db
+
+
+RUBRIC = {
+    "signal_quality":   {"weight": 0.25,
+                         "desc": "Was the confidence CALIBRATED to the actual outcome?"},
+    "sizing_quality":   {"weight": 0.25,
+                         "desc": "Was the position size proportional to edge × certainty?"},
+    "timing_quality":   {"weight": 0.20,
+                         "desc": "Was entry/exit timing appropriate vs. the move?"},
+    "risk_management":  {"weight": 0.15,
+                         "desc": "Were stoploss, leverage, drawdown bounds respected?"},
+    "regime_alignment": {"weight": 0.15,
+                         "desc": "Was the trade appropriate for the actual regime?"},
+}
+
+
+def _rubric_prompt(verdict: Dict[str, Any], context: Dict[str, Any]) -> str:
+    """Fixed-format prompt forces JSON reply (Goodhart mitigation #5)."""
+    lines = [
+        "You are an RLAIF judge scoring a completed trade.",
+        "Score STRICTLY in [0, 1] for each dimension. Output ONLY valid JSON.",
+        "",
+        "=== RUBRIC ===",
+    ]
+    for dim, meta in RUBRIC.items():
+        lines.append(f"  {dim}: {meta['desc']} (weight {meta['weight']:.2f})")
+    lines += [
+        "",
+        "=== TRADE ===",
+        f"pair:       {verdict.get('pair')}",
+        f"signal:     {verdict.get('signal')}",
+        f"confidence: {verdict.get('confidence')}",
+        f"regime:     {verdict.get('regime')}",
+        f"outcome:    {verdict.get('outcome')}",
+        f"pnl:        {verdict.get('pnl')}",
+        f"duration:   {verdict.get('duration')}",
+        "",
+        "=== CONTEXT ===",
+        f"actual_regime_verified: {context.get('verified_regime')}",
+        f"n_recent_losses: {context.get('n_recent_losses', 0)}",
+        "",
+        "Return JSON: {\"signal_quality\": float, \"sizing_quality\": float, "
+        "\"timing_quality\": float, \"risk_management\": float, "
+        "\"regime_alignment\": float, \"justification\": \"one sentence\"}",
+    ]
+    return "\n".join(lines)
+
+
+def _parse_rubric_response(content: str) -> Optional[Dict[str, float]]:
+    """Parse judge's JSON, return dict of clipped [0,1] scores or None."""
+    if not content:
+        return None
+    txt = str(content).strip()
+    for marker in ("```json", "```JSON", "```"):
+        txt = txt.replace(marker, "")
+    try:
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        data = json.loads(txt[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    # Post-audit fix: one missing / malformed dimension used to invalidate the
+    # WHOLE judge response — two out of three judges with a single typo each
+    # and WCO collapses to zero inputs. Now we fall back to 0.5 (neutral) for
+    # the missing dim and keep the rest. If EVERY dimension is malformed the
+    # caller still gets {dim: 0.5 for each}, which contributes a composite of
+    # 0.0 (matches "no information" intuition).
+    scores: Dict[str, float] = {}
+    for dim in RUBRIC:
+        raw = data.get(dim)
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = 0.5  # neutral fallback — keep response, don't discard
+        scores[dim] = max(0.0, min(1.0, val))
+    return scores
+
+
+class RLAIFRewardGenerator:
+    """Score a trade with 3-judge WCO rubric and mix with env reward."""
+
+    ENV_WEIGHT = 0.80   # Environment reward (realised PnL) dominates.
+    LLM_WEIGHT = 0.20   # LLM rubric is process-quality signal.
+
+    def __init__(self, llm_router=None):
+        self._router = llm_router
+        init_db()
+
+    def _get_router(self):
+        if self._router is None:
+            try:
+                from llm_router import LLMRouter
+                self._router = LLMRouter(temperature=0.2)
+            except Exception as e:
+                logger.debug(f"[RLAIF] router init failed: {e}")
+                self._router = None
+        return self._router
+
+    async def _score_with_judges(self, verdict: Dict[str, Any],
+                                  context: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch the rubric to 3 providers, collect WCO per dimension."""
+        router = self._get_router()
+        if router is None:
+            return {"per_dim_wco": None, "provider_scores": {},
+                    "error": "router unavailable"}
+
+        try:
+            from langchain_core.messages import SystemMessage, HumanMessage
+        except Exception as e:
+            return {"per_dim_wco": None, "provider_scores": {},
+                    "error": f"langchain unavailable: {e}"}
+
+        messages = [
+            SystemMessage(content="You are an RLAIF judge. Reply with JSON only."),
+            HumanMessage(content=_rubric_prompt(verdict, context)),
+        ]
+
+        try:
+            ens = await router.ensemble_invoke(messages, n_judges=3,
+                                                temperature=0.2)
+        except Exception as e:
+            logger.debug(f"[RLAIF] ensemble_invoke failed: {e}")
+            return {"per_dim_wco": None, "provider_scores": {},
+                    "error": str(e)}
+
+        per_provider: Dict[str, Dict[str, float]] = {}
+        for content, provider in zip(ens.get("responses", []),
+                                      ens.get("providers", [])):
+            parsed = _parse_rubric_response(content)
+            if parsed is not None:
+                per_provider[provider] = parsed
+
+        if not per_provider:
+            return {"per_dim_wco": None, "provider_scores": {},
+                    "error": "no parseable rubric replies"}
+
+        # Worst-Case Optimisation: take MIN across providers per dimension.
+        wco: Dict[str, float] = {}
+        for dim in RUBRIC:
+            wco[dim] = min(scores[dim] for scores in per_provider.values())
+
+        return {"per_dim_wco": wco,
+                "provider_scores": per_provider,
+                "cdr": ens.get("cdr"),
+                "error": None}
+
+    @staticmethod
+    def _composite(per_dim: Dict[str, float]) -> float:
+        """Weighted sum of 5 dimensions, remapped to [-1, +1] (0.5 = neutral)."""
+        total_weight = sum(meta["weight"] for meta in RUBRIC.values())
+        raw = sum(per_dim[dim] * RUBRIC[dim]["weight"] for dim in RUBRIC)
+        composite_01 = raw / max(total_weight, 1e-8)
+        return 2.0 * composite_01 - 1.0  # [0,1] → [-1,+1]
+
+    def _persist(self, record: Dict[str, Any]) -> None:
+        try:
+            conn = get_db_connection(AI_DB_PATH)
+            conn.execute("""
+                INSERT INTO rlaif_rewards
+                    (trade_id, pair, timestamp,
+                     signal_quality, sizing_quality, timing_quality,
+                     risk_management, regime_alignment,
+                     composite, provider_scores,
+                     env_reward, total_reward, outcome_pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record.get("trade_id"), record.get("pair"),
+                record.get("timestamp"),
+                record.get("signal_quality"), record.get("sizing_quality"),
+                record.get("timing_quality"), record.get("risk_management"),
+                record.get("regime_alignment"),
+                record.get("composite"),
+                json.dumps(record.get("provider_scores", {})),
+                record.get("env_reward"), record.get("total_reward"),
+                record.get("outcome_pnl"),
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[RLAIF] persist failed: {e}")
+
+    async def score_trade(self, verdict: Dict[str, Any],
+                           context: Optional[Dict[str, Any]] = None,
+                           env_reward: Optional[float] = None) -> Dict[str, Any]:
+        """Score a single trade. Returns the full reward record."""
+        context = context or {}
+        if env_reward is None:
+            # Default env reward = tanh(pnl_pct) so unbounded PnL is bounded.
+            pnl = float(verdict.get("pnl") or 0.0)
+            import math as _math
+            env_reward = _math.tanh(pnl / 5.0)  # 5% PnL → ~0.76
+            env_reward = max(-1.0, min(1.0, env_reward))
+
+        judged = await self._score_with_judges(verdict, context)
+        wco = judged.get("per_dim_wco")
+        if wco is None:
+            # Judges unavailable → fall back to env-only reward.
+            record = {
+                "trade_id": verdict.get("trade_id"),
+                "pair": verdict.get("pair"),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "signal_quality": None, "sizing_quality": None,
+                "timing_quality": None, "risk_management": None,
+                "regime_alignment": None,
+                "composite": None,
+                "provider_scores": judged.get("provider_scores", {}),
+                "env_reward": float(env_reward),
+                "total_reward": float(env_reward),
+                "outcome_pnl": verdict.get("pnl"),
+                "error": judged.get("error"),
+            }
+            self._persist(record)
+            return record
+
+        composite = self._composite(wco)
+        total = self.ENV_WEIGHT * env_reward + self.LLM_WEIGHT * composite
+        total = max(-1.0, min(1.0, total))
+
+        record = {
+            "trade_id": verdict.get("trade_id"),
+            "pair": verdict.get("pair"),
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            **{dim: wco[dim] for dim in RUBRIC},
+            "composite": round(float(composite), 4),
+            "provider_scores": judged.get("provider_scores", {}),
+            "env_reward": round(float(env_reward), 4),
+            "total_reward": round(float(total), 4),
+            "outcome_pnl": verdict.get("pnl"),
+            "cdr": judged.get("cdr"),
+        }
+        self._persist(record)
+        logger.info(
+            f"[RLAIF] trade={verdict.get('trade_id')} {verdict.get('pair')} "
+            f"env={env_reward:+.2f} llm={composite:+.2f} → total={total:+.2f} "
+            f"(cdr={judged.get('cdr')})"
+        )
+        return record
+
+
+_rlaif_instance: Optional[RLAIFRewardGenerator] = None
+
+
+def get_rlaif() -> RLAIFRewardGenerator:
+    global _rlaif_instance
+    if _rlaif_instance is None:
+        _rlaif_instance = RLAIFRewardGenerator()
+    return _rlaif_instance

@@ -91,7 +91,57 @@ class PostTradeCourt:
         # Persist verdict
         self._persist_verdict(verdict)
 
+        # Phase 27 Task 15: RLAIF reward — grade the verdict with the
+        # 3-judge WCO rubric and persist to rlaif_rewards.
+        #
+        # Post-audit fix: Phase 26 used `asyncio.ensure_future` when a loop
+        # was already running. On APScheduler's thread pool there is no
+        # running loop, so the coroutine was silently DROPPED — no rlaif_rewards
+        # row was ever written from the court path. We now always run the
+        # coroutine to completion on this thread via asyncio.run. If a loop
+        # somehow IS already running (rare — only nested async contexts),
+        # fall through to nest_asyncio when available, else log and skip.
+        # RLAIF is OPTIONAL — scoring failure must NOT break the verdict.
+        try:
+            import asyncio as _asyncio
+            from rlaif_reward import get_rlaif
+            rlaif = get_rlaif()
+            context = {
+                "verified_regime": trade_dict.get("regime"),
+                "n_recent_losses": self._count_recent_losses(),
+            }
+            coro = rlaif.score_trade(verdict, context)
+            try:
+                _asyncio.run(coro)
+            except RuntimeError:
+                # "asyncio.run() cannot be called from a running event loop"
+                try:
+                    import nest_asyncio  # type: ignore
+                    nest_asyncio.apply()
+                    _asyncio.run(rlaif.score_trade(verdict, context))
+                except ImportError:
+                    logger.debug(
+                        "[Court:RLAIF] running loop detected and nest_asyncio "
+                        "unavailable — RLAIF scoring skipped (env reward intact)"
+                    )
+        except Exception as e:
+            logger.warning(f"[Court:RLAIF] scoring failed: {e}")
+
         return verdict
+
+    def _count_recent_losses(self) -> int:
+        """Phase 27 Task 15 helper: context input for RLAIF rubric."""
+        try:
+            conn = get_db_connection(AI_DB_PATH)
+            row = conn.execute("""
+                SELECT COUNT(*) AS n FROM ai_decisions
+                WHERE outcome_pnl < 0
+                  AND timestamp > datetime('now', '-2 days')
+            """).fetchone()
+            conn.close()
+            return int(row["n"] or 0)
+        except Exception:
+            return 0
 
     def _assign_blame(self, trade: Dict, evidence: Dict) -> Dict:
         """Assign blame to specific components."""
