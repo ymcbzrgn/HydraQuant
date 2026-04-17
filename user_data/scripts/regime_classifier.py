@@ -131,3 +131,246 @@ class RegimeClassifier:
             RegimeClassifier.TRANSITIONAL: 0.90,
         }
         return modifiers.get(regime, 0.90)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase 27 Task 12 (B5 Ajani): 4-Layer Regime Detection
+# ═══════════════════════════════════════════════════════════════
+
+class _BOCPDState:
+    """Lightweight per-pair online-changepoint state.
+
+    Tracks rolling mean + variance so the Score-Driven BOCPD heuristic can
+    flag distribution drift without pulling in a full `bayesian-changepoint`
+    dependency. We estimate the z-score of the latest observation against
+    the rolling mean; large absolute z-scores push down the expected residual
+    time to the next changepoint.
+    """
+
+    def __init__(self, window: int = 60):
+        from collections import deque as _deque
+        self._window = window
+        self._buf = _deque(maxlen=window)
+
+    def update(self, returns) -> Dict[str, float]:
+        import math as _math
+        import numpy as _np
+        # Accept scalar or iterable
+        if returns is None:
+            return {"median_residual_time": 24.0, "score_magnitude": 0.0}
+        try:
+            arr = _np.asarray(list(returns), dtype=float)
+            if arr.size == 0:
+                return {"median_residual_time": 24.0, "score_magnitude": 0.0}
+            latest = float(arr[-1])
+            for val in arr:
+                self._buf.append(float(val))
+        except TypeError:
+            latest = float(returns)
+            self._buf.append(latest)
+
+        buf = list(self._buf)
+        if len(buf) < 5:
+            return {"median_residual_time": 24.0, "score_magnitude": 0.0}
+        mean = float(_np.mean(buf))
+        std = float(_np.std(buf)) or 1e-8
+        score_magnitude = abs(latest - mean) / std
+
+        # Residual time heuristic: high surprise → fewer hours until drift becomes
+        # detectable, low surprise → more hours. Clamped to a realistic 1-48h range.
+        residual_time = max(1.0, min(48.0, 24.0 * _math.exp(-score_magnitude / 2.0)))
+        return {
+            "median_residual_time": residual_time,
+            "score_magnitude": score_magnitude,
+        }
+
+
+class FourLayerRegimeDetector:
+    """Phase 27 Task 12: ensemble regime detector with 4 complementary layers.
+
+    Lead time ranking (fastest → slowest):
+        Layer 0 — VPIN toxicity composite (1–3h lead, from order_flow.py)
+        Layer 1 — Score-Driven BOCPD (2–6h lead, rolling return surprise)
+        Layer 2 — Causal edge instability (4–12h lead, causal_engine PCMCI+)
+        Layer 3 — ADX + EMA (confirmation only, legacy RegimeClassifier)
+
+    Output is persisted to `regime_layers` so post-mortems can reconstruct the
+    layer agreement at decision time and so sizing is reproducible.
+    """
+
+    def __init__(self):
+        self._bocpd: Dict[str, _BOCPDState] = {}
+
+    def _get_bocpd(self, pair: str) -> _BOCPDState:
+        st = self._bocpd.get(pair)
+        if st is None:
+            st = _BOCPDState()
+            self._bocpd[pair] = st
+        return st
+
+    def _layer0_vpin(self, pair: str) -> Dict[str, Any]:
+        """Read VPIN / composite toxicity from the OrderFlowAnalyzer (Grup 3)."""
+        try:
+            from order_flow import get_order_flow
+            of = get_order_flow()
+            # Grup 3 stores histories per-pair — use the freshest composite.
+            vpin_hist = of._vpin_history.get(pair)
+            latest_vpin = float(vpin_hist[-1]) if vpin_hist and len(vpin_hist) else 0.0
+            # Percentile-rank against own history
+            alert = False
+            if vpin_hist and len(vpin_hist) >= 10:
+                from order_flow import _percentile_rank
+                pct = _percentile_rank(latest_vpin, list(vpin_hist))
+                alert = pct > 0.80  # top-20% toxic
+            return {"alert": bool(alert), "value": round(latest_vpin, 4)}
+        except Exception as e:
+            logger.debug(f"[Regime:Layer0] VPIN read failed ({pair}): {e}")
+            return {"alert": False, "value": 0.0}
+
+    def _layer1_bocpd(self, pair: str, tech_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Score-Driven BOCPD on recent returns."""
+        closes = tech_data.get("recent_closes") or []
+        if not closes or len(closes) < 2:
+            return {"alert": False, "residual_time": 24.0, "score_magnitude": 0.0}
+        import numpy as _np
+        arr = _np.asarray(closes, dtype=float)
+        rets = _np.diff(_np.log(arr[arr > 0])) if (arr > 0).all() else _np.array([0.0])
+        state = self._get_bocpd(pair)
+        bocpd = state.update(rets)
+        residual_time = float(bocpd.get("median_residual_time", 24.0))
+        score_magnitude = float(bocpd.get("score_magnitude", 0.0))
+        alert = bool(residual_time < 8.0 or score_magnitude > 2.0)
+        return {
+            "alert": alert,
+            "residual_time": round(residual_time, 2),
+            "score_magnitude": round(score_magnitude, 4),
+        }
+
+    def _layer2_causal(self, pair: str, regime_hint: Optional[str] = None) -> Dict[str, Any]:
+        """Causal edge instability index.
+
+        `causal_discoveries` has no `pair` column (PCMCI+ fits across the whole
+        market by design — edges are market-wide structural claims). To make
+        the signal as pair-relevant as we can, we filter by the pair's CURRENT
+        regime when known: the edges in "trending_bull" have different stability
+        profiles than "ranging", and that is the dimension causal_discoveries
+        actually supports.
+        """
+        try:
+            import numpy as _np
+            from db import get_db_connection
+            conn = get_db_connection()
+            if regime_hint:
+                rows = conn.execute("""
+                    SELECT source_var, target_var, causal_strength, regime
+                    FROM causal_discoveries
+                    WHERE discovered_at > datetime('now', '-14 days')
+                      AND regime = ?
+                """, (regime_hint,)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT source_var, target_var, causal_strength, regime
+                    FROM causal_discoveries
+                    WHERE discovered_at > datetime('now', '-14 days')
+                """).fetchall()
+            conn.close()
+            if not rows or len(rows) < 2:
+                return {"alert": False, "instability": 0.0,
+                        "regime_filter": regime_hint or "_any"}
+            strengths = _np.asarray(
+                [float(r["causal_strength"] or 0.0) for r in rows]
+            )
+            mean_abs = float(_np.mean(_np.abs(strengths))) + 1e-8
+            instability = float(_np.std(strengths)) / mean_abs
+            alert = instability > 0.25
+            return {
+                "alert": bool(alert),
+                "instability": round(instability, 4),
+                "regime_filter": regime_hint or "_any",
+                "n_edges": len(rows),
+            }
+        except Exception as e:
+            logger.debug(f"[Regime:Layer2] causal read failed: {e}")
+            return {"alert": False, "instability": 0.0,
+                    "regime_filter": regime_hint or "_any"}
+
+    def detect(self, pair: str, tech_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Run all 4 layers and fuse them into a single regime + sizing modifier.
+
+        Classify ADX regime FIRST so Layer 2 can filter causal edges by the
+        pair's current regime (causal_discoveries has no pair column; regime
+        is the closest approximation to per-pair relevance).
+        """
+        l3_regime = RegimeClassifier.classify(tech_data)
+        l0 = self._layer0_vpin(pair)
+        l1 = self._layer1_bocpd(pair, tech_data)
+        l2 = self._layer2_causal(pair, regime_hint=l3_regime)
+
+        alert_count = int(l0["alert"]) + int(l1["alert"]) + int(l2["alert"])
+        if alert_count == 0:
+            prob, status = 0.10, "STABLE"
+        elif alert_count == 1:
+            prob, status = 0.50, "MICROSTRUCTURE_ANOMALY"
+        elif alert_count == 2:
+            prob, status = 0.75, "REGIME_CHANGE_LIKELY"
+        else:
+            prob, status = 0.95, "REGIME_CHANGE_IMMINENT"
+
+        sizing_modifier = max(0.3, 1.0 - prob * 0.5)
+
+        result = {
+            "pair": pair,
+            "current_regime": l3_regime,
+            "regime_change_prob": round(prob, 3),
+            "status": status,
+            "sizing_modifier": round(sizing_modifier, 3),
+            "layers": {
+                "L0_vpin": l0,
+                "L1_bocpd": l1,
+                "L2_causal": l2,
+                "L3_adx": {"regime": l3_regime},
+            },
+        }
+        self._persist(pair, result)
+        return result
+
+    def _persist(self, pair: str, result: Dict[str, Any]) -> None:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            from db import get_db_connection
+            conn = get_db_connection()
+            layers = result["layers"]
+            conn.execute("""
+                INSERT OR REPLACE INTO regime_layers
+                    (pair, timestamp,
+                     layer0_vpin, layer0_alert,
+                     layer1_bocpd_residual, layer1_alert,
+                     layer2_causal_instability, layer2_alert,
+                     layer3_adx_regime,
+                     regime_change_prob, sizing_modifier, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                pair, _dt.now(tz=_tz.utc).isoformat(),
+                float(layers["L0_vpin"]["value"]), int(bool(layers["L0_vpin"]["alert"])),
+                float(layers["L1_bocpd"].get("residual_time", 0.0)), int(bool(layers["L1_bocpd"]["alert"])),
+                float(layers["L2_causal"]["instability"]), int(bool(layers["L2_causal"]["alert"])),
+                layers["L3_adx"]["regime"],
+                float(result["regime_change_prob"]),
+                float(result["sizing_modifier"]),
+                result["status"],
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[Regime:Layer] persist failed for {pair}: {e}")
+
+
+_four_layer: Optional["FourLayerRegimeDetector"] = None
+
+
+def get_regime_detector() -> "FourLayerRegimeDetector":
+    """Singleton accessor for the 4-layer detector."""
+    global _four_layer
+    if _four_layer is None:
+        _four_layer = FourLayerRegimeDetector()
+    return _four_layer

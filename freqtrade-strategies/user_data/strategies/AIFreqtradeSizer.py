@@ -935,6 +935,236 @@ class AIFreqtradeSizer(IStrategy):
 
         return df
 
+    # ═══════════════════════════════════════════════════════════
+    # Phase 27 Task 11 helpers — CAAT multiplier + per-pair threshold
+    # ═══════════════════════════════════════════════════════════
+
+    def _caat_asymmetric_multiplier(
+        self,
+        pair: str,
+        regime: str,
+        confidence: float,
+        ai_decision: dict,
+        last_candle,
+        proposed_stake: float,
+    ) -> tuple:
+        """Phase 27 Task 11 CAAT Asymmetric Alpha sizing multiplier.
+
+        Combines PARÇAs 3 (Hormonal), 4 (Dream), 5 (VWTSMOM/fractal regime),
+        6 (Shannon harvest), 7 (Impact sqrt-law), 9 (Confidence integral),
+        and 10 (Forgone alpha) into a single multiplicative adjustment applied
+        on top of the existing Kelly×confidence×sizing_multiplier fraction.
+        PARÇAs 1 (Kelly), 2 (confidence trust curve), 8 (Hawkes veto/clamp)
+        are already applied elsewhere in the sizing pipeline.
+
+        Returns (multiplier, breakdown_dict). The multiplier is hard-clamped
+        to [0.2, 1.5] so no single layer can singlehandedly dominate.
+        """
+        import math as _math
+        breakdown = {}
+        mult = 1.0
+
+        # ── PARÇA 3: Hormonal scalar ──
+        # Code convention: LOW cortisol = STRESSED (floor 0.5), HIGH = CALM (1.0).
+        # Post-audit fix: the ALPHA doc pseudocode used biology convention (high
+        # cortisol = stressed) and wrote `1/cortisol`, which in OUR convention
+        # INVERTED the signal — stressed organism got a LARGER multiplier.
+        # Correct form: multiply BY cortisol so stressed → shrink, calm → neutral.
+        try:
+            from neural_organism import get_organism
+            org = get_organism()
+            h = org.hormones
+            hormonal = h.dopamine * max(h.cortisol, 0.3) * h.serotonin
+            hormonal = max(0.5, min(2.0, hormonal))
+            mult *= hormonal
+            breakdown["hormonal"] = round(hormonal, 3)
+        except Exception:
+            breakdown["hormonal"] = 1.0
+
+        # ── PARÇA 4: Dream Familiarity (only if the engine has data) ──
+        try:
+            from dream_engine import get_dream_engine
+            eng = get_dream_engine()
+            if eng._filter._stats_computed:
+                # If the organism has been dreaming, increase the bonus
+                # marginally — we don't have per-state variance lookup yet,
+                # so this is a one-step +10% favour of the familiar regime.
+                mult *= 1.05
+                breakdown["dream"] = 1.05
+            else:
+                breakdown["dream"] = 1.0
+        except Exception:
+            breakdown["dream"] = 1.0
+
+        # ── PARÇA 5: Fractal regime filter (Hurst + VWTSMOM) ──
+        # chart_features keys land in the dataframe with a `%-` prefix (see
+        # populate_indicators L780: `f'%-{k}': [v] * len(dataframe)`). Without
+        # the prefix every call fell back to 0.5 (neutral) and the regime
+        # filter was a no-op.
+        hurst = 0.5
+        try:
+            hurst = float(
+                last_candle.get("%-hurst_100",
+                                last_candle.get("%-hurst_50",
+                                                last_candle.get("hurst_100",
+                                                                last_candle.get("hurst_50", 0.5))))
+                or 0.5
+            )
+        except Exception:
+            pass
+        if hurst > 0.55:
+            regime_mult = 1.2  # trending → full engagement
+        elif hurst < 0.45:
+            regime_mult = 0.6  # anti-persistent → halve
+        else:
+            regime_mult = 0.9
+        mult *= regime_mult
+        breakdown["hurst_regime"] = round(regime_mult, 3)
+
+        # ── PARÇA 6: Shannon harvest — ranging markets size smaller ──
+        adx = 0.0
+        try:
+            adx = float(last_candle.get("adx") or last_candle.get("adx_14") or 0.0)
+        except Exception:
+            adx = 0.0
+        if adx and adx < 20.0:
+            mult *= 0.6
+            breakdown["shannon"] = 0.6
+        else:
+            breakdown["shannon"] = 1.0
+
+        # ── PARÇA 7: Impact constraint (sqrt-law) ──
+        try:
+            from slippage_forecaster import sqrt_law_impact_bps
+            # Real 24h quote volume from Bybit ticker (fallback chain:
+            # ticker → market_data → conservative 1M USDT). The old fallback
+            # of `proposed_stake * 10000` made the impact check a no-op.
+            adv_usd = None
+            try:
+                ticker = self.dp.ticker(pair) if hasattr(self, "dp") else None
+                if ticker:
+                    for key in ("quoteVolume", "quoteVolume24h", "quote_volume_24h"):
+                        if ticker.get(key):
+                            adv_usd = float(ticker[key])
+                            break
+            except Exception:
+                pass
+            if adv_usd is None:
+                try:
+                    _md = getattr(self, "_market_data", None) or ai_decision.get("market_data", {})
+                    if isinstance(_md, dict):
+                        adv_usd = float(
+                            _md.get("adv_usd") or _md.get("average_daily_volume") or 0.0
+                        )
+                except Exception:
+                    adv_usd = None
+            if not adv_usd or adv_usd <= 0:
+                # Last-resort floor — 1M USDT/day is realistic for most liquid
+                # perps; if the pair is thinner than that the impact check
+                # will (correctly) flag the trade as expensive.
+                adv_usd = 1_000_000.0
+
+            sigma_bps = 200.0
+            try:
+                sigma_bps = float(ai_decision.get("sigma_bps") or 200.0)
+            except Exception:
+                pass
+
+            impact = sqrt_law_impact_bps(
+                dollar_size=float(proposed_stake),
+                adv_usd=adv_usd,
+                sigma_daily_bps=sigma_bps,
+            )
+            # Convert cost → multiplier: if cost consumes > expected alpha,
+            # clamp sizing proportionally (alpha proxy: confidence × 100 bps).
+            expected_alpha_bps = max(10.0, confidence * 100.0)
+            cost_ratio = impact["total_cost_bps"] / expected_alpha_bps
+            impact_mult = max(0.3, 1.0 - min(1.0, cost_ratio) * 0.5)
+            mult *= impact_mult
+            breakdown["impact"] = round(impact_mult, 3)
+            breakdown["adv_usd"] = round(float(adv_usd), 0)
+        except Exception:
+            breakdown["impact"] = 1.0
+
+        # ── PARÇA 9: Confidence Integral (HQ-1) ──
+        try:
+            from pheromone_field import get_pheromone_field, PheromoneField
+            pf = get_pheromone_field()
+            integ = pf.read_integral("prediction", window_seconds=14400.0)
+            grad = pf.read_gradient("prediction")
+            # 4h-sustained bullish conviction → up to +20%; fading grad → -10%.
+            integ_mult = 1.0 + 0.20 * max(-1.0, min(1.0, abs(integ) - 0.5))
+            grad_mult = 1.0 + 0.10 * _math.tanh(grad * 100.0)
+            combined = max(0.8, min(1.25, integ_mult * grad_mult))
+            mult *= combined
+            breakdown["integral"] = round(combined, 3)
+        except Exception:
+            breakdown["integral"] = 1.0
+
+        # ── PARÇA 5b (Task 12): 4-Layer regime detection ──
+        try:
+            from regime_classifier import get_regime_detector
+            det = get_regime_detector()
+            tech_snapshot = {
+                "adx": last_candle.get("adx") or last_candle.get("adx_14"),
+                "atr": last_candle.get("atr") or last_candle.get("atr_14"),
+                "price": last_candle.get("close") or last_candle.get("current_price"),
+                "ema20": last_candle.get("ema_20") or last_candle.get("ema20"),
+                "ema200": last_candle.get("ema_200") or last_candle.get("ema200"),
+                "recent_closes": ai_decision.get("recent_closes") or [],
+            }
+            rl = det.detect(pair, tech_snapshot)
+            regime_mult_4l = float(rl.get("sizing_modifier", 1.0))
+            mult *= regime_mult_4l
+            breakdown["regime_4layer"] = round(regime_mult_4l, 3)
+        except Exception as e:
+            logger.debug(f"[Phase27:4LayerRegime] skipped ({pair}): {e}")
+            breakdown["regime_4layer"] = 1.0
+
+        # ── PARÇA 10: Forgone alpha adjustment ──
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            row = conn.execute("""
+                SELECT forgone_alpha_7d FROM pair_thresholds
+                WHERE pair = ? AND regime = ?
+            """, (pair, regime)).fetchone()
+            conn.close()
+            if row is not None:
+                alpha_7d = float(row["forgone_alpha_7d"] or 0.0)
+                if alpha_7d > 2.0:
+                    forgone_mult = 1.10  # we've been missing winners — be bolder
+                elif alpha_7d < -1.0:
+                    forgone_mult = 0.90  # catching losers — be more cautious
+                else:
+                    forgone_mult = 1.0
+                mult *= forgone_mult
+                breakdown["forgone"] = round(forgone_mult, 3)
+            else:
+                breakdown["forgone"] = 1.0
+        except Exception:
+            breakdown["forgone"] = 1.0
+
+        # Hard clamp so no single layer dominates
+        mult = max(0.2, min(1.5, mult))
+        return mult, breakdown
+
+    def _pair_confidence_threshold(self, pair: str, regime: str) -> float:
+        """Phase 27 Fix 6: per-pair adaptive threshold lookup (fallback 0.50)."""
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            row = conn.execute("""
+                SELECT confidence_threshold FROM pair_thresholds
+                WHERE pair = ? AND regime = ?
+            """, (pair, regime)).fetchone()
+            conn.close()
+            if row is not None:
+                return float(row["confidence_threshold"])
+        except Exception:
+            pass
+        return 0.50
+
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
         """
@@ -990,6 +1220,44 @@ class AIFreqtradeSizer(IStrategy):
             mult = _np("strategy.chandelier_atr_med", 2.5)
         else:
             mult = _np("strategy.chandelier_atr_low", 2.0)
+
+        # ═══ Phase 27 Task 14: Fractal trailing + cortisol modulation ═══
+        # Hurst > 0.55 → trend persistent → widen to 3.5x (ride the trend).
+        # Hurst < 0.45 → anti-persistent → tighten to 1.5x (mean-revert fast).
+        # Cortisol modulates: α ×= (2 − cortisol) so stressed organism widens
+        # stops (less prone to premature exits) and calm organism can tighten.
+        # chart_features keys land with `%-` prefix (populate_indicators L780).
+        try:
+            hurst = (last_candle.get('%-hurst_100')
+                     or last_candle.get('%-hurst_50')
+                     or last_candle.get('hurst_100')
+                     or last_candle.get('hurst_50'))
+            if hurst is not None and hurst == hurst:  # NaN check
+                hurst_val = float(hurst)
+                if hurst_val > 0.55:
+                    mult = max(mult, _np("strategy.trailing_hurst_high", 3.5))
+                elif hurst_val < 0.45:
+                    mult = min(mult, _np("strategy.trailing_hurst_low", 1.5))
+        except Exception:
+            pass
+        try:
+            from neural_organism import get_organism
+            cortisol = float(get_organism().hormones.cortisol)
+            # cortisol ∈ [0.5, 1.0] in code convention (1.0 calm / 0.5 stressed)
+            # factor = (2 − cortisol): calm → 1.0, stressed → 1.5 (widen).
+            mult *= (2.0 - max(0.5, min(1.0, cortisol)))
+            mult = max(1.0, min(5.0, mult))  # safety clamp
+        except Exception:
+            pass
+
+        # ═══ Phase 27 Task 14: 2-week rule — age-based trailing tightening ═══
+        try:
+            age_days = (current_time - trade.open_date_utc).total_seconds() / 86400.0
+            if age_days > 10.0:
+                # Past Dobrynskaya's momentum window → tighten trailing
+                mult = min(mult, _np("strategy.trailing_age_10d", 1.5))
+        except Exception:
+            pass
 
         # ═══ 3-TIER TRAILING (Phase 25: adaptive PnL tiers + ATR caps) ═══
         effective_pnl = current_profit * (trade.leverage or 1.0)
@@ -1143,6 +1411,39 @@ class AIFreqtradeSizer(IStrategy):
             sizing_mult = ai_decision.get("sizing_multiplier", 1.0)
             if hasattr(self, '_perception_cache') and pair in self._perception_cache:
                 sizing_mult = self._perception_cache[pair].get("sizing_multiplier", sizing_mult)
+
+            # ═══ Phase 27 Task 11: CAAT Asymmetric Alpha multiplier ═══
+            # Layers hormonal / dream / Shannon / impact / integral / forgone / 4-layer
+            # regime on TOP of the existing Kelly×confidence fraction. Hawkes
+            # veto is already handled by the OrderFlow block further below; we
+            # only add the remaining PARÇA multipliers here (3-7, 9-10).
+            try:
+                caat_mult, caat_breakdown = self._caat_asymmetric_multiplier(
+                    pair=pair,
+                    regime=regime_for_kelly,
+                    confidence=confidence,
+                    ai_decision=ai_decision,
+                    last_candle=last_candle,
+                    proposed_stake=proposed_stake,
+                )
+                if caat_mult != 1.0:
+                    old_stake = final_stake
+                    final_stake *= caat_mult
+                    logger.info(
+                        f"[Phase27:CAAT] {pair} × {caat_mult:.3f} "
+                        f"({old_stake:.2f} → {final_stake:.2f}) breakdown={caat_breakdown}"
+                    )
+                # Per-pair confidence threshold gate — Task 11 forgone alpha feedback.
+                pair_thr = self._pair_confidence_threshold(pair, regime_for_kelly)
+                if confidence < pair_thr:
+                    logger.info(
+                        f"[Phase27:Threshold] {pair} conf={confidence:.2f} < "
+                        f"per-pair thr={pair_thr:.2f} → returning min_stake"
+                    )
+                    return min_stake
+            except Exception as e:
+                logger.debug(f"[Phase27:CAAT] multiplier skipped: {e}")
+
             if sizing_mult != 1.0:
                 old_stake = final_stake
                 final_stake *= sizing_mult
@@ -1761,6 +2062,14 @@ class AIFreqtradeSizer(IStrategy):
             return None
 
         hours_held = (current_time - trade.open_date_utc).total_seconds() / 3600
+        age_days = hours_held / 24.0
+
+        # Phase 27 Task 14: 2-week rule — beyond 14 days crypto momentum has
+        # empirically reverted (Dobrynskaya 2021 SSRN 3913263 timing map).
+        # Force exit regardless of profit state to free capital for fresh
+        # momentum candidates.
+        if age_days > 14.0:
+            return f"age_14d_reversal_{age_days:.1f}d"
 
         # 1. STALE TRADE
         if hours_held > self.stale_trade_hours.value and abs(current_profit) < 0.005:

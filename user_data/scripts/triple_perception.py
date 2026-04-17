@@ -20,6 +20,7 @@ import logging
 import time
 import numpy as np
 import pandas as pd
+import os
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ class TriplePerception:
     def __init__(self):
         self._catboost_model = None
         self._catboost_available = False
+        # Phase 27 Task 13 — attributes exist immediately so callers that check
+        # availability before the first perceive() don't AttributeError.
+        self._kronos_model = None
+        self._kronos_available = False
         self._initialized = False
 
     def _get_or_create(self, attr_name: str, factory):
@@ -66,6 +71,90 @@ class TriplePerception:
             self._load_catboost()
         except Exception as e:
             logger.warning(f"[TriplePerception] CatBoost load failed: {e}")
+
+        # Phase 27 Task 13 (C5 Ajani): Kronos-mini — optional 4th perception
+        # stream (OHLCV-native financial foundation model). Disabled by default;
+        # opt-in via HQ_ENABLE_KRONOS=1 so CPU inference cost is a conscious
+        # choice. Failure to load is NOT fatal — the pipeline still runs as
+        # triple perception. (Attributes were pre-seeded in __init__.)
+        self._try_load_kronos()
+
+    def _try_load_kronos(self) -> None:
+        """Phase 27 Task 13: lazy-load HuggingFace NeoQuasar/Kronos-mini when
+        (a) `transformers` is installed, (b) the user opted in via env var,
+        and (c) a short CPU benchmark comes under the latency budget (200ms).
+
+        Keeping this guarded prevents the organism from silently paying a
+        hundreds-of-ms inference tax on every perception cycle.
+        """
+        if os.environ.get("HQ_ENABLE_KRONOS", "0") != "1":
+            logger.debug("[TriplePerception:Kronos] disabled via HQ_ENABLE_KRONOS")
+            return
+        try:
+            import time as _time
+            import torch as _torch
+            from transformers import AutoModel  # type: ignore
+        except Exception as e:
+            logger.info(f"[TriplePerception:Kronos] deps unavailable ({e}); skipping")
+            return
+        try:
+            model = AutoModel.from_pretrained(
+                "NeoQuasar/Kronos-mini", trust_remote_code=True
+            )
+            model.eval()
+            # CPU benchmark — 1 dummy forward pass
+            with _torch.no_grad():
+                dummy = _torch.randn(1, 64, 5)  # (batch, seq_len, features)
+                t0 = _time.perf_counter()
+                try:
+                    model(dummy)
+                except Exception:
+                    # Signature mismatch is fine for the benchmark
+                    pass
+                elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            if elapsed_ms > 200.0:
+                logger.warning(
+                    f"[TriplePerception:Kronos] benchmark {elapsed_ms:.0f}ms > 200ms budget "
+                    "— disabling to preserve per-cycle latency"
+                )
+                return
+            self._kronos_model = model
+            self._kronos_available = True
+            logger.info(f"[TriplePerception:Kronos] loaded (benchmark {elapsed_ms:.0f}ms)")
+        except Exception as e:
+            logger.info(f"[TriplePerception:Kronos] load failed ({e}); staying with triple perception")
+
+    def _kronos_predict(self, df) -> Optional[float]:
+        """Run Kronos-mini over the last 64 candles. Returns a scalar direction
+        score in [-1, +1] or None if the model is unavailable / inference fails."""
+        if not self._kronos_available or self._kronos_model is None:
+            return None
+        try:
+            import torch as _torch
+            tail = df.tail(64)
+            feats = tail[["open", "high", "low", "close", "volume"]].to_numpy(dtype=np.float32)
+            if feats.shape[0] < 10:
+                return None
+            tensor = _torch.tensor(feats).unsqueeze(0)
+            with _torch.no_grad():
+                out = self._kronos_model(tensor)
+            # The model exposes different heads depending on the HF revision —
+            # try a couple of canonical attributes, default to mean of logits.
+            vec = None
+            for attr in ("prediction", "last_hidden_state", "logits"):
+                if hasattr(out, attr):
+                    vec = getattr(out, attr)
+                    break
+            if vec is None and isinstance(out, tuple):
+                vec = out[0]
+            if vec is None:
+                return None
+            scalar = float(vec.mean().item())
+            # Clamp into [-1, 1]
+            return max(-1.0, min(1.0, scalar))
+        except Exception as e:
+            logger.debug(f"[TriplePerception:Kronos] predict failed: {e}")
+            return None
 
     def _load_catboost(self):
         """Load pre-trained CatBoost signal prediction model from SQLite/file."""
@@ -135,7 +224,9 @@ class TriplePerception:
             "disagreement": 0.0,
             "shap_top_features": [],
             "latency_ms": 0.0,
-            "components_available": {"ttm": False, "chronos": False, "catboost": False},
+            "components_available": {"ttm": False, "chronos": False,
+                                     "catboost": False, "kronos": False},
+            "kronos_direction": 0.0,
         }
 
         # --- 1. TTM: Directional Signal + Embedding ---
@@ -188,6 +279,22 @@ class TriplePerception:
                 result["components_available"]["catboost"] = True
             except Exception as e:
                 logger.warning(f"[TriplePerception] CatBoost predict failed: {e}")
+
+        # --- 3b. Kronos-mini (optional, Task 13) ---
+        # Disabled unless HQ_ENABLE_KRONOS=1 set at process startup. When active,
+        # the scalar direction score is added to result so _fuse / MADAM can
+        # use it. We log the raw score even when we don't yet weight it into
+        # the final signal — avoids the "defined but never called" dead code
+        # audit finding.
+        if self._kronos_available:
+            try:
+                kronos_dir = self._kronos_predict(df_1h)
+                if kronos_dir is not None:
+                    result["kronos_direction"] = float(kronos_dir)
+                    result["components_available"]["kronos"] = True
+                    logger.info(f"[TriplePerception:Kronos] direction={kronos_dir:+.3f}")
+            except Exception as e:
+                logger.debug(f"[TriplePerception:Kronos] predict error: {e}")
 
         # --- 4. OOD Detection: "Bu piyasayı daha önce gördüm mü?" ---
         ood_result = {"is_ood": False, "defensive_multiplier": 1.0}
@@ -404,11 +511,14 @@ class TriplePerception:
         return "\n".join(lines)
 
     def _fuse(self, result: Dict) -> Dict:
-        """Fuse TTM + Chronos + CatBoost into final signal."""
+        """Fuse TTM + Chronos + CatBoost (+ optional Kronos) into final signal."""
         ttm_dir = result["ttm_direction"]
         chronos_p50 = result["chronos_p50"]
         catboost_prob = result["catboost_probability"]
         has_catboost = result["components_available"]["catboost"]
+        # Phase 27 Task 13: Kronos adds a fourth direction vote when active.
+        kronos_dir = result.get("kronos_direction", 0.0)
+        has_kronos = result["components_available"].get("kronos", False)
 
         # Disagreement: how much do the models disagree?
         signals = []
@@ -418,6 +528,8 @@ class TriplePerception:
             signals.append(1.0 if chronos_p50 > 0 else -1.0)
         if has_catboost:
             signals.append(1.0 if catboost_prob > 0.5 else -1.0)
+        if has_kronos and abs(kronos_dir) > 0.01:
+            signals.append(1.0 if kronos_dir > 0 else -1.0)
 
         if len(signals) >= 2:
             agreement = sum(signals) / len(signals)

@@ -541,6 +541,25 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_pair_thr
             ON pair_thresholds(pair, regime)''')
 
+        # Phase 27 Task 12 (B5 Ajani): 4-Layer regime detection snapshot.
+        # ADX is demoted from primary signal to confirmation (Layer 3); the
+        # earlier layers (VPIN → BOCPD → Causal Edge Instability) have longer
+        # lead time and flag regime shifts BEFORE ADX even moves.
+        c.execute('''CREATE TABLE IF NOT EXISTS regime_layers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            layer0_vpin REAL, layer0_alert INTEGER,
+            layer1_bocpd_residual REAL, layer1_alert INTEGER,
+            layer2_causal_instability REAL, layer2_alert INTEGER,
+            layer3_adx_regime TEXT,
+            regime_change_prob REAL,
+            sizing_modifier REAL,
+            status TEXT,
+            UNIQUE(pair, timestamp))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_regime_layers_pair
+            ON regime_layers(pair, timestamp)''')
+
         # Phase 27 Fix 6: regime column on forgone_profit so the resolver /
         # adaptive-threshold jobs can group alpha-left-on-the-table by regime.
         # Idempotent ALTER — silently ignored if column already exists.

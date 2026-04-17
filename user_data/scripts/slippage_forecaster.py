@@ -178,3 +178,45 @@ def get_slippage_forecaster() -> SlippageForecaster:
     if _sf_instance is None:
         _sf_instance = SlippageForecaster()
     return _sf_instance
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase 27 Fix 8 / Task 11 (D2 Ajani): Almgren-Chriss sqrt-law impact
+# ═══════════════════════════════════════════════════════════════
+def sqrt_law_impact_bps(
+    dollar_size: float,
+    adv_usd: float,
+    sigma_daily_bps: float = 200.0,
+    coefficient: float = 0.34,
+    participation_cap: float = 0.042,
+) -> Dict:
+    """Almgren & Chriss (2000) / Donier & Bonart (2015): permanent market impact
+    scales as the square root of order size relative to market volume.
+
+    impact_bps ≈ coeff · σ_daily · √(participation_rate)
+
+    Phase 27 Task 11 PARÇA 7 calls this in the sizing formula's impact-constraint
+    step. Returns a dict so callers can also pull the participation/depth used.
+    """
+    import math as _math
+
+    if adv_usd <= 0 or dollar_size <= 0:
+        return {
+            "impact_bps": 0.0,
+            "participation": 0.0,
+            "fee_bps": 4.0,
+            "total_cost_bps": 4.0,
+        }
+
+    # Participation rate relative to a 4.2%-of-daily-volume cap (Donier & Bonart).
+    participation = min(participation_cap, dollar_size / adv_usd)
+    impact_bps = coefficient * max(1.0, float(sigma_daily_bps)) * _math.sqrt(participation)
+    fee_bps = 4.0  # Bybit VIP0 maker round-trip approx
+    total_cost_bps = impact_bps + fee_bps
+
+    return {
+        "impact_bps": round(float(impact_bps), 3),
+        "participation": round(float(participation), 6),
+        "fee_bps": float(fee_bps),
+        "total_cost_bps": round(float(total_cost_bps), 3),
+    }
