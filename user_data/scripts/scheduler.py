@@ -460,9 +460,28 @@ class PipelineScheduler:
         self.scheduler.add_job(self._phase27_dead_code_warmup, 'interval', hours=1,
             id='dead_code_warmup', name='Dead Code Batch 2 Warm-up',
             max_instances=1, replace_existing=True)
+        # Phase 27 Task 21: Decision Transformer training — Sunday 23:00 UTC,
+        # latest Sunday slot so all upstream retrains (CatBoost/OOD/Ensemble/
+        # LoRA fine-tune/hypothesis cycle) have finished and their outputs
+        # are reflected in decision_contract rows.
+        self.scheduler.add_job(self._dt_training_cycle,
+            'cron', day_of_week='sun', hour=23,
+            id='dt_training', name='Decision Transformer Weekly LoRA',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Task 23: Nightly exploit archive regression test (02:15 UTC
+        # daily — after CatBoost Sunday cycle, early enough for the report).
+        self.scheduler.add_job(self._exploit_regression_batch,
+            'cron', hour=2, minute=15,
+            id='exploit_batch', name='Exploit Archive Regression',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Task 25: Trade-as-language weekly cycle (Sunday 08:00 UTC).
+        self.scheduler.add_job(self._trade_language_cycle,
+            'cron', day_of_week='sun', hour=8,
+            id='trade_language', name='Trade-as-Language Pattern Mining',
+            max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 59 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 8 phase27)")
+        logger.info("[Scheduler] Started with 62 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 11 phase27)")
         return True
 
     def stop(self):
@@ -2426,6 +2445,80 @@ class PipelineScheduler:
             summary["gam_rag"] = f"skip:{type(e).__name__}"
 
         logger.info(f"[Phase27:DeadCodeWarmup] {summary}")
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 27 Frontier (Grup 7) — DT + Exploit + TradeLang
+    # ═══════════════════════════════════════════════════════════
+
+    def _dt_training_cycle(self):
+        """Phase 27 Task 21: Sunday 23:00 UTC Decision Transformer LoRA cycle.
+
+        Today this is a scaffolded cycle — it builds the (return-to-go, state,
+        action) corpus from ai_decisions and records a "pending_impl" sidecar.
+        Sprint 3B task 21b wires the real `peft` + `transformers` LoRA training
+        body in place of the stub. The scheduler contract stays the same.
+        """
+        try:
+            from decision_transformer import scheduled_cycle
+            result = scheduled_cycle()
+            logger.info(f"[Phase27:DT] cycle result: {result}")
+        except Exception as e:
+            logger.warning(f"[Phase27:DT] cycle failed: {e}")
+
+    def _exploit_regression_batch(self):
+        """Phase 27 Task 23: nightly exploit archive regression test.
+
+        For each unvalidated exploit in the last 7 days, map the most recent
+        outcome_pnl for that pair+regime back to `was_validated_by_outcome`
+        so the archive accumulates a living score on which exploits were real.
+        """
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            rows = conn.execute("""
+                SELECT id, pair, regime, predicted_loss, was_defended, created_at
+                FROM exploit_archive
+                WHERE was_validated_by_outcome IS NULL
+                  AND created_at > datetime('now', '-7 days')
+            """).fetchall()
+            validated = 0
+            for row in rows:
+                outcome_row = conn.execute("""
+                    SELECT outcome_pnl FROM ai_decisions
+                    WHERE pair = ?
+                      AND outcome_pnl IS NOT NULL
+                      AND timestamp > ?
+                    ORDER BY timestamp ASC LIMIT 1
+                """, (row["pair"], row["created_at"])).fetchone()
+                if not outcome_row:
+                    continue
+                pnl = float(outcome_row["outcome_pnl"] or 0)
+                predicted = float(row["predicted_loss"] or 0)
+                defended = bool(row["was_defended"])
+                # Exploit was REAL if defense claimed it was neutralised
+                # but we still lost ≥ 50% of the predicted loss.
+                real = (not defended and pnl < 0) or (
+                    defended and predicted > 0 and abs(pnl) >= 0.5 * abs(predicted)
+                )
+                conn.execute(
+                    "UPDATE exploit_archive SET was_validated_by_outcome = ? WHERE id = ?",
+                    (1 if real else 0, row["id"]),
+                )
+                validated += 1
+            conn.commit()
+            conn.close()
+            logger.info(f"[Phase27:ExploitBatch] validated {validated}/{len(rows)} exploits")
+        except Exception as e:
+            logger.warning(f"[Phase27:ExploitBatch] failed: {e}")
+
+    def _trade_language_cycle(self):
+        """Phase 27 Task 25: weekly trade-as-language pattern mining."""
+        try:
+            from trade_language import weekly_cycle
+            result = weekly_cycle(min_trades=100)
+            logger.info(f"[Phase27:TradeLang] {result}")
+        except Exception as e:
+            logger.warning(f"[Phase27:TradeLang] failed: {e}")
 
     def _hypothesis_generation_cycle(self):
         """Phase 27 Task 16: weekly LLM strategy researcher cycle.

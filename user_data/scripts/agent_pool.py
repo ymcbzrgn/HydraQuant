@@ -167,6 +167,38 @@ AGENT_REGISTRY = {
             "when other signals are ambiguous. If momentum and evidence agree, ignore seasonality."
         ),
     },
+    # Phase 27 Task 23 (I2 Ajani): adversarial self-play. ExploiterAgent
+    # actively tries to construct a scenario where the majority position
+    # would LOSE money; DefenderAgent responds with the specific safeguard
+    # that prevents that loss. Both are ALWAYS included (meta role).
+    "ExploiterAgent": {
+        "best_regimes": ["*"],
+        "rag_keywords": "failure stop-hunt whipsaw liquidity-grab reversal trap",
+        "rag_event_types": ["flash_crash", "stop_hunt", "reversal"],
+        "system_prompt": (
+            "You are ExploiterAgent — your ONLY job is to PROPOSE a SPECIFIC "
+            "adversarial scenario under which the current majority position "
+            "would LOSE money. Attack the reasoning, not the agents. "
+            "Output format: one CONCRETE scenario (e.g. 'BTC -3% in next "
+            "15min as funding-rate extreme triggers long-squeeze'), one "
+            "TARGET weakness ('over-reliance on trend signal in high-funding'), "
+            "and an estimated PREDICTED LOSS in percent of position. "
+            "If no credible exploit exists, say so — that's a STRONG signal."
+        ),
+    },
+    "DefenderAgent": {
+        "best_regimes": ["*"],
+        "rag_keywords": "stoploss hedge trailing safeguard circuit-breaker defensive",
+        "rag_event_types": ["flash_crash", "volatility_spike"],
+        "system_prompt": (
+            "You are DefenderAgent — your ONLY job is to RESPOND to the "
+            "ExploiterAgent's scenario with the specific safeguard that "
+            "would protect the position. Be concrete: cite the exact "
+            "stoploss level, sizing reduction, or exit rule that disarms "
+            "the exploit. If NO defense exists, say so EXPLICITLY — that "
+            "means the exploit is real and sizing should shrink."
+        ),
+    },
     "ReflectionAgent": {
         "best_regimes": ["*"],  # Always relevant — meta-learning
         "rag_keywords": "performance history accuracy win-rate past-mistakes retrospective",
@@ -601,6 +633,58 @@ class AgentPool:
             except Exception as e:
                 logger.debug(f"[AgentPool:R2] {agent_name} R2 failed: {e}")
 
+        # ── Round 2b (Phase 27 Task 23): Adversarial self-play ──
+        # ExploiterAgent proposes a specific loss scenario; DefenderAgent
+        # responds with the safeguard that neutralises it. Both responses
+        # are persisted to `exploit_archive` so the nightly regression job
+        # can re-probe the strategy against every historical exploit.
+        if "ExploiterAgent" in agents and "DefenderAgent" in agents:
+            try:
+                majority = self._compute_majority(positions)
+                exploit_prompt = (
+                    f"Round 2b — Adversarial probe for {pair} (regime={regime}).\n"
+                    f"Current majority position: {majority}.\n"
+                    f"Propose the SPECIFIC scenario where this position loses money. "
+                    f"Reply JSON only: "
+                    f'{{"scenario": "concrete 1-sentence attack", '
+                    f'"target_weakness": "one phrase", '
+                    f'"predicted_loss_pct": number}}'
+                )
+                exploit_response = llm_to_use.invoke(
+                    [SystemMessage(content=AGENT_REGISTRY["ExploiterAgent"]["system_prompt"]),
+                     HumanMessage(content=exploit_prompt)],
+                    temperature=0.4, priority="medium",
+                )
+                exploit_parsed = self._parse_exploit_response(exploit_response.content)
+                defender_prompt = (
+                    f"Round 2b — Defender response.\n"
+                    f"Exploit scenario: {exploit_parsed.get('scenario', 'none')}\n"
+                    f"Target weakness: {exploit_parsed.get('target_weakness', 'none')}\n"
+                    f"Respond JSON only: "
+                    f'{{"defense": "concrete safeguard or NONE", '
+                    f'"neutralises": true or false}}'
+                )
+                defender_response = llm_to_use.invoke(
+                    [SystemMessage(content=AGENT_REGISTRY["DefenderAgent"]["system_prompt"]),
+                     HumanMessage(content=defender_prompt)],
+                    temperature=0.3, priority="medium",
+                )
+                defender_parsed = self._parse_defender_response(defender_response.content)
+
+                positions["ExploiterAgent"] = {
+                    **positions.get("ExploiterAgent", {}),
+                    "round2b": {**exploit_parsed, **defender_parsed},
+                }
+                # Persist — always. was_validated_by_outcome is NULL until
+                # trade closes and post-trade court maps outcome back.
+                self._archive_exploit(pair, regime, exploit_parsed, defender_parsed)
+                logger.info(
+                    f"[AgentPool:R2b] exploit='{exploit_parsed.get('scenario','')[:60]}' "
+                    f"defended={defender_parsed.get('neutralises', False)}"
+                )
+            except Exception as e:
+                logger.debug(f"[AgentPool:R2b] adversarial round skipped: {e}")
+
         # ── Round 3: ReflectionAgent meta-analysis + final positions ──
         # ReflectionAgent synthesizes what happened in R1+R2 and provides meta-guidance
         if "ReflectionAgent" in agents:
@@ -921,6 +1005,83 @@ class AgentPool:
     # ═══════════════════════════════════════════════════════════
     # Phase 27 Fix 2D / 2E — MAGMA graph + pheromone outputs
     # ═══════════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════════════
+    # Phase 27 Task 23 — Adversarial self-play helpers
+    # ═══════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _parse_exploit_response(content) -> Dict[str, Any]:
+        """Parse ExploiterAgent's JSON reply (safe fallback on failure)."""
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict) and "text" in b
+            )
+        txt = str(content).replace("```json", "").replace("```", "").strip()
+        try:
+            import re as _re
+            txt = _re.sub(r"<think>.*?</think>", "", txt, flags=_re.DOTALL)
+            s, e = txt.find("{"), txt.rfind("}")
+            if s >= 0 and e > s:
+                data = json.loads(txt[s:e + 1])
+                return {
+                    "scenario": str(data.get("scenario", ""))[:400],
+                    "target_weakness": str(data.get("target_weakness", ""))[:200],
+                    "predicted_loss_pct": float(data.get("predicted_loss_pct", 0) or 0),
+                }
+        except Exception:
+            pass
+        return {"scenario": "", "target_weakness": "", "predicted_loss_pct": 0.0}
+
+    @staticmethod
+    def _parse_defender_response(content) -> Dict[str, Any]:
+        if isinstance(content, list):
+            content = " ".join(
+                b.get("text", "") for b in content if isinstance(b, dict) and "text" in b
+            )
+        txt = str(content).replace("```json", "").replace("```", "").strip()
+        try:
+            import re as _re
+            txt = _re.sub(r"<think>.*?</think>", "", txt, flags=_re.DOTALL)
+            s, e = txt.find("{"), txt.rfind("}")
+            if s >= 0 and e > s:
+                data = json.loads(txt[s:e + 1])
+                defense = str(data.get("defense", ""))[:400]
+                neutralises = bool(data.get("neutralises", False))
+                if defense.upper().strip() in ("NONE", "N/A", ""):
+                    neutralises = False
+                return {"defense": defense, "neutralises": neutralises}
+        except Exception:
+            pass
+        return {"defense": "", "neutralises": False}
+
+    def _archive_exploit(self, pair: str, regime: str,
+                          exploit: Dict[str, Any], defense: Dict[str, Any]) -> None:
+        """Persist to exploit_archive. TTL = 30 days so old exploits age out."""
+        try:
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(tz=timezone.utc)
+            ttl = now + timedelta(days=30)
+            conn = self._get_conn()
+            conn.execute("""
+                INSERT INTO exploit_archive
+                    (pair, regime, exploit_scenario, target_weakness,
+                     predicted_loss, was_defended, defense_description,
+                     was_validated_by_outcome, created_at, ttl_expiry)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """, (
+                pair, regime,
+                exploit.get("scenario", ""),
+                exploit.get("target_weakness", ""),
+                float(exploit.get("predicted_loss_pct", 0) or 0),
+                1 if defense.get("neutralises") else 0,
+                defense.get("defense", ""),
+                now.isoformat(), ttl.isoformat(),
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[AgentPool:Exploit] archive failed: {e}")
 
     def _record_debate_graph(self, pair: str, regime: str, positions: Dict) -> None:
         """Fix 2D (J2): Write `argued_*`, `persuaded`, `resisted` edges so the

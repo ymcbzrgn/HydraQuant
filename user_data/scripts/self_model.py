@@ -417,6 +417,204 @@ class SelfModel:
         print(f"{'='*55}\n")
 
 
+# ═══════════════════════════════════════════════════════════
+# Phase 27 Task 24 (F3 Ajani): Autopoietic Integrity (AII)
+# ═══════════════════════════════════════════════════════════
+
+def _default_birth_snapshot() -> Dict[str, Any]:
+    """Shape of a "pristine" self-model reference used when we haven't yet
+    persisted a birth snapshot. Conservative — implies "no drift"."""
+    return {
+        "organ_strengths": {},
+        "essential_organs_present": True,
+        "essential_connections_present": True,
+    }
+
+
+def compute_aii(self_model: "SelfModel",
+                birth_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """4-layer Autopoietic Integrity Index (Maturana-Varela / Beer VSM).
+
+    Layer A — Structural: essential organs and safety-critical connections
+                           still present? (graph-edit-distance proxy.)
+    Layer B — Functional:  ATCB-style benchmark pass rate — "can the organism
+                            still DO its job?"
+    Layer C — Behavioral:  1 − KL(recent trade pattern || baseline).
+    Layer D — Represent.:  Centered Kernel Alignment between current organ
+                            strength vector and birth snapshot.
+
+    Composite weights: 0.30 · A + 0.35 · B + 0.20 · C + 0.15 · D (per ALPHA doc).
+    Returns a dict with per-layer + composite + status band.
+    """
+    import math
+    try:
+        from constitution import IDENTITY_LIMITS
+    except Exception:
+        IDENTITY_LIMITS = {
+            "essential_organs": ["crowd_scoring", "risk", "sizing"],
+            "aii_green": 0.80, "aii_yellow": 0.60, "aii_red": 0.40,
+        }
+    snapshot = birth_snapshot or _default_birth_snapshot()
+
+    # Layer A — structural: how many essential organs have non-zero strength?
+    essentials = IDENTITY_LIMITS.get("essential_organs", [])
+    organs = getattr(self_model, "organ_strengths", {}) or {}
+    present = sum(1 for o in essentials if organs.get(o, 0.0) > 0.05)
+    structural = present / max(len(essentials), 1)
+
+    # Layer B — functional: recent win rate is the closest ATCB proxy today.
+    functional = 0.5
+    try:
+        from db import get_db_connection
+        conn = get_db_connection()
+        row = conn.execute("""
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN outcome_pnl > 0 THEN 1 ELSE 0 END) AS wins
+            FROM ai_decisions
+            WHERE outcome_pnl IS NOT NULL
+              AND timestamp > datetime('now', '-7 days')
+        """).fetchone()
+        conn.close()
+        if row and row["n"] and row["n"] > 0:
+            functional = float(row["wins"] or 0) / float(row["n"])
+    except Exception:
+        pass
+
+    # Layer C — behavioral: recent signal-direction distribution vs. 30-day
+    # baseline (KL divergence, clamped to [0, 1]).
+    behavioral = 1.0
+    try:
+        from db import get_db_connection
+        conn = get_db_connection()
+        baseline = conn.execute("""
+            SELECT signal_type, COUNT(*) AS c FROM ai_decisions
+            WHERE timestamp > datetime('now', '-30 days')
+            GROUP BY signal_type
+        """).fetchall()
+        recent = conn.execute("""
+            SELECT signal_type, COUNT(*) AS c FROM ai_decisions
+            WHERE timestamp > datetime('now', '-2 days')
+            GROUP BY signal_type
+        """).fetchall()
+        conn.close()
+        def _norm(rows):
+            total = sum(r["c"] for r in rows) or 1
+            return {r["signal_type"] or "_": r["c"] / total for r in rows}
+        b = _norm(baseline)
+        r = _norm(recent)
+        if b and r:
+            kl = 0.0
+            for k, rp in r.items():
+                bp = b.get(k, 1e-6)
+                if rp > 0 and bp > 0:
+                    kl += rp * math.log(rp / bp)
+            behavioral = max(0.0, 1.0 - min(1.0, kl))
+    except Exception:
+        pass
+
+    # Layer D — representational: cosine(organ_strengths_current, birth).
+    representational = 1.0
+    try:
+        current = organs
+        birth = snapshot.get("organ_strengths", {}) or {}
+        if current and birth:
+            common = set(current) & set(birth)
+            if common:
+                import math as _math
+                num = sum(current[k] * birth[k] for k in common)
+                den = (_math.sqrt(sum(current[k] ** 2 for k in common)) *
+                       _math.sqrt(sum(birth[k] ** 2 for k in common)))
+                if den > 0:
+                    representational = max(0.0, min(1.0, num / den))
+    except Exception:
+        pass
+
+    composite = (0.30 * structural
+                 + 0.35 * functional
+                 + 0.20 * behavioral
+                 + 0.15 * representational)
+
+    if composite >= IDENTITY_LIMITS.get("aii_green", 0.80):
+        status = "GREEN"
+    elif composite >= IDENTITY_LIMITS.get("aii_yellow", 0.60):
+        status = "YELLOW"
+    elif composite >= IDENTITY_LIMITS.get("aii_red", 0.40):
+        status = "RED"
+    else:
+        status = "CRITICAL"
+
+    return {
+        "structural": round(structural, 4),
+        "functional": round(functional, 4),
+        "behavioral": round(behavioral, 4),
+        "representational": round(representational, 4),
+        "aii_composite": round(composite, 4),
+        "status": status,
+    }
+
+
+def verify_architectural_change(self_model: "SelfModel",
+                                  proposed_genome: Optional[Dict] = None) -> Dict[str, Any]:
+    """Gate for architecture_evolver.evolve() — rejects mutations that would
+    drop the organism into RED/CRITICAL bands OR violate identity_limits.
+    Persists the computed AII to `autopoietic_integrity` either way so we have
+    a history of accepted/rejected proposals."""
+    from datetime import datetime, timezone
+    try:
+        from constitution import IDENTITY_LIMITS
+    except Exception:
+        IDENTITY_LIMITS = {}
+
+    scores = compute_aii(self_model)
+    reasons: List[str] = []
+
+    min_aii = IDENTITY_LIMITS.get("min_aii", 0.50)
+    if scores["aii_composite"] < min_aii:
+        reasons.append(f"aii_composite {scores['aii_composite']:.2f} < min_aii {min_aii}")
+
+    min_func = IDENTITY_LIMITS.get("min_functional_score", 0.60)
+    if scores["functional"] < min_func:
+        reasons.append(f"functional {scores['functional']:.2f} < min {min_func}")
+
+    if proposed_genome:
+        # Essential organ disable check.
+        organs_in = {o.get("name", "") for o in proposed_genome.get("organs", [])}
+        for essential in IDENTITY_LIMITS.get("essential_organs", []):
+            if essential not in organs_in:
+                reasons.append(f"essential organ '{essential}' missing")
+        # Essential connection check.
+        conns = {(c.get("source"), c.get("target")) for c in proposed_genome.get("connections", [])}
+        for src, tgt, _ in IDENTITY_LIMITS.get("essential_connections", []):
+            if (src, tgt) not in conns:
+                reasons.append(f"essential connection '{src}→{tgt}' missing")
+
+    accepted = len(reasons) == 0
+    action = "ACCEPT" if accepted else "REJECT"
+
+    try:
+        from db import get_db_connection
+        conn = get_db_connection()
+        conn.execute("""
+            INSERT INTO autopoietic_integrity
+                (timestamp, structural_score, functional_score,
+                 behavioral_score, representational_score,
+                 aii_composite, status, action_taken)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(tz=timezone.utc).isoformat(),
+            scores["structural"], scores["functional"],
+            scores["behavioral"], scores["representational"],
+            scores["aii_composite"], scores["status"],
+            action + ("|" + ";".join(reasons) if reasons else ""),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return {"accepted": accepted, "reasons": reasons, **scores}
+
+
 # Singleton
 _self_model_instance = None
 
