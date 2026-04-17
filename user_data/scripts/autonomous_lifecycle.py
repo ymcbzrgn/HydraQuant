@@ -325,10 +325,70 @@ class HormesisEngine:
 
 
 class CircadianRhythm:
-    """Layer 11: Circadian Rhythm — Time-based behavior modulation."""
+    """Layer 11: Circadian Rhythm — Time-based behavior modulation.
+
+    Phase 27 Fix 10 (I4): the per-hour multiplier is now sourced from
+    `cerebellum_timing.get_timing_multiplier(hour)` so it is LEARNED from
+    live 24-slot performance instead of the old hardcoded AGGRESSIVE/
+    CONSERVATIVE/SLEEP buckets. When cerebellum is unavailable (cold start,
+    not enough trades) we fall back to the legacy table below.
+    """
+
+    def _cerebellum_multiplier(self, hour_utc: int) -> Optional[float]:
+        """Read learned timing multiplier from the cerebellum, or None."""
+        try:
+            from cerebellum_timing import get_cerebellum
+        except Exception:
+            return None
+        try:
+            cereb = get_cerebellum()
+            # Try the exact-hour signature first; fall back to the arg-less one
+            # some earlier Sprint 2 revisions exposed.
+            try:
+                mult = cereb.get_timing_multiplier(hour_utc)
+            except TypeError:
+                mult = cereb.get_timing_multiplier()
+            if mult is None:
+                return None
+            return float(mult)
+        except Exception:
+            return None
 
     def get_time_modulation(self, hour_utc: int) -> Dict:
         """Get behavior modulation based on time of day."""
+        # Phase 27 Fix 10: prefer learned timing, fall back to hardcoded
+        learned = self._cerebellum_multiplier(hour_utc)
+        if learned is not None:
+            if learned >= 1.10:
+                mode = "aggressive"
+                description = f"learned peak (cerebellum mult={learned:.2f})"
+                skip_low = False
+                maintenance = False
+            elif learned <= 0.50:
+                mode = "maintenance"
+                description = f"learned low-value window (cerebellum mult={learned:.2f})"
+                skip_low = True
+                maintenance = True
+            elif learned <= 0.85:
+                mode = "conservative"
+                description = f"learned low volume (cerebellum mult={learned:.2f})"
+                skip_low = True
+                maintenance = False
+            else:
+                mode = "normal"
+                description = f"learned neutral (cerebellum mult={learned:.2f})"
+                skip_low = False
+                maintenance = False
+            return {
+                "mode": mode,
+                "sizing_mult": max(0.2, min(1.5, learned)),
+                "skip_low_confidence": skip_low,
+                "run_maintenance": maintenance,
+                "description": description,
+                "source": "cerebellum",
+            }
+
+        # Legacy fallback — cerebellum unavailable / insufficient history.
         if hour_utc in SLEEP_HOURS:
             return {
                 "mode": "maintenance",
@@ -336,6 +396,7 @@ class CircadianRhythm:
                 "skip_low_confidence": True,
                 "run_maintenance": True,
                 "description": "maintenance window — minimal trading",
+                "source": "legacy_hardcoded",
             }
         elif hour_utc in AGGRESSIVE_HOURS:
             return {
@@ -344,6 +405,7 @@ class CircadianRhythm:
                 "skip_low_confidence": False,
                 "run_maintenance": False,
                 "description": "peak hours — US+EU market overlap",
+                "source": "legacy_hardcoded",
             }
         elif hour_utc in CONSERVATIVE_HOURS:
             return {
@@ -352,6 +414,7 @@ class CircadianRhythm:
                 "skip_low_confidence": True,
                 "run_maintenance": False,
                 "description": "low volume hours — reduced exposure",
+                "source": "legacy_hardcoded",
             }
         else:
             return {
@@ -360,6 +423,7 @@ class CircadianRhythm:
                 "skip_low_confidence": False,
                 "run_maintenance": False,
                 "description": "standard operating hours",
+                "source": "legacy_hardcoded",
             }
 
 

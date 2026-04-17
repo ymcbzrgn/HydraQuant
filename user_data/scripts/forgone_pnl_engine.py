@@ -61,6 +61,9 @@ class ForgonePnLEngine:
                 ('entry_price', 'REAL'),
                 ('exit_price', 'REAL'),
                 ('resolved_at', 'DATETIME'),
+                # Phase 27 Fix 6 (H3): regime tag so threshold-adaptation job
+                # can group forgone alpha by regime, not only by pair.
+                ('regime', 'TEXT'),
             ]:
                 if col_name not in columns:
                     c.execute(f'ALTER TABLE forgone_profit ADD COLUMN {col_name} {col_type}')
@@ -73,11 +76,16 @@ class ForgonePnLEngine:
         confidence: float,
         entry_price: float,
         was_executed: bool = False,
+        regime: Optional[str] = None,
     ) -> Optional[int]:
         """
         Called for EVERY AI signal, whether executed or rejected.
         If was_executed=False, the signal becomes a "paper trade" that we resolve later.
         If was_executed=True, we log it for completeness but the real P&L comes from Freqtrade.
+
+        Phase 27 Fix 6: `regime` is optional so legacy callers still work.
+        When provided it lets the adaptive-threshold job slice forgone alpha
+        by (pair, regime) instead of treating every signal identically.
 
         Returns:
             int: The row ID of the forgone_profit entry, or None on failure.
@@ -86,9 +94,11 @@ class ForgonePnLEngine:
             with self._get_db_connection() as conn:
                 c = conn.cursor()
                 c.execute('''
-                    INSERT INTO forgone_profit (pair, signal_type, confidence, entry_price, was_executed)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (pair, signal_type, confidence, entry_price, 1 if was_executed else 0))
+                    INSERT INTO forgone_profit
+                        (pair, signal_type, confidence, entry_price, was_executed, regime)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (pair, signal_type, confidence, entry_price,
+                      1 if was_executed else 0, regime))
                 conn.commit()
                 row_id: int = c.lastrowid
 

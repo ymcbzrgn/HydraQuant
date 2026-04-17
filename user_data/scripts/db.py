@@ -526,6 +526,29 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_arg_quality
             ON argument_quality(agent_type, regime)''')
 
+        # Phase 27 Fix 6 (H3 Ajani): per-pair / per-regime confidence thresholds.
+        # Forgone alpha feedback drives these up/down so the bot stops missing
+        # profitable regimes and stops entering unprofitable ones.
+        c.execute('''CREATE TABLE IF NOT EXISTS pair_thresholds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            regime TEXT NOT NULL DEFAULT '_global',
+            confidence_threshold REAL DEFAULT 0.50,
+            forgone_alpha_7d REAL DEFAULT 0.0,
+            last_adjusted TEXT,
+            adjustment_reason TEXT,
+            UNIQUE(pair, regime))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_pair_thr
+            ON pair_thresholds(pair, regime)''')
+
+        # Phase 27 Fix 6: regime column on forgone_profit so the resolver /
+        # adaptive-threshold jobs can group alpha-left-on-the-table by regime.
+        # Idempotent ALTER — silently ignored if column already exists.
+        try:
+            c.execute("ALTER TABLE forgone_profit ADD COLUMN regime TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
             text_hash TEXT PRIMARY KEY, binary_vec BLOB,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
