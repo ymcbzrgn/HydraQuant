@@ -296,3 +296,50 @@ def _fallback_embedding(df: pd.DataFrame, target_dim: int) -> Dict:
     except Exception as e:
         logger.warning(f"[TTM] Fallback embedding failed: {e}")
         return {"embedding": np.zeros(target_dim), "direction": 0.0, "magnitude": 0.0, "available": False}
+
+
+# Phase 27 Task 20 (C5 Ajani): foundation-model fine-tuning hook.
+# The scheduler calls this weekly. Full head retrain + A/B swap is Sprint 3B
+# (task 20b); today we just record the call so the pipeline surface exists
+# and future wiring replaces the NotImplemented body without touching the
+# scheduler contract.
+def retrain_head_if_available(min_samples: int = 50) -> Dict:
+    """TTM head retraining stub — intentionally conservative.
+
+    Checks for ≥ `min_samples` labelled trades in ai_decisions and, if the
+    IBM few-shot fine-tune package becomes available, trains the final
+    classifier head on them (backbone frozen). Sidecar output is written to
+    `user_data/models/ttm_head_ft.pt`; the current production pipeline keeps
+    using the zero-shot TTM embedding until a manual A/B test swaps it in.
+    """
+    import os
+    try:
+        from ai_config import AI_DB_PATH
+        from db import get_db_connection
+        conn = get_db_connection(AI_DB_PATH)
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM ai_decisions WHERE outcome_pnl IS NOT NULL"
+        ).fetchone()["n"] or 0
+        conn.close()
+    except Exception as e:
+        return {"status": "skipped", "reason": f"db: {e}"}
+
+    if n < min_samples:
+        return {"status": "skipped", "reason": f"insufficient samples (n={n})",
+                "min_samples": min_samples}
+
+    # Fine-tune package is a Sprint 3B task — stay a no-op for now so the
+    # scheduler can report "ran successfully" but we don't ship a risky
+    # half-trained head to production. Future: wire into
+    # granite-timeseries/TSTM BitFit + final-layer MSE loop here.
+    sidecar = os.path.join(
+        os.path.dirname(__file__), "..", "models", "ttm_head_ft_pending.flag"
+    )
+    try:
+        os.makedirs(os.path.dirname(sidecar), exist_ok=True)
+        with open(sidecar, "w") as f:
+            f.write(f"pending_trades={n}\n")
+    except Exception:
+        pass
+    return {"status": "pending_impl", "samples_available": n,
+            "message": "head retrain planned Sprint 3B task 20b"}

@@ -223,3 +223,45 @@ def _fallback_quantiles(df: pd.DataFrame, prediction_length: int) -> Dict[str, f
         logger.warning(f"[Chronos] Fallback quantiles failed: {e}")
 
     return result
+
+
+# Phase 27 Task 20 (C5 Ajani): Chronos-Bolt BitFit hook.
+# Scheduler calls this weekly. Full BitFit bias-only update (768 params total
+# per NeurIPS 2024 arXiv 2409.11302) is Sprint 3B task 20b — today we just
+# record readiness so the pipeline surface exists without the risky half-
+# trained weights in prod.
+def bitfit_bias_update_if_available(min_samples: int = 50) -> Dict:
+    """Chronos-Bolt BitFit bias-only update stub.
+
+    BitFit (Zaken 2022) freezes all weights and updates ONLY the bias tensors,
+    which in Chronos-Base is ~768 parameters (vs. 48M full fine-tune). That
+    small a footprint is why BitFit beat LoRA for MSE on Chronos in the
+    NeurIPS 2024 benchmark. Implementation pending Sprint 3B task 20b.
+    """
+    import os
+    try:
+        from ai_config import AI_DB_PATH
+        from db import get_db_connection
+        conn = get_db_connection(AI_DB_PATH)
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM ai_decisions WHERE outcome_pnl IS NOT NULL"
+        ).fetchone()["n"] or 0
+        conn.close()
+    except Exception as e:
+        return {"status": "skipped", "reason": f"db: {e}"}
+
+    if n < min_samples:
+        return {"status": "skipped", "reason": f"insufficient samples (n={n})",
+                "min_samples": min_samples}
+
+    sidecar = os.path.join(
+        os.path.dirname(__file__), "..", "models", "chronos_bitfit_pending.flag"
+    )
+    try:
+        os.makedirs(os.path.dirname(sidecar), exist_ok=True)
+        with open(sidecar, "w") as f:
+            f.write(f"pending_trades={n}\n")
+    except Exception:
+        pass
+    return {"status": "pending_impl", "samples_available": n,
+            "message": "BitFit bias update planned Sprint 3B task 20b"}

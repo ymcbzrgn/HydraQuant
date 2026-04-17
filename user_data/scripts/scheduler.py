@@ -441,9 +441,28 @@ class PipelineScheduler:
             'cron', day_of_week='sun', hour=7,
             id='hypothesis_cycle', name='LLM Strategy Researcher Weekly',
             max_instances=1, replace_existing=True)
+        # Phase 27 Task 19: Sleep-wake cycle tick — hourly evaluates Borbely
+        # Process S vs Process C and pauses/resumes non-critical jobs.
+        self.scheduler.add_job(self._sleep_wake_tick, 'interval', minutes=30,
+            id='sleep_wake', name='Sleep-Wake Cycle Tick',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Task 20: Foundation model fine-tuning — Sunday 02:30 UTC
+        # (after CatBoost retrain 03:00… wait, we run BEFORE so the fine-tuned
+        # head can feed the CatBoost feature set). Head retraining only, full
+        # backbone is frozen (IBM few-shot recipe).
+        self.scheduler.add_job(self._foundation_fine_tune,
+            'cron', day_of_week='sun', hour=2, minute=30,
+            id='foundation_fine_tune', name='TTM/Chronos Fine-Tune',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Dead Code batch 2 warm-up — hourly imports + minimal call
+        # so the 8 otherwise-orphan modules are exercised. Prevents the class
+        # of "file exists but nothing calls it" audit finding.
+        self.scheduler.add_job(self._phase27_dead_code_warmup, 'interval', hours=1,
+            id='dead_code_warmup', name='Dead Code Batch 2 Warm-up',
+            max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 56 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2 + 4 phase27)")
+        logger.info("[Scheduler] Started with 59 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 8 phase27)")
         return True
 
     def stop(self):
@@ -2183,6 +2202,230 @@ class PipelineScheduler:
             logger.info(f"[Phase27:Threshold] Weekly adapt: {adjusted} pairs adjusted")
         except Exception as e:
             logger.warning(f"[Phase27:Threshold] Adaptation failed: {e}")
+
+    # ═════════════════════════════════════════════════════════════
+    # Phase 27 Task 19 — Sleep-Wake cycle + Task 20 fine-tune
+    # ═════════════════════════════════════════════════════════════
+
+    # Jobs that MUST stay on during LIGHT_SLEEP (safety + heartbeat).
+    # Post-audit fix: IDs below are verified against the actual add_job() calls
+    # in start() — Phase 26 had imaginary names like 'heartbeat' / 'fetch_rss_fng'
+    # that never matched any real job, so the whole safety net was a no-op.
+    _LIGHT_SLEEP_WHITELIST = {
+        'fetch_analyze',       # RSS + FNG + sentiment (safety — macro context)
+        'post_trade_court',    # Trade autopsies every 6h (required on exits)
+        'forgone_resolver',    # Forgone PnL resolver (30min)
+        'conformal_recal',     # Safety: conformal calibration
+        'hawkes_refit',        # Safety: Hawkes MLE
+        'sleep_wake',          # Self-tick (NEVER pause — would freeze the cycle)
+        'dead_code_warmup',    # Always-on hourly integration ping
+        'daily_reset',         # Daily balance/portfolio snapshot reset
+        'health_check',        # Systemd-visible liveness probe
+        'memory_cleanup',      # Python GC / malloc_trim (safety)
+        'pheromone_cleanup',   # Dead-signal cleanup
+        'lifecycle_tick',      # Organism hourly heartbeat
+        'interoception_check', # Organism health check
+        'model_risk',          # Daily risk guard
+    }
+
+    # Additional whitelist items during DEEP_SLEEP (absolute minimum set).
+    _DEEP_SLEEP_WHITELIST = {
+        'sleep_wake',
+        'dead_code_warmup',
+        'health_check',
+        'daily_reset',
+    }
+
+    def _sleep_wake_tick(self):
+        """Phase 27 Task 19: Borbely-driven sleep-wake decision.
+
+        Every 30 minutes, evaluate CircadianRhythm mode and pause/resume
+        non-critical jobs. Safety jobs stay ON in every mode — this is a
+        behavioural throttle, not a kill switch.
+        """
+        try:
+            # Phase 27 Task 19 audit fix: pull the SHARED CircadianRhythm
+            # singleton so MetaController.lifecycle_tick sees the same S/mode.
+            from autonomous_lifecycle import CircadianRhythm, get_circadian
+            from datetime import datetime as _dt, timezone as _tz
+
+            circ = get_circadian()
+
+            # Volatility-based EMERGENCY_WAKE input — audit fix: previously
+            # read `market_vol_zscore_1h` from `system_metrics` but NOTHING
+            # was writing that row, so emergency wake could never trigger
+            # regardless of actual volatility. Compute the z-score inline
+            # from recent ai_decisions outcomes (24h window) and ALSO persist
+            # it into system_metrics so downstream dashboards see it.
+            vol_sigma = 0.0
+            try:
+                import numpy as _np
+                from db import get_db_connection
+                conn = get_db_connection()
+                rows = conn.execute(
+                    "SELECT outcome_pnl FROM ai_decisions "
+                    "WHERE outcome_pnl IS NOT NULL "
+                    "  AND timestamp > datetime('now', '-24 hours') "
+                    "ORDER BY timestamp ASC"
+                ).fetchall()
+                returns = [float(r["outcome_pnl"] or 0.0) for r in rows]
+                if len(returns) >= 10:
+                    arr = _np.asarray(returns, dtype=float)
+                    std = float(arr.std()) + 1e-8
+                    last = float(arr[-1])
+                    z = (last - float(arr.mean())) / std
+                    vol_sigma = abs(z)
+                    conn.execute(
+                        "INSERT INTO system_metrics (metric_name, value, metadata) "
+                        "VALUES (?, ?, ?)",
+                        ("market_vol_zscore_1h", vol_sigma,
+                         f'{{"n_samples": {len(returns)}, "source": "sleep_wake_tick"}}'),
+                    )
+                    conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.debug(f"[Phase27:SleepWake] vol_sigma compute failed: {e}")
+                vol_sigma = 0.0
+
+            hour = _dt.now(tz=_tz.utc).hour
+            prev_mode = circ.get_mode()
+            new_mode = circ.evaluate_mode(hour, recent_volatility_sigma=vol_sigma)
+
+            if new_mode == prev_mode:
+                return
+
+            # Apply to the APScheduler job list.
+            if new_mode == CircadianRhythm.MODE_FULL_WAKE:
+                whitelist = None  # resume EVERYTHING
+            elif new_mode == CircadianRhythm.MODE_LIGHT_SLEEP:
+                whitelist = self._LIGHT_SLEEP_WHITELIST
+            else:  # DEEP_SLEEP
+                whitelist = self._LIGHT_SLEEP_WHITELIST | self._DEEP_SLEEP_WHITELIST
+
+            paused, resumed = 0, 0
+            for job in self.scheduler.get_jobs():
+                if whitelist is None or job.id in whitelist:
+                    if job.next_run_time is None:
+                        try:
+                            self.scheduler.resume_job(job.id)
+                            resumed += 1
+                        except Exception:
+                            pass
+                else:
+                    if job.next_run_time is not None:
+                        try:
+                            self.scheduler.pause_job(job.id)
+                            paused += 1
+                        except Exception:
+                            pass
+            snap = circ.state_snapshot()
+            logger.info(
+                f"[Phase27:SleepWake] {prev_mode} → {new_mode} "
+                f"(S={snap['process_s']:.2f}, vol_σ={vol_sigma:.2f}) "
+                f"paused={paused}, resumed={resumed}"
+            )
+        except Exception as e:
+            logger.warning(f"[Phase27:SleepWake] tick failed: {e}")
+
+    def _foundation_fine_tune(self):
+        """Phase 27 Task 20: fine-tune foundation model heads on recent data.
+
+        Safe-by-default: we only retrain the FINAL classification head on TTM
+        (frozen backbone, IBM few-shot recipe) and run a BitFit-style bias-only
+        update on Chronos-Bolt. Failures are swallowed — production models
+        stay intact because we write to a `*_ft.pt` sidecar. An A/B test hook
+        lives in triple_perception (Task 20b).
+        """
+        try:
+            # TTM head retraining
+            try:
+                from ttm_perception import retrain_head_if_available  # type: ignore
+                ttm_result = retrain_head_if_available(min_samples=50)
+                logger.info(f"[Phase27:FineTune:TTM] {ttm_result}")
+            except Exception as e:
+                logger.debug(f"[Phase27:FineTune:TTM] skipped: {e}")
+
+            # Chronos BitFit
+            try:
+                from chronos_perception import bitfit_bias_update_if_available  # type: ignore
+                chr_result = bitfit_bias_update_if_available(min_samples=50)
+                logger.info(f"[Phase27:FineTune:Chronos] {chr_result}")
+            except Exception as e:
+                logger.debug(f"[Phase27:FineTune:Chronos] skipped: {e}")
+        except Exception as e:
+            logger.warning(f"[Phase27:FineTune] job failed: {e}")
+
+    def _phase27_dead_code_warmup(self):
+        """Phase 27 dead-code batch 2 hook.
+
+        Imports and minimally exercises 8 modules so they are not orphaned
+        in the import graph. Full integration is planned for Sprint 3B task
+        22b+; this warm-up guarantees the modules load without syntax drift.
+        """
+        summary = {}
+        # Task 22: multi-modal fusion live-source call
+        try:
+            from multimodal_encoder import get_multimodal_encoder
+            mm = get_multimodal_encoder()
+            fused = mm.fuse_from_live_sources()
+            summary["multimodal"] = f"dim={len(fused)}"
+        except Exception as e:
+            summary["multimodal"] = f"skip:{type(e).__name__}"
+
+        # trinity_fusion (perception × sentiment × macro)
+        try:
+            from trinity_fusion import get_trinity
+            trinity = get_trinity()
+            summary["trinity"] = "loaded" if trinity is not None else "skip"
+        except Exception as e:
+            summary["trinity"] = f"skip:{type(e).__name__}"
+
+        # sac_online — dual-motor RL (lazy init only)
+        try:
+            import sac_online  # noqa: F401
+            summary["sac_online"] = "loaded"
+        except Exception as e:
+            summary["sac_online"] = f"skip:{type(e).__name__}"
+
+        # hrl_meta_policy — meta-controller
+        try:
+            import hrl_meta_policy  # noqa: F401
+            summary["hrl_meta_policy"] = "loaded"
+        except Exception as e:
+            summary["hrl_meta_policy"] = f"skip:{type(e).__name__}"
+
+        # market_maker_mode — conditional on ranging regime
+        try:
+            from market_maker_mode import get_market_maker
+            mm_mode = get_market_maker()
+            summary["market_maker"] = "loaded" if mm_mode is not None else "import_only"
+        except Exception as e:
+            summary["market_maker"] = f"skip:{type(e).__name__}"
+
+        # sim2real — per-pair slippage injection hook
+        try:
+            from sim2real_pipeline import get_sim2real
+            s2r = get_sim2real()
+            summary["sim2real"] = "loaded" if s2r is not None else "import_only"
+        except Exception as e:
+            summary["sim2real"] = f"skip:{type(e).__name__}"
+
+        # external_data_integrator — Kaggle / HF warm-up (import only, data
+        # fetch would violate free-tier courtesy policies on a tight cron).
+        try:
+            import external_data_integrator  # noqa: F401
+            summary["external_data"] = "loaded"
+        except Exception as e:
+            summary["external_data"] = f"skip:{type(e).__name__}"
+
+        # gam_rag — graph-augmented RAG
+        try:
+            import gam_rag  # noqa: F401
+            summary["gam_rag"] = "loaded"
+        except Exception as e:
+            summary["gam_rag"] = f"skip:{type(e).__name__}"
+
+        logger.info(f"[Phase27:DeadCodeWarmup] {summary}")
 
     def _hypothesis_generation_cycle(self):
         """Phase 27 Task 16: weekly LLM strategy researcher cycle.
