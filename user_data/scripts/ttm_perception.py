@@ -298,48 +298,121 @@ def _fallback_embedding(df: pd.DataFrame, target_dim: int) -> Dict:
         return {"embedding": np.zeros(target_dim), "direction": 0.0, "magnitude": 0.0, "available": False}
 
 
-# Phase 27 Task 20 (C5 Ajani): foundation-model fine-tuning hook.
-# The scheduler calls this weekly. Full head retrain + A/B swap is Sprint 3B
-# (task 20b); today we just record the call so the pipeline surface exists
-# and future wiring replaces the NotImplemented body without touching the
-# scheduler contract.
+# Phase 27 Task 20 / Item 4 (C5 Ajani): TTM head retraining — REAL.
+# IBM granite-timeseries TSTM has a frozen MLP-Mixer backbone. We re-train
+# only the final regression head on (ttm_embedding → outcome_pnl_sign) pairs
+# pulled from world_model_states. ~5% data is enough per IBM few-shot recipe.
 def retrain_head_if_available(min_samples: int = 50) -> Dict:
-    """TTM head retraining stub — intentionally conservative.
+    """Train a small MLP head on top of frozen TTM embeddings.
 
-    Checks for ≥ `min_samples` labelled trades in ai_decisions and, if the
-    IBM few-shot fine-tune package becomes available, trains the final
-    classifier head on them (backbone frozen). Sidecar output is written to
-    `user_data/models/ttm_head_ft.pt`; the current production pipeline keeps
-    using the zero-shot TTM embedding until a manual A/B test swaps it in.
+    Pulls ttm_embedding BLOBs from `world_model_states` and the matching
+    `outcome_pnl` from `ai_decisions` (closest timestamp on same pair), trains
+    a 64→32→3 classifier (BEAR / NEUT / BULL) for 5 epochs of Adam @ 1e-3,
+    and saves the head to `user_data/models/ttm_head_ft.pt`. Production
+    inference path is NOT changed by this function — the swap is gated on
+    a manual A/B test in Sprint 3B task 20b.
     """
     import os
+    import json as _json
+
     try:
         from ai_config import AI_DB_PATH
         from db import get_db_connection
+    except Exception as e:
+        return {"status": "skipped", "reason": f"imports: {e}"}
+
+    try:
         conn = get_db_connection(AI_DB_PATH)
-        n = conn.execute(
-            "SELECT COUNT(*) AS n FROM ai_decisions WHERE outcome_pnl IS NOT NULL"
-        ).fetchone()["n"] or 0
+        rows = conn.execute("""
+            SELECT wms.ttm_embedding, dec.outcome_pnl
+            FROM world_model_states wms
+            JOIN ai_decisions dec ON dec.pair = wms.pair
+            WHERE wms.ttm_embedding IS NOT NULL
+              AND dec.outcome_pnl IS NOT NULL
+              AND ABS(JULIANDAY(dec.timestamp) - JULIANDAY(wms.timestamp)) < 0.005
+            LIMIT 5000
+        """).fetchall()
         conn.close()
     except Exception as e:
         return {"status": "skipped", "reason": f"db: {e}"}
 
-    if n < min_samples:
-        return {"status": "skipped", "reason": f"insufficient samples (n={n})",
+    if len(rows) < min_samples:
+        return {"status": "skipped", "reason": f"insufficient samples (n={len(rows)})",
                 "min_samples": min_samples}
 
-    # Fine-tune package is a Sprint 3B task — stay a no-op for now so the
-    # scheduler can report "ran successfully" but we don't ship a risky
-    # half-trained head to production. Future: wire into
-    # granite-timeseries/TSTM BitFit + final-layer MSE loop here.
+    try:
+        import torch
+        import torch.nn as nn
+    except Exception as e:
+        return {"status": "skipped", "reason": f"torch missing: {e}"}
+
+    X_list, y_list = [], []
+    for r in rows:
+        try:
+            vec = np.frombuffer(r["ttm_embedding"], dtype=np.float32)
+            if vec.size < 64:
+                continue
+            pnl = float(r["outcome_pnl"])
+            label = 2 if pnl > 0.5 else 0 if pnl < -0.5 else 1
+            X_list.append(vec[:64])
+            y_list.append(label)
+        except Exception:
+            continue
+    if len(X_list) < min_samples:
+        return {"status": "skipped", "reason": f"after parse (n={len(X_list)})"}
+
+    X = torch.tensor(np.stack(X_list), dtype=torch.float32)
+    y = torch.tensor(y_list, dtype=torch.long)
+
+    # 80/20 train/val split for OOS check.
+    idx = torch.randperm(len(X))
+    split = int(0.8 * len(X))
+    X_train, X_val = X[idx[:split]], X[idx[split:]]
+    y_train, y_val = y[idx[:split]], y[idx[split:]]
+
+    head = nn.Sequential(
+        nn.Linear(64, 32), nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(32, 3),
+    )
+    optim = torch.optim.Adam(head.parameters(), lr=1e-3, weight_decay=1e-4)
+    loss_fn = nn.CrossEntropyLoss()
+    head.train()
+    losses = []
+    for epoch in range(5):
+        optim.zero_grad()
+        out = head(X_train)
+        loss = loss_fn(out, y_train)
+        loss.backward()
+        optim.step()
+        losses.append(float(loss.item()))
+
+    head.eval()
+    with torch.no_grad():
+        val_logits = head(X_val)
+        val_acc = float((val_logits.argmax(dim=1) == y_val).float().mean().item())
+
     sidecar = os.path.join(
-        os.path.dirname(__file__), "..", "models", "ttm_head_ft_pending.flag"
+        os.path.dirname(__file__), "..", "models", "ttm_head_ft.pt"
     )
     try:
         os.makedirs(os.path.dirname(sidecar), exist_ok=True)
-        with open(sidecar, "w") as f:
-            f.write(f"pending_trades={n}\n")
-    except Exception:
-        pass
-    return {"status": "pending_impl", "samples_available": n,
-            "message": "head retrain planned Sprint 3B task 20b"}
+        torch.save({
+            "state_dict": head.state_dict(),
+            "n_train": int(split),
+            "n_val": int(len(X) - split),
+            "val_acc": val_acc,
+            "train_losses": losses,
+        }, sidecar)
+    except Exception as e:
+        logger.warning(f"[TTM:Retrain] save failed: {e}")
+
+    return {
+        "status": "trained",
+        "samples_total": len(X_list),
+        "n_train": int(split),
+        "n_val": int(len(X) - split),
+        "val_accuracy": round(val_acc, 4),
+        "final_loss": round(losses[-1], 4),
+        "checkpoint": sidecar,
+    }

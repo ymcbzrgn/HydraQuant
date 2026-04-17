@@ -479,9 +479,24 @@ class PipelineScheduler:
             'cron', day_of_week='sun', hour=8,
             id='trade_language', name='Trade-as-Language Pattern Mining',
             max_instances=1, replace_existing=True)
+        # Phase 27 Item 10: SAC online RL training cycle (Sun 04:30 UTC).
+        self.scheduler.add_job(self._sac_online_cycle,
+            'cron', day_of_week='sun', hour=4, minute=30,
+            id='sac_online', name='SAC Online RL Cycle',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Item 3: MultiModal encoder training (Sun 06:00 UTC).
+        self.scheduler.add_job(self._multimodal_train_cycle,
+            'cron', day_of_week='sun', hour=6,
+            id='multimodal_train', name='MultiModal Encoder Weekly Training',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Item 6: External data fetch (monthly, 1st of month 09:00 UTC).
+        self.scheduler.add_job(self._external_data_cycle,
+            'cron', day=1, hour=9,
+            id='external_data_fetch', name='Binance Public Data Monthly Fetch',
+            max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 62 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 11 phase27)")
+        logger.info("[Scheduler] Started with 65 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 14 phase27)")
         return True
 
     def stop(self):
@@ -2453,10 +2468,12 @@ class PipelineScheduler:
     def _dt_training_cycle(self):
         """Phase 27 Task 21: Sunday 23:00 UTC Decision Transformer LoRA cycle.
 
-        Today this is a scaffolded cycle — it builds the (return-to-go, state,
-        action) corpus from ai_decisions and records a "pending_impl" sidecar.
-        Sprint 3B task 21b wires the real `peft` + `transformers` LoRA training
-        body in place of the stub. The scheduler contract stays the same.
+        Runs the REAL GPT-2 124M + LoRA training pipeline:
+        `decision_transformer.scheduled_cycle()` builds the (return-to-go,
+        state, action) corpus from ai_decisions and trains via peft LoRA
+        (rank 16, target_modules=["c_attn"]). Adapter weights land at
+        `user_data/models/dt_lora_<timestamp>.pt`. Sprint 3B task 21b adds
+        the inference path that loads the freshest checkpoint into sizing.
         """
         try:
             from decision_transformer import scheduled_cycle
@@ -2510,6 +2527,44 @@ class PipelineScheduler:
             logger.info(f"[Phase27:ExploitBatch] validated {validated}/{len(rows)} exploits")
         except Exception as e:
             logger.warning(f"[Phase27:ExploitBatch] failed: {e}")
+
+    def _sac_online_cycle(self):
+        """Phase 27 Item 10: SAC online RL training cycle.
+
+        Pulls the IQL replay buffer + recent live transitions and runs a single
+        SAC actor-critic update pass. Lightweight (≤200 gradient steps) so it
+        fits in the Sunday window and never blocks live trading.
+        """
+        try:
+            from sac_online import get_sac_trainer
+            trainer = get_sac_trainer()
+            if hasattr(trainer, "online_step"):
+                result = trainer.online_step(n_steps=200)
+            elif hasattr(trainer, "train_one_cycle"):
+                result = trainer.train_one_cycle()
+            else:
+                result = {"status": "no_method"}
+            logger.info(f"[Phase27:SAC] cycle: {result}")
+        except Exception as e:
+            logger.warning(f"[Phase27:SAC] cycle failed: {e}")
+
+    def _multimodal_train_cycle(self):
+        """Phase 27 Item 3: weekly MultiModal encoder training pass."""
+        try:
+            from multimodal_encoder import weekly_training_cycle
+            result = weekly_training_cycle(min_samples=50, n_epochs=3)
+            logger.info(f"[Phase27:MultiModal] {result}")
+        except Exception as e:
+            logger.warning(f"[Phase27:MultiModal] cycle failed: {e}")
+
+    def _external_data_cycle(self):
+        """Phase 27 Item 6: monthly Binance public data fetch + label."""
+        try:
+            from external_data_integrator import scheduled_external_fetch
+            result = scheduled_external_fetch()
+            logger.info(f"[Phase27:ExtData] {result}")
+        except Exception as e:
+            logger.warning(f"[Phase27:ExtData] fetch failed: {e}")
 
     def _trade_language_cycle(self):
         """Phase 27 Task 25: weekly trade-as-language pattern mining."""

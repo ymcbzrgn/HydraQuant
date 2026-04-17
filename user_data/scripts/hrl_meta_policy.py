@@ -409,9 +409,43 @@ class HRLMetaPolicy:
         print(f"\n  Model exists: {os.path.exists(HRL_MODEL_PATH)}")
         print("=" * 60 + "\n")
 
+    # ─── Phase 27 Item 11: organ-weight accessor for sizing pipeline ──
+    def get_organ_weight(self, organ_name: str) -> float:
+        """Read the meta-policy's current weight for a named organ.
+
+        Used by AIFreqtradeSizer.custom_stake_amount via the CAAT multiplier
+        so sizing can respect "is the IQL motor or SAC motor in charge right
+        now?" decisions. Returns 1.0 (neutral) when the organ is unknown or
+        the policy hasn't trained yet.
+        """
+        try:
+            stats = self.organ_tracker.get_metrics() if hasattr(self.organ_tracker, "get_metrics") else {}
+            if organ_name in stats:
+                metric = stats[organ_name]
+                if isinstance(metric, dict):
+                    val = float(metric.get("mean", 1.0))
+                else:
+                    val = float(metric)
+                return max(0.5, min(1.5, val))
+        except Exception:
+            pass
+        return 1.0
+
+    # ─── Phase 27 Item 11: motor selector — IQL vs SAC ──
+    def select_motor(self, regime: Optional[str] = None) -> str:
+        """Return which RL motor should drive the next decision."""
+        try:
+            stats = self.organ_tracker.get_metrics() if hasattr(self.organ_tracker, "get_metrics") else {}
+            iql_score = float(stats.get("iql", {}).get("mean", 0.0)) if isinstance(stats.get("iql"), dict) else float(stats.get("iql", 0.0) or 0.0)
+            sac_score = float(stats.get("sac", {}).get("mean", 0.0)) if isinstance(stats.get("sac"), dict) else float(stats.get("sac", 0.0) or 0.0)
+            return "sac" if sac_score > iql_score + 0.05 else "iql"
+        except Exception:
+            return "iql"
+
 
 # Singleton
 _hrl_instance = None
+
 
 def get_meta_policy() -> HRLMetaPolicy:
     global _hrl_instance
