@@ -164,7 +164,22 @@ class OrderFlowAnalyzer:
         self._vpin_estimators: Dict[str, object] = {}
         # Phase 27 Task 10: per-pair Hawkes intensity trackers.
         self._hawkes: Dict[str, HawkesIntensityTracker] = {}
+        # Phase 27 Fix 8: orderbook cache. Set via publish_orderbook() once the
+        # Bybit depth stream is wired in — LOB encoding is skipped until then.
+        self._last_orderbook: Dict[str, Dict] = {}
         init_db()
+
+    def publish_orderbook(self, pair: str, orderbook: Dict) -> None:
+        """Caller-side hook: strategy pushes a Level-2 orderbook snapshot here,
+        analyze() picks it up on the next invocation. Once the Bybit depth
+        stream is wired in (see TODO in analyze), this becomes the LOB entry
+        point. Kept as a thin setter so the integration surface is explicit.
+        """
+        if not isinstance(orderbook, dict):
+            return
+        if not hasattr(self, "_last_orderbook") or self._last_orderbook is None:
+            self._last_orderbook = {}
+        self._last_orderbook[pair] = orderbook
 
     def _get_hawkes(self, pair: str) -> HawkesIntensityTracker:
         tracker = self._hawkes.get(pair)
@@ -227,6 +242,34 @@ class OrderFlowAnalyzer:
             result["hawkes_intensity"] = round(tracker.current_intensity(), 4)
             result["hawkes_branching_ratio"] = round(tracker.branching_ratio, 4)
             result["hawkes_sizing_mult"] = round(tracker.sizing_mult(), 4)
+
+        # Phase 27 Fix 8 / LOB integration — WIRE STATUS: NOT WIRED YET.
+        # `lob_encoder.encode()` needs a Level-2 orderbook snapshot; the bot
+        # only receives Level-1 tickers via the scheduler pipeline today. The
+        # previous attempt to read from `trades` dict / `self._last_orderbook`
+        # was unreachable (trades is a List[Dict], and _last_orderbook is
+        # never populated). Keeping it would be worst-of-both: looks wired,
+        # isn't. Wire path below when a real orderbook source exists.
+        #
+        # TODO(hydraquant): pipe Bybit depth@20 stream into publish_orderbook(pair, ob)
+        #                    and then call `self.publish_orderbook(pair, orderbook)`
+        #                    ahead of `analyze(pair, trades=[...])`. That method
+        #                    populates `_last_orderbook` which the block below
+        #                    would consume.
+        orderbook = None
+        last_ob = getattr(self, "_last_orderbook", None)
+        if isinstance(last_ob, dict):
+            orderbook = last_ob.get(pair)
+        if orderbook:
+            try:
+                from lob_encoder import get_lob_encoder
+                lob = get_lob_encoder()
+                lob_feat = lob.encode(orderbook, pair=pair)
+                result["lob_imbalance"] = lob_feat.get("imbalance_score", 0.0)
+                result["lob_microprice_dev_bps"] = lob_feat.get("microprice_deviation_bps", 0.0)
+                result["lob_spread_regime"] = lob_feat.get("spread_regime", "unknown")
+            except Exception as e:
+                logger.debug(f"[OrderFlow:LOB] encode failed ({pair}): {e}")
 
         # Liquidation radar from derivatives data
         liq_data = self._compute_liquidation_radar(pair)
