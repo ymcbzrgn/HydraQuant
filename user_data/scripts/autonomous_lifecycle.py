@@ -332,7 +332,121 @@ class CircadianRhythm:
     live 24-slot performance instead of the old hardcoded AGGRESSIVE/
     CONSERVATIVE/SLEEP buckets. When cerebellum is unavailable (cold start,
     not enough trades) we fall back to the legacy table below.
+
+    Phase 27 Task 19 (I4): Borbely Two-Process Model overlay for the
+    sleep-wake cycle.
+
+      Process S (homeostatic): compute fatigue accumulates while awake.
+        S(t) = S_max · (1 − exp(−t_wake / τ_rise))
+      Process C (circadian):   market opportunity rhythm (learned C-factor
+        from cerebellum hourly multiplier, default sinusoid).
+      Mode trigger:
+        S(t) − C(t) > +δ_upper  → advance SLEEP (savings mode)
+        S(t) − C(t) < −δ_lower  → advance WAKE  (opportunity mode)
+      EMERGENCY_WAKE: 3σ+ volatility shock instantly forces FULL_WAKE.
     """
+
+    # Three operational modes — scheduler uses these to gate non-critical jobs.
+    MODE_FULL_WAKE = "full_wake"      # 52 jobs active
+    MODE_LIGHT_SLEEP = "light_sleep"  # ~18 jobs (heavy learning paused)
+    MODE_DEEP_SLEEP = "deep_sleep"    # ~6 jobs (only safety + heartbeat)
+
+    # Borbely constants — S rises toward S_MAX with τ_rise, decays with τ_fall.
+    S_MAX = 1.0
+    TAU_RISE = 16.0 * 3600.0   # 16h awake → 63% saturation
+    TAU_FALL = 6.0 * 3600.0    # 6h sleep → 63% recovery
+    DELTA_UPPER = 0.15
+    DELTA_LOWER = 0.10
+    VOL_EMERGENCY_SIGMA = 3.0
+
+    def __init__(self):
+        # Process S state (homeostatic pressure)
+        self._process_s: float = 0.0
+        self._last_tick_ts: Optional[float] = None
+        self._current_mode: str = self.MODE_FULL_WAKE
+        self._emergency_wake_until: float = 0.0
+
+    def _process_s_update(self, now_ts: float, mode_is_wake: bool) -> float:
+        """Evolve Process S: rises while awake, falls while asleep."""
+        import math as _math
+        if self._last_tick_ts is None:
+            self._last_tick_ts = now_ts
+            return self._process_s
+        dt = max(0.0, now_ts - self._last_tick_ts)
+        if mode_is_wake:
+            self._process_s = self.S_MAX - (self.S_MAX - self._process_s) * _math.exp(-dt / self.TAU_RISE)
+        else:
+            self._process_s = self._process_s * _math.exp(-dt / self.TAU_FALL)
+        self._last_tick_ts = now_ts
+        return self._process_s
+
+    def _process_c(self, hour_utc: int) -> float:
+        """Circadian opportunity — learned from cerebellum when possible, else
+        sinusoidal day/night approximation centred on UTC 14:00 (US open)."""
+        import math as _math
+        learned = self._cerebellum_multiplier(hour_utc)
+        if learned is not None:
+            # Map learned multiplier ∈ [0.3, 1.5] into [0, 1]
+            return max(0.0, min(1.0, (learned - 0.3) / 1.2))
+        # Fallback: sinusoidal peak at 14:00 UTC, trough at 02:00 UTC
+        phase = 2.0 * _math.pi * ((hour_utc - 14.0) / 24.0)
+        return 0.5 + 0.5 * _math.cos(phase)
+
+    def evaluate_mode(self,
+                      hour_utc: int,
+                      recent_volatility_sigma: float = 0.0) -> str:
+        """Phase 27 Task 19: pick FULL / LIGHT / DEEP sleep mode.
+
+        Called by the scheduler tick (hourly is enough — Process S drifts
+        slowly). `recent_volatility_sigma` = zscore of recent 1h returns against
+        their 7d std; >3σ triggers EMERGENCY_WAKE regardless of Borbely state.
+        """
+        import time as _time
+        now = _time.monotonic()
+
+        # Emergency override — short-lived but hard-overrides cycle.
+        if recent_volatility_sigma >= self.VOL_EMERGENCY_SIGMA:
+            self._emergency_wake_until = now + 3600.0  # 1h forced wake
+            logger.warning(
+                f"[Circadian] EMERGENCY_WAKE — volatility {recent_volatility_sigma:.1f}σ "
+                "forces FULL_WAKE for 1h"
+            )
+        if now < self._emergency_wake_until:
+            self._current_mode = self.MODE_FULL_WAKE
+            self._process_s_update(now, mode_is_wake=True)
+            return self._current_mode
+
+        mode_is_wake = self._current_mode == self.MODE_FULL_WAKE
+        s = self._process_s_update(now, mode_is_wake=mode_is_wake)
+        c = self._process_c(hour_utc)
+
+        # Decision rule (Borbely): the delta S − C gates the transition.
+        delta = s - c
+        if delta > self.DELTA_UPPER:
+            # Homeostatic pressure exceeds opportunity → go down.
+            if self._current_mode == self.MODE_FULL_WAKE:
+                self._current_mode = self.MODE_LIGHT_SLEEP
+            elif self._current_mode == self.MODE_LIGHT_SLEEP and s > 0.8:
+                self._current_mode = self.MODE_DEEP_SLEEP
+        elif delta < -self.DELTA_LOWER:
+            # Opportunity beats fatigue → come up.
+            if self._current_mode == self.MODE_DEEP_SLEEP:
+                self._current_mode = self.MODE_LIGHT_SLEEP
+            elif self._current_mode == self.MODE_LIGHT_SLEEP and s < 0.3:
+                self._current_mode = self.MODE_FULL_WAKE
+        return self._current_mode
+
+    def get_mode(self) -> str:
+        return self._current_mode
+
+    def state_snapshot(self) -> Dict:
+        """Diagnostic snapshot for logs / dashboards."""
+        import time as _time
+        return {
+            "mode": self._current_mode,
+            "process_s": round(self._process_s, 3),
+            "emergency_wake_remaining_s": max(0.0, self._emergency_wake_until - _time.monotonic()),
+        }
 
     def _cerebellum_multiplier(self, hour_utc: int) -> Optional[float]:
         """Read learned timing multiplier from the cerebellum, or None."""
@@ -487,7 +601,9 @@ class MetaController:
         self.criticality = CriticalityMonitor()
         self.danger_theory = DangerTheoryImmunity()
         self.hormesis = HormesisEngine()
-        self.circadian = CircadianRhythm()
+        # Phase 27 Task 19 audit fix: share the circadian singleton with the
+        # scheduler so Process S / mode transitions are observed consistently.
+        self.circadian = get_circadian()
         self.autopoiesis = AutopoiesisIdentity()
         self._tick_count = 0
         init_db()
@@ -653,3 +769,18 @@ def get_lifecycle() -> MetaController:
     if _lifecycle_instance is None:
         _lifecycle_instance = MetaController()
     return _lifecycle_instance
+
+
+# Phase 27 Task 19 audit fix: shared CircadianRhythm singleton. Scheduler
+# (`_sleep_wake_tick`) and MetaController (`lifecycle_tick`) were each
+# creating their OWN CircadianRhythm instance, so Process S evolved in the
+# scheduler's copy but MetaController's `get_time_modulation()` read from a
+# never-updated twin. Both now pull from `get_circadian()` so the sleep
+# pressure and mode state are consistent across the organism.
+_circadian_instance: Optional["CircadianRhythm"] = None
+
+def get_circadian() -> "CircadianRhythm":
+    global _circadian_instance
+    if _circadian_instance is None:
+        _circadian_instance = CircadianRhythm()
+    return _circadian_instance
