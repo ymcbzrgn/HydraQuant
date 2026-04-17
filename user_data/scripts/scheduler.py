@@ -423,8 +423,20 @@ class PipelineScheduler:
         self.scheduler.add_job(self._ensemble_refit, 'cron', day_of_week='sun', hour=5,
             id='ensemble_refit', name='Deep Ensemble Refit', max_instances=1, replace_existing=True)
 
+        # Phase 27 Fix 6 (H3): Forgone PnL feedback loop — resolver + threshold adaptation
+        self.scheduler.add_job(self._forgone_shadow_resolver, 'interval', minutes=30,
+            id='forgone_resolver', name='Forgone Shadow Trade Resolver',
+            max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._forgone_threshold_adapt, 'cron', day_of_week='sun', hour=6,
+            id='forgone_thresholds', name='Per-Pair Threshold Adaptation',
+            max_instances=1, replace_existing=True)
+        # Phase 27 Task 10: Hawkes MLE refit — hourly, only if `tick` is installed
+        self.scheduler.add_job(self._hawkes_mle_refit, 'interval', hours=1,
+            id='hawkes_refit', name='Hawkes Intensity MLE Refit',
+            max_instances=1, replace_existing=True)
+
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 52 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2)")
+        logger.info("[Scheduler] Started with 55 jobs (27 base + 6 organism + 2 phase26 + 17 sprint2 + 3 phase27)")
         return True
 
     def stop(self):
@@ -1032,16 +1044,18 @@ class PipelineScheduler:
                     "pnl_abs": f"${t['pnl_abs'] or 0:.2f}"
                 })
 
-            # Query forgone winners (shadow trades that would have been profitable)
+            # Query forgone winners (shadow trades that would have been profitable).
+            # Phase 27 Fix 6: column name bug — was `resolved_pnl_pct` (does not exist)
+            # and `timestamp` (column is actually `signal_time`). Both are now correct.
             forgone_text = ""
             try:
                 ai_conn = get_db_connection()
                 forgone = ai_conn.execute("""
-                    SELECT pair, signal_type, confidence, entry_price, resolved_pnl_pct
+                    SELECT pair, signal_type, confidence, entry_price, forgone_pnl
                     FROM forgone_profit
-                    WHERE was_executed = 0 AND resolved_pnl_pct > 2.0
-                    AND timestamp > datetime('now', '-1 day')
-                    ORDER BY resolved_pnl_pct DESC LIMIT 5
+                    WHERE was_executed = 0 AND forgone_pnl > 2.0
+                      AND signal_time > datetime('now', '-1 day')
+                    ORDER BY forgone_pnl DESC LIMIT 5
                 """).fetchall()
                 ai_conn.close()
 
@@ -1049,7 +1063,7 @@ class PipelineScheduler:
                     forgone_lines = []
                     for f in forgone:
                         forgone_lines.append(
-                            f"  {f['pair']} {f['signal_type']} conf={f['confidence']:.0%} → +{f['resolved_pnl_pct']:.1f}%")
+                            f"  {f['pair']} {f['signal_type']} conf={f['confidence']:.0%} → +{f['forgone_pnl']:.1f}%")
                     forgone_text = "\nForgone Winners (kacirildi):\n" + "\n".join(forgone_lines)
             except Exception:
                 pass
@@ -2033,6 +2047,152 @@ class PipelineScheduler:
                 logger.info("[Phase28:OOD] Insufficient data for refit")
         except Exception as e:
             logger.warning(f"[Phase28:OOD] Refit failed: {e}")
+
+    def _forgone_shadow_resolver(self):
+        """Phase 27 Fix 6 (H3): Resolve shadow trades whose 4h window has elapsed.
+
+        Every 30 minutes, pick up unresolved forgone_profit rows older than 4h,
+        fetch the current Bybit last-price, and call
+        ForgonePnLEngine.resolve_forgone_trade so forgone_pnl is populated and
+        the adaptive-threshold job has signal.
+        """
+        try:
+            import httpx
+            from forgone_pnl_engine import ForgonePnLEngine
+            from db import get_db_connection
+
+            engine = ForgonePnLEngine()
+            conn = get_db_connection()
+            unresolved = conn.execute("""
+                SELECT id, pair, signal_type, entry_price, signal_time
+                FROM forgone_profit
+                WHERE was_executed = 0
+                  AND forgone_pnl IS NULL
+                  AND signal_time < datetime('now', '-4 hours')
+                ORDER BY signal_time ASC
+                LIMIT 100
+            """).fetchall()
+            conn.close()
+
+            if not unresolved:
+                return
+
+            def _bybit_last_price(pair):
+                # "BTC/USDT:USDT" → "BTCUSDT" linear perp symbol
+                symbol = pair.split(":")[0].replace("/", "")
+                try:
+                    r = httpx.get(
+                        "https://api.bybit.com/v5/market/tickers",
+                        params={"category": "linear", "symbol": symbol},
+                        timeout=5.0,
+                    )
+                    data = r.json().get("result", {}).get("list", [])
+                    if data:
+                        return float(data[0].get("lastPrice", 0))
+                except Exception:
+                    return None
+                return None
+
+            resolved = 0
+            for row in unresolved:
+                try:
+                    price = _bybit_last_price(row["pair"])
+                    if price and price > 0:
+                        if engine.resolve_forgone_trade(row["id"], float(price)):
+                            resolved += 1
+                except Exception as e:
+                    logger.debug(f"[Phase27:ShadowResolve] {row['pair']} skip: {e}")
+            logger.info(f"[Phase27:ShadowResolve] Resolved {resolved}/{len(unresolved)} shadow trades")
+        except ImportError as e:
+            logger.debug(f"[Phase27:ShadowResolve] disabled: {e}")
+        except Exception as e:
+            logger.warning(f"[Phase27:ShadowResolve] Job failed: {e}")
+
+    def _forgone_threshold_adapt(self):
+        """Phase 27 Fix 6 (H3): Adjust pair_thresholds based on 7d forgone alpha.
+
+        For each (pair, regime):
+          - sum(forgone_pnl) when was_executed=0 AND forgone_pnl > 0 → missed profit
+          - sum(forgone_pnl) when was_executed=0 AND forgone_pnl < 0 → dodged loss
+          alpha = missed_profit + dodged_loss   (positive → we're too strict)
+        """
+        try:
+            from db import get_db_connection
+            from datetime import datetime, timezone
+            conn = get_db_connection()
+            pairs = conn.execute("""
+                SELECT pair,
+                       COALESCE(regime, '_global') AS regime,
+                       SUM(CASE WHEN was_executed=0 AND forgone_pnl > 0
+                                THEN forgone_pnl ELSE 0 END) AS pos,
+                       SUM(CASE WHEN was_executed=0 AND forgone_pnl < 0
+                                THEN forgone_pnl ELSE 0 END) AS neg,
+                       COUNT(*) AS n_signals
+                FROM forgone_profit
+                WHERE signal_time > datetime('now', '-7 days')
+                  AND forgone_pnl IS NOT NULL
+                GROUP BY pair, regime
+            """).fetchall()
+
+            adjusted = 0
+            now = datetime.now(tz=timezone.utc).isoformat()
+            for p in pairs:
+                alpha = (p["pos"] or 0.0) + (p["neg"] or 0.0)
+                if p["n_signals"] < 5:
+                    continue  # too little data to act on
+
+                if alpha > 2.0:
+                    delta = -0.02  # missing too many winners → lower threshold (take more trades)
+                    reason = f"missed_alpha={alpha:+.2f}"
+                elif alpha < -1.0:
+                    delta = +0.01  # catching losers → raise threshold
+                    reason = f"net_loss_alpha={alpha:+.2f}"
+                else:
+                    continue
+
+                # Upsert with clamped threshold
+                existing = conn.execute("""
+                    SELECT confidence_threshold FROM pair_thresholds
+                    WHERE pair = ? AND regime = ?
+                """, (p["pair"], p["regime"])).fetchone()
+                current = float(existing["confidence_threshold"]) if existing else 0.50
+                new_thr = max(0.30, min(0.75, current + delta))
+                conn.execute("""
+                    INSERT INTO pair_thresholds
+                        (pair, regime, confidence_threshold, forgone_alpha_7d,
+                         last_adjusted, adjustment_reason)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pair, regime) DO UPDATE SET
+                        confidence_threshold = excluded.confidence_threshold,
+                        forgone_alpha_7d = excluded.forgone_alpha_7d,
+                        last_adjusted = excluded.last_adjusted,
+                        adjustment_reason = excluded.adjustment_reason
+                """, (p["pair"], p["regime"], new_thr, alpha, now, reason))
+                adjusted += 1
+                logger.info(f"[Phase27:Threshold] {p['pair']} ({p['regime']}): "
+                           f"{current:.2f} → {new_thr:.2f} ({reason})")
+            conn.commit()
+            conn.close()
+            logger.info(f"[Phase27:Threshold] Weekly adapt: {adjusted} pairs adjusted")
+        except Exception as e:
+            logger.warning(f"[Phase27:Threshold] Adaptation failed: {e}")
+
+    def _hawkes_mle_refit(self):
+        """Phase 27 Task 10: Hourly MLE refit of Hawkes (α, β) per pair.
+
+        Uses the `tick` library when available. Falls back to a no-op when it
+        is not installed — the O(1) intensity tracker keeps working with its
+        default parameters in the meantime.
+        """
+        try:
+            from order_flow import get_order_flow
+            of = get_order_flow()
+            refitted = of.refit_hawkes_mle() if hasattr(of, "refit_hawkes_mle") else 0
+            logger.info(f"[Phase27:Hawkes] MLE refit: {refitted} pairs")
+        except ImportError as e:
+            logger.debug(f"[Phase27:Hawkes] tick not installed: {e}")
+        except Exception as e:
+            logger.debug(f"[Phase27:Hawkes] Refit skipped: {e}")
 
     def _conformal_recalibrate(self):
         """Every 6h: ACI alpha adjustment based on recent coverage."""

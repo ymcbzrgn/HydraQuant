@@ -91,6 +91,14 @@ class DreamFilter:
         """Validate a dream trajectory through 3 filters.
 
         Returns (is_valid, reason) — reason is empty if valid.
+
+        Phase 27 Fix 5c: the Mahalanobis threshold is now dimension-aware.
+        The original Phase 26 implementation divided the squared distance by
+        `len(z)` and compared to a hard-coded 3.0 σ threshold, which was tuned
+        for the 2-feature prototype. In the 64-dimensional latent space every
+        dream landed above 3.0 and the filter rejected everything → 0 dreams
+        survived → rl_replay_buffer got no dream rows (matches the field bug).
+        We now use the 95th-percentile chi-squared quantile per dim.
         """
         if not self._stats_computed or self._real_stats is None:
             return True, ""  # No stats → pass through (first run)
@@ -99,16 +107,27 @@ class DreamFilter:
             z = np.array(step.get("z", []), dtype=np.float32)
             reward = step.get("reward", 0.0)
 
-            # Filter 1: Mahalanobis distance
+            # Filter 1: Mahalanobis distance (dimension-aware threshold)
             if len(z) > 0 and len(z) <= len(self._real_stats["mean"]):
                 z_trimmed = z[:len(self._real_stats["mean"])]
                 diff = z_trimmed - self._real_stats["mean"][:len(z_trimmed)]
                 prec = self._real_stats["precision_diag"][:len(z_trimmed)]
                 maha_sq = float(np.sum(diff ** 2 * prec))
-                maha_dist = np.sqrt(maha_sq / len(z_trimmed))
+                n_dim = max(1, len(z_trimmed))
+                # Dim-aware threshold: √(chi2.ppf(0.95, df=n_dim))
+                try:
+                    from scipy import stats as _scipy_stats
+                    dim_threshold = float(np.sqrt(_scipy_stats.chi2.ppf(0.95, df=n_dim)))
+                except Exception:
+                    # Approximation: √(n + 2√(2n)) (Wilson-Hilferty roughly)
+                    dim_threshold = float(np.sqrt(n_dim + 2 * np.sqrt(2 * n_dim)))
+                # Keep the legacy MAHALANOBIS_THRESHOLD=3.0 as a safety floor so
+                # a truly broken world model can't just "pass" by having huge n.
+                dim_threshold = max(dim_threshold, MAHALANOBIS_THRESHOLD)
+                maha_dist = float(np.sqrt(maha_sq))
 
-                if maha_dist > MAHALANOBIS_THRESHOLD:
-                    return False, f"mahalanobis={maha_dist:.2f} > {MAHALANOBIS_THRESHOLD}"
+                if maha_dist > dim_threshold:
+                    return False, f"mahalanobis={maha_dist:.2f} > {dim_threshold:.2f}"
 
             # Filter 2: Reward magnitude
             max_reward = self._real_stats["max_abs_reward"] * REWARD_MAGNITUDE_MULT
@@ -193,10 +212,16 @@ class DreamEngine:
         # Load real stats for filtering
         self._load_real_stats()
 
-        # Get initial state
+        # Get initial state — Phase 27 Fix 5a (C3 Ajani): MBPO-style branching.
+        # Phase 26 defaulted to pure random noise, which caused dreams to start
+        # from points already far from the real distribution. That combined with
+        # bug 5b (2D Mahalanobis threshold) to reject nearly every dream.
         if initial_state is None:
-            from rl_environment import TOTAL_STATE_DIM
-            initial_state = np.random.randn(TOTAL_STATE_DIM).astype(np.float32) * 0.1
+            initial_state = self._get_latest_real_state()
+            if initial_state is None:
+                from rl_environment import TOTAL_STATE_DIM
+                logger.info("[DreamEngine] No real state available, cold-start with low-variance noise")
+                initial_state = np.random.randn(TOTAL_STATE_DIM).astype(np.float32) * 0.05
 
         # Generate dreams (rollouts from world model)
         logger.info(f"[DreamEngine] Starting dream session: {n_dreams} dreams, "
@@ -316,21 +341,97 @@ class DreamEngine:
         logger.info(f"[DreamEngine] Stored {stored} dream transitions in replay buffer")
         return stored
 
+    def _get_latest_real_state(self) -> Optional[np.ndarray]:
+        """Phase 27 Fix 5a: Pull the freshest real-market state vector so dreams
+        branch from reality (MBPO style) instead of starting from random noise.
+
+        Priority:
+          1. Latest row in `world_model_states` (if populated — primary source).
+          2. Last row of `rl_replay_buffer` (`state_json`) — fallback.
+        Returns None if neither source has usable data; caller falls back to
+        low-variance cold-start noise.
+        """
+        try:
+            from rl_environment import TOTAL_STATE_DIM
+        except Exception:
+            return None
+
+        conn = None
+        try:
+            conn = get_db_connection(AI_DB_PATH)
+            # world_model_states persists a TTM-encoded embedding (see db.py
+            # schema — column is `ttm_embedding`, not `state_embedding`).
+            row = conn.execute("""
+                SELECT ttm_embedding FROM world_model_states
+                ORDER BY id DESC LIMIT 1
+            """).fetchone()
+            if row and row["ttm_embedding"]:
+                try:
+                    vec = np.frombuffer(row["ttm_embedding"], dtype=np.float32)
+                    if len(vec) >= TOTAL_STATE_DIM:
+                        return vec[:TOTAL_STATE_DIM].astype(np.float32).copy()
+                except Exception:
+                    pass
+
+            row = conn.execute("""
+                SELECT state_json FROM rl_replay_buffer
+                ORDER BY id DESC LIMIT 1
+            """).fetchone()
+            if row and row["state_json"]:
+                try:
+                    arr = np.asarray(json.loads(row["state_json"]), dtype=np.float32)
+                    if len(arr) >= TOTAL_STATE_DIM:
+                        return arr[:TOTAL_STATE_DIM].copy()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"[DreamEngine:LatestState] DB fetch failed: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return None
+
     def _persist_session(self, session_id: str, valid_dreams: List[Dict],
                          all_rollouts: List[Dict], pass_rate: float):
-        """Persist dream session metadata to dream_scenarios table."""
+        """Persist dream session metadata to dream_scenarios table.
+
+        Phase 27 Fix 5c: the old INSERT only wrote 4/9 columns — `initial_state`,
+        `event_type`, and `state_after` were silently left NULL, making the
+        scenarios useless for post-hoc analysis or RL replay. All columns now
+        populated; BLOBs use numpy.tobytes() so np.frombuffer can reconstruct.
+        """
         with get_connection() as conn:
-            for i, dream in enumerate(valid_dreams[:50]):  # Cap at 50
-                for step_idx, step in enumerate(dream["trajectory"]):
+            for i, dream in enumerate(valid_dreams[:50]):  # Cap at 50 dreams
+                traj = dream.get("trajectory", [])
+                events = dream.get("events") or ([None] * len(traj))
+                for step_idx, step in enumerate(traj):
                     try:
+                        # BLOBs: z (state latent) → float32 bytes
+                        z_bytes = None
+                        if step.get("z") is not None:
+                            z_arr = np.asarray(step["z"], dtype=np.float32)
+                            z_bytes = z_arr.tobytes()
+                        # `initial_state` = the very first z in the rollout
+                        initial_bytes = None
+                        if traj and traj[0].get("z") is not None:
+                            initial_bytes = np.asarray(traj[0]["z"], dtype=np.float32).tobytes()
+                        event_type = (step.get("event")
+                                      or (events[step_idx] if step_idx < len(events) else None)
+                                      or "normal")
                         conn.execute("""
                             INSERT INTO dream_scenarios
-                            (dream_session_id, trajectory_idx, step,
-                             reward, passed_filter, filter_reason)
-                            VALUES (?, ?, ?, ?, 1, NULL)
-                        """, (session_id, i, step_idx, step["reward"]))
-                    except Exception:
-                        pass
+                                (dream_session_id, trajectory_idx, step,
+                                 initial_state, event_type, state_after,
+                                 reward, passed_filter, filter_reason)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL)
+                        """, (session_id, i, step_idx,
+                              initial_bytes, event_type, z_bytes,
+                              step.get("reward", 0.0)))
+                    except Exception as e:
+                        logger.debug(f"[DreamEngine:Persist] step {i}:{step_idx} skip: {e}")
             conn.commit()
 
     # ===================================================================

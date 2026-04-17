@@ -302,10 +302,16 @@ class WorldModel:
 
                 for step in range(horizon):
                     # Optional event injection
+                    # Phase 27 Fix 5d: the Phase 26 default of 50% "normal" meant
+                    # half of every dream was pure perturbation noise, which (a)
+                    # made dreams drift far from the real distribution and (b)
+                    # blew up Mahalanobis distance when combined with Fix 5b.
+                    # Shift to 70% normal so dreams are mostly continuations,
+                    # events are the interesting ~30%.
                     if event_injection:
                         event = np.random.choice(EVENT_TYPES,
-                                                  p=[0.5, 0.08, 0.08, 0.08, 0.08,
-                                                     0.06, 0.06, 0.06])
+                                                  p=[0.70, 0.05, 0.05, 0.05, 0.05,
+                                                     0.04, 0.03, 0.03])
                     else:
                         event = "normal"
                     events.append(event)
