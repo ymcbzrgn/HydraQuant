@@ -173,6 +173,18 @@ class TriplePerception:
                 )
                 result["catboost_probability"] = catboost_result["probability"]
                 result["shap_top_features"] = catboost_result.get("shap_top", [])
+                # Phase 27 Fix 4 (G3): publish natural-language SHAP so MADAM can
+                # see which neural-model features actually drove the prediction.
+                result["shap_narrative"] = catboost_result.get("shap_narrative", "")
+                if result["shap_narrative"]:
+                    try:
+                        from pheromone_field import get_pheromone_field, PheromoneField
+                        get_pheromone_field().deposit(
+                            "triple_perception", PheromoneField.SIGNAL_SHAP,
+                            result["shap_narrative"], half_life=300.0,
+                        )
+                    except Exception:
+                        pass
                 result["components_available"]["catboost"] = True
             except Exception as e:
                 logger.warning(f"[TriplePerception] CatBoost predict failed: {e}")
@@ -335,23 +347,61 @@ class TriplePerception:
         else:
             probability = float(proba[0])
 
-        # SHAP (if available)
+        # SHAP (if available) — Phase 26 returned raw importances; Phase 27 Fix 4
+        # (G3) also turns them into natural-language for MADAM / rag_graph.
         shap_top = []
+        shap_signed: list = []  # list of (feature, signed_shap)
         try:
             shap_values = self._catboost_model.get_feature_importance(
                 data=feature_df, type="ShapValues"
             )
             if shap_values is not None:
-                importances = abs(shap_values[0][:-1])  # exclude bias term
+                raw = shap_values[0][:-1]  # exclude bias term
+                importances = abs(raw)
                 top_idx = np.argsort(importances)[-5:][::-1]
                 shap_top = [
                     {"feature": expected_cols[i], "importance": round(float(importances[i]), 4)}
                     for i in top_idx
                 ]
+                shap_signed = [
+                    (expected_cols[i], float(raw[i])) for i in top_idx
+                ]
         except Exception:
             pass
 
-        return {"probability": probability, "shap_top": shap_top}
+        # Phase 27 Fix 4: build natural-language SHAP narrative for MADAM.
+        direction = "BULLISH" if probability >= 0.55 else "BEARISH" if probability <= 0.45 else "NEUTRAL"
+        shap_narrative = self._format_shap_narrative(shap_signed, direction, probability)
+
+        return {
+            "probability": probability,
+            "shap_top": shap_top,
+            "shap_narrative": shap_narrative,
+        }
+
+    def _format_shap_narrative(self, shap_signed, prediction: str,
+                                probability: float) -> str:
+        """Phase 27 Fix 4 (G3): CatBoost SHAP → MADAM-readable explanation."""
+        if not shap_signed:
+            return ""
+        direction_word = {"BULLISH": "LONG", "BEARISH": "SHORT"}.get(prediction, "NEUTRAL")
+        lines = [
+            f"CatBoost predicts {direction_word} ({probability:.0%} probability).",
+            "Top contributing features:",
+        ]
+        for feat, shap_val in shap_signed:
+            direction = "supporting" if shap_val > 0 else "opposing"
+            lines.append(f"  • {feat}: {shap_val:+.3f} ({direction})")
+        supporting = sum(1 for _, v in shap_signed if v > 0)
+        opposing = len(shap_signed) - supporting
+        if opposing == 0:
+            lines.append("All top features AGREE on direction — high conviction.")
+        elif opposing >= 3:
+            lines.append(
+                f"WARNING: {opposing}/{len(shap_signed)} top features OPPOSE the prediction — "
+                "mixed signal, reduce sizing."
+            )
+        return "\n".join(lines)
 
     def _fuse(self, result: Dict) -> Dict:
         """Fuse TTM + Chronos + CatBoost into final signal."""

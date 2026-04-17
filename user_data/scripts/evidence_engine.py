@@ -242,7 +242,13 @@ class EvidenceEngine:
                 tp_health = pfield.read_float("organism_health", default=0.0)
 
                 if tp_signal and isinstance(tp_signal, dict):
-                    tp_direction = tp_signal.get("direction", "NEUTRAL")
+                    # Phase 27 audit fix: triple_perception deposits `signal` (not
+                    # `direction`) as the payload key. Keep `direction` as a last
+                    # resort fallback so legacy deposits still parse if anyone
+                    # publishes under that key in the future.
+                    tp_direction = (tp_signal.get("signal")
+                                    or tp_signal.get("direction")
+                                    or "NEUTRAL")
                     tp_conf = tp_signal.get("confidence", 0.0) * tp_signal.get("_decay", 1.0)
                     # If perception agrees with evidence, boost confidence
                     # If disagrees, penalize

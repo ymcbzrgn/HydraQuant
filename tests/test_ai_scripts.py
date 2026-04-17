@@ -641,29 +641,39 @@ def test_bayesian_kelly_update(tmp_db):
 # Test 28: Bayesian Kelly Fraction calculation
 # ============================================================
 def test_bayesian_kelly_fraction(tmp_db):
-    """f* = (b*p - q)/b capped at 0.25 — per-pair (Phase 27 Task 1).
+    """f* = (b*p - q)/b capped at sizing.kelly_cap — per-pair (Phase 27 Task 1).
     Uses set_pair_stats() instead of direct attribute assignment since
-    BayesianKelly is now stateless (DB is source of truth, Prensip 0)."""
+    BayesianKelly is now stateless (DB is source of truth, Prensip 0).
+
+    The kelly_cap is read from NeuralOrganism adaptive params (default 0.25 but
+    can drift). We assert behavior: winning pair → hit the cap, losing pair → 0,
+    per-pair isolation intact."""
     from position_sizer import BayesianKelly
+    from neural_organism import _p
 
     bk = BayesianKelly(db_path=tmp_db)
+    kelly_cap = _p("sizing.kelly_cap", 0.25)
     pair_win = "WIN/USDT:USDT"
     pair_loss = "LOSS/USDT:USDT"
 
-    # High win rate pair: α=90, β=10, W/L=2.0 → f=(2*0.9-0.1)/2=0.85 → capped 0.25
+    # High win rate pair: α=90, β=10, W/L=2.0 → f_raw=0.85 → capped at kelly_cap
     bk.set_pair_stats(pair_win, alpha=90.0, beta_param=10.0,
                       avg_win=2.0, avg_loss=1.0, n_trades=100)
     f = bk.kelly_fraction(pair=pair_win)
-    assert f == 0.25, f"Should be capped at 0.25, got {f}"
+    assert abs(f - kelly_cap) < 1e-6, (
+        f"Should be capped at kelly_cap={kelly_cap}, got {f}"
+    )
 
-    # Losing pair: α=10, β=90, W/L=1.0 → f=(1*0.1-0.9)/1=-0.8 → floored 0.0
+    # Losing pair: α=10, β=90, W/L=1.0 → f_raw=-0.8 → floored 0.0
     bk.set_pair_stats(pair_loss, alpha=10.0, beta_param=90.0,
                       avg_win=1.0, avg_loss=1.0, n_trades=100)
     f_loss = bk.kelly_fraction(pair=pair_loss)
     assert f_loss == 0.0, f"Should be 0.0 for losing strategies, got {f_loss}"
 
-    # Per-pair isolation: winning pair still positive after losing pair written
-    assert bk.kelly_fraction(pair=pair_win) == 0.25, "Per-pair isolation violated"
+    # Per-pair isolation: winning pair still at cap after losing pair written
+    assert abs(bk.kelly_fraction(pair=pair_win) - kelly_cap) < 1e-6, (
+        "Per-pair isolation violated"
+    )
 
 
 # ============================================================
@@ -4398,3 +4408,189 @@ def test_ood_v1_state_fallback(tmp_path):
         f"Unfitted detector must return mult=1.0 (no sizing cut), "
         f"got {result['defensive_multiplier']}"
     )
+
+
+# ============================================================
+# Phase 27 Fix 3: Pheromone Trail Ring Buffer
+# ============================================================
+
+def _fresh_pheromone_field():
+    """Build an isolated PheromoneField for unit tests (bypasses singleton)."""
+    from pheromone_field import PheromoneField
+    return PheromoneField(trail_length=8)
+
+
+def test_pheromone_trail_accumulation():
+    """Phase 27 Fix 3: five deposits on the same (source, signal) must leave
+    trail_depth==5 and a positive LIF-accumulated value clamped inside
+    [TAU_MIN, TAU_MAX]. Regression guard against the Phase 26 overwrite bug
+    that forced each new deposit to erase the previous one."""
+    import time
+    from pheromone_field import PheromoneField
+
+    pf = _fresh_pheromone_field()
+    for i in range(5):
+        pf.deposit("test_src", "alpha",
+                   {"confidence": 0.1 * (i + 1)}, half_life=120.0)
+        time.sleep(0.01)
+
+    trail = pf._field["test_src::alpha"]
+    assert len(trail.deposits) == 5, (
+        f"Trail should hold all five deposits, got {len(trail.deposits)}"
+    )
+    assert trail.accumulated_value > 0.0, (
+        f"LIF accumulator must be positive after positive deposits, "
+        f"got {trail.accumulated_value}"
+    )
+    assert PheromoneField.TAU_MIN <= trail.accumulated_value <= PheromoneField.TAU_MAX, (
+        f"accumulated_value {trail.accumulated_value} must stay in MMAS bounds"
+    )
+    # Fresh read returns the latest deposit (Phase 26 contract preserved)
+    latest = pf.read("alpha")
+    assert isinstance(latest, dict)
+    assert latest["confidence"] == 0.5  # last deposit was 0.1*5
+
+
+def test_pheromone_read_integral():
+    """Phase 27 Fix 3 (HQ-1): read_integral averages deposits inside a time
+    window weighted by freshness. Averaging 3×0.5 deposits must yield ~0.5."""
+    import time
+    pf = _fresh_pheromone_field()
+
+    for _ in range(3):
+        pf.deposit("test_src", "beta", 0.5, half_life=3600.0)
+        time.sleep(0.01)
+
+    integ = pf.read_integral("beta", window_seconds=60)
+    assert 0.45 < integ < 0.55, (
+        f"Integral of three identical 0.5 deposits should be ~0.5, got {integ}"
+    )
+
+    # Empty window returns 0
+    integ_empty = pf.read_integral("nonexistent_signal")
+    assert integ_empty == 0.0
+
+    # Window smaller than deposit age → 0
+    time.sleep(0.1)
+    integ_narrow = pf.read_integral("beta", window_seconds=0.01)
+    assert integ_narrow == 0.0, (
+        f"Deposits older than window must be excluded, got {integ_narrow}"
+    )
+
+
+def test_pheromone_read_gradient():
+    """Phase 27 Fix 3 (HQ-3): rising deposits → positive gradient, falling
+    deposits → negative gradient, <2 deposits → 0.0."""
+    import time
+    pf = _fresh_pheromone_field()
+
+    # <2 deposits → gradient 0
+    pf.deposit("test_src", "gamma", 0.1, half_life=60.0)
+    assert pf.read_gradient("gamma") == 0.0, "One deposit must yield gradient 0"
+
+    # Rising
+    time.sleep(0.01)
+    pf.deposit("test_src", "gamma", 0.9, half_life=60.0)
+    rising = pf.read_gradient("gamma")
+    assert rising > 0.0, f"Rising deposits must have positive gradient, got {rising}"
+
+    # Falling
+    time.sleep(0.01)
+    pf.deposit("test_src", "gamma", 0.2, half_life=60.0)
+    falling = pf.read_gradient("gamma")
+    assert falling < 0.0, f"Falling deposits must have negative gradient, got {falling}"
+
+
+# ============================================================
+# Phase 27 Fix 2C: Argument Pattern Extraction
+# ============================================================
+
+def test_argument_pattern_extraction():
+    """Phase 27 Fix 2C (J4): key_argument text must map to a canonical
+    ARGUMENT_PATTERNS bucket so argument_quality can score them."""
+    from agent_pool import AgentPool, ARGUMENT_PATTERNS
+
+    # ARGUMENT_PATTERNS is populated (≥10 patterns)
+    assert len(ARGUMENT_PATTERNS) >= 10, (
+        f"Expected >=10 patterns, got {len(ARGUMENT_PATTERNS)}"
+    )
+
+    pool = AgentPool.__new__(AgentPool)  # bypass __init__, we only need method access
+
+    cases = [
+        ("ADX > 30 indicates strong trend", "adx_trend"),
+        ("RSI below 30 oversold — bounce incoming", "rsi_oversold"),
+        ("RSI is overbought at 78, expect pullback", "rsi_overbought"),
+        ("Funding rate extreme 0.08 suggests squeeze", "funding_extreme"),
+        ("MACD histogram cross confirms", "macd_signal"),
+        ("Volume spike confirms breakout", "volume_anomaly"),
+        ("Support level held at 50k", "support_level"),
+        ("EMA cross above signals bull", "ema_alignment"),
+        ("Fear & Greed in extreme panic", "fng_extreme"),
+        ("DXY rising risk-off environment", "macro_risk_off"),
+    ]
+    for text, expected in cases:
+        got = pool._extract_argument_pattern(text)
+        assert got == expected, f"{text!r}: expected {expected}, got {got}"
+
+    # Unmatched text returns None (not a random default)
+    assert pool._extract_argument_pattern("totally unrecognized text") is None
+    assert pool._extract_argument_pattern("") is None
+    assert pool._extract_argument_pattern(None) is None
+
+
+# ============================================================
+# Phase 27 Fix 2E: Debate → Pheromone Deposit
+# ============================================================
+
+def test_debate_pheromone_deposit():
+    """Phase 27 Fix 2E (J5): _deposit_debate_pheromones must publish
+    SIGNAL_AGENT_CONSENSUS after every debate and SIGNAL_AGENT_DISSENT when
+    both bullish and bearish strengths exceed 0.3."""
+    import pheromone_field as pfm
+    pfm._pheromone_field = None  # reset singleton for isolation
+    from pheromone_field import get_pheromone_field, PheromoneField
+    from agent_pool import AgentPool
+
+    pool = AgentPool.__new__(AgentPool)
+
+    # Case 1: consensus only (no strong two-sided split)
+    positions = {
+        "TrendFollower": {"direction": "BULLISH", "strength": 0.8,
+                           "key_argument": "trend strong"},
+        "MomentumRider": {"direction": "BULLISH", "strength": 0.7,
+                           "key_argument": "momentum building"},
+        "DevilsAdvocate": {"direction": "BEARISH", "strength": 0.1,
+                            "key_argument": "weak counter"},
+    }
+    result = {"signal": "BULLISH", "confidence": 0.72}
+    pool._deposit_debate_pheromones("BTC/USDT:USDT", "trending_bull", positions, result)
+
+    pfield = get_pheromone_field()
+    consensus = pfield.read(PheromoneField.SIGNAL_AGENT_CONSENSUS)
+    assert consensus is not None, "Consensus pheromone was not deposited"
+    assert consensus.get("signal") == "BULLISH"
+    assert consensus.get("n_agents") == 3
+
+    # Without strong two-sided split, dissent signal should be absent
+    dissent = pfield.read(PheromoneField.SIGNAL_AGENT_DISSENT)
+    assert dissent is None, f"Dissent wrongly deposited when one side won: {dissent}"
+
+    # Case 2: both sides strong → dissent deposited
+    pfm._pheromone_field = None
+    pool2 = AgentPool.__new__(AgentPool)
+    split_positions = {
+        "TrendFollower": {"direction": "BULLISH", "strength": 0.6,
+                           "key_argument": "trend up"},
+        "FundingContrarian": {"direction": "BEARISH", "strength": 0.6,
+                               "key_argument": "funding extreme"},
+        "DevilsAdvocate": {"direction": "NEUTRAL", "strength": 0.2,
+                            "key_argument": "mixed"},
+    }
+    pool2._deposit_debate_pheromones("ETH/USDT:USDT", "ranging",
+                                      split_positions, {"signal": "NEUTRAL", "confidence": 0.4})
+    pfield2 = get_pheromone_field()
+    dissent2 = pfield2.read(PheromoneField.SIGNAL_AGENT_DISSENT)
+    assert dissent2 is not None, "Dissent pheromone expected for 0.6 vs 0.6 split"
+    assert dissent2["bull_strength"] >= 0.3
+    assert dissent2["bear_strength"] >= 0.3

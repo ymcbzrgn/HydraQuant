@@ -509,6 +509,23 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_per_pair
             ON bayesian_kelly_per_pair(pair, regime)''')
 
+        # Phase 27 Fix 2C (J4 Ajani): Argument quality scoring — each agent's
+        # argument patterns (regex-bucketed) get win-rate + avg PnL tracked so
+        # R1 prompts can inject "your best argument in this regime was X (78% acc)".
+        c.execute('''CREATE TABLE IF NOT EXISTS argument_quality (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_type TEXT NOT NULL,
+            argument_pattern TEXT NOT NULL,
+            regime TEXT NOT NULL,
+            times_used INTEGER DEFAULT 0,
+            times_correct INTEGER DEFAULT 0,
+            avg_pnl_when_used REAL DEFAULT 0.0,
+            quality_score REAL DEFAULT 0.5,
+            updated_at TEXT,
+            UNIQUE(agent_type, argument_pattern, regime))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_arg_quality
+            ON argument_quality(agent_type, regime)''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
             text_hash TEXT PRIMARY KEY, binary_vec BLOB,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
