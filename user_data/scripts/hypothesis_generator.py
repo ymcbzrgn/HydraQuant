@@ -254,17 +254,117 @@ class LLMStrategyResearcher:
             return True  # on error, treat as novel
 
     @staticmethod
-    def _gate_walk_forward(hyp: Dict[str, Any]) -> Optional[float]:
-        """Stub — returns a neutral Sharpe (0.0). A live walk-forward
-        backtester is wired in as Sprint 3B task 16b; for now we persist the
-        hypothesis but mark it PENDING_BACKTEST so the shadow period is the
-        effective validation window."""
-        return 0.0
+    def _filter_trades_by_hypothesis(rows: List[Dict[str, Any]],
+                                       hyp: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Phase 27 Item 2: filter ai_decisions by the hypothesis "if-applied"
+        condition. Heuristic mapping per parameter family — covers the
+        parameters the LLM researcher most often proposes.
+        """
+        param = (hyp.get("parameter") or "").lower()
+        proposed = float(hyp.get("proposed_value") or 0.0)
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                conf = float(r.get("confidence") or 0.5)
+                regime = (r.get("regime") or "_global")
+                # confidence threshold tweak — only count trades with conf ≥ proposed
+                if "confidence" in param or "threshold" in param:
+                    if conf >= proposed:
+                        out.append(r)
+                # kelly cap tweak — every trade kept (cap doesn't drop trades)
+                elif "kelly" in param or "sizing" in param or "max_risk" in param:
+                    out.append(r)
+                # regime-scoped — only keep trades in matching regime
+                elif "regime" in param and proposed:
+                    if str(int(proposed)) in regime or regime == hyp.get("affected_pairs", ""):
+                        out.append(r)
+                else:
+                    out.append(r)
+            except Exception:
+                continue
+        return out
 
     @staticmethod
-    def _gate_oos(hyp: Dict[str, Any]) -> Optional[float]:
-        """Stub — matching task 16b wiring point for OOS holdout."""
-        return 0.0
+    def _sharpe_from_pnl(pnls: List[float]) -> float:
+        """Daily-Sharpe-like ratio (mean / std) for a small PnL series."""
+        if not pnls or len(pnls) < 2:
+            return 0.0
+        import numpy as _np
+        arr = _np.asarray(pnls, dtype=float)
+        if arr.size < 2:
+            return 0.0
+        mean = float(arr.mean())
+        std = float(arr.std()) + 1e-8
+        return mean / std
+
+    def _gate_walk_forward(self, hyp: Dict[str, Any]) -> float:
+        """Phase 27 Item 2 (REAL): 3-fold walk-forward over the last 30 days.
+
+        Splits the last 30 days of resolved trades into 3 contiguous folds
+        (10d each), filters each fold by the hypothesis, computes a Sharpe-
+        like ratio per fold, and averages. Returns 0.0 when there's not
+        enough data to compute three folds.
+        """
+        try:
+            conn = get_db_connection(AI_DB_PATH)
+            rows = conn.execute("""
+                SELECT timestamp, pair, signal_type, confidence, regime,
+                       outcome_pnl
+                FROM ai_decisions
+                WHERE outcome_pnl IS NOT NULL
+                  AND timestamp > datetime('now', '-30 days')
+                ORDER BY timestamp ASC
+            """).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[Researcher:WF] db: {e}")
+            return 0.0
+        if len(rows) < 9:  # need at least 3 per fold
+            return 0.0
+        rows_dicts = [dict(r) for r in rows]
+        third = len(rows_dicts) // 3
+        folds = [rows_dicts[:third], rows_dicts[third:2 * third],
+                 rows_dicts[2 * third:]]
+        sharpes = []
+        for fold in folds:
+            filtered = self._filter_trades_by_hypothesis(fold, hyp)
+            if not filtered:
+                continue
+            pnls = [float(r["outcome_pnl"] or 0.0) for r in filtered]
+            sharpes.append(self._sharpe_from_pnl(pnls))
+        if not sharpes:
+            return 0.0
+        return float(sum(sharpes) / len(sharpes))
+
+    def _gate_oos(self, hyp: Dict[str, Any]) -> float:
+        """Phase 27 Item 2 (REAL): out-of-sample = last 7 days (the LLM only
+        sees the prior 14d in `_gather_context`, so the last 7d is genuine OOS).
+        Returns Sharpe-like ratio of trades that match the hypothesis filter
+        in this OOS window.
+        """
+        try:
+            conn = get_db_connection(AI_DB_PATH)
+            rows = conn.execute("""
+                SELECT timestamp, pair, signal_type, confidence, regime,
+                       outcome_pnl
+                FROM ai_decisions
+                WHERE outcome_pnl IS NOT NULL
+                  AND timestamp > datetime('now', '-7 days')
+                ORDER BY timestamp ASC
+            """).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[Researcher:OOS] db: {e}")
+            return 0.0
+        if not rows:
+            return 0.0
+        filtered = self._filter_trades_by_hypothesis(
+            [dict(r) for r in rows], hyp
+        )
+        if not filtered:
+            return 0.0
+        pnls = [float(r["outcome_pnl"] or 0.0) for r in filtered]
+        return self._sharpe_from_pnl(pnls)
 
     # ─── Persistence ───────────────────────────────────────────────────
     def _persist(self, hyp: Dict[str, Any], is_sharpe: float,
