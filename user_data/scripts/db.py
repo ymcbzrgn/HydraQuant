@@ -395,7 +395,18 @@ def init_db():
             cortisol REAL DEFAULT 1.0, dopamine REAL DEFAULT 1.0,
             serotonin REAL DEFAULT 1.0, adrenaline REAL DEFAULT 1.0,
             market_stress REAL DEFAULT 0.0, portfolio_health REAL DEFAULT 0.5,
-            info_quality REAL DEFAULT 0.5, updated_at TEXT)''')
+            info_quality REAL DEFAULT 0.5, updated_at TEXT,
+            trough_cortisol REAL DEFAULT 1.0, trough_cortisol_time TEXT)''')
+        # Phase 27 Fix 7: idempotent ALTER for existing deployments where hormone_state
+        # predates the hysteresis columns. SQLite errors on duplicate ADD COLUMN; catch.
+        for _sql in (
+            "ALTER TABLE hormone_state ADD COLUMN trough_cortisol REAL DEFAULT 1.0",
+            "ALTER TABLE hormone_state ADD COLUMN trough_cortisol_time TEXT",
+        ):
+            try:
+                c.execute(_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
         c.execute('''CREATE TABLE IF NOT EXISTS hippocampus_episodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,6 +487,27 @@ def init_db():
             alpha REAL DEFAULT 1.0, beta_param REAL DEFAULT 1.0,
             kelly_fraction REAL DEFAULT 0.01, trade_count INTEGER DEFAULT 0,
             updated_at TEXT, UNIQUE(pair, regime))''')
+
+        # Phase 27 Task 1 (E1 Ajani): Per-pair Bayesian Kelly — Prensip 0.
+        # Replaces legacy single-row bayesian_kelly. Every (pair, regime) has
+        # its own Beta posterior + vol drag + vol-of-vol inputs for the
+        # 7-step sizing pipeline in position_sizer.py.
+        c.execute('''CREATE TABLE IF NOT EXISTS bayesian_kelly_per_pair (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            regime TEXT NOT NULL DEFAULT '_global',
+            alpha REAL DEFAULT 2.0,
+            beta_param REAL DEFAULT 2.0,
+            avg_win REAL DEFAULT 0.0,
+            avg_loss REAL DEFAULT 0.0,
+            n_trades INTEGER DEFAULT 0,
+            annual_volatility REAL,
+            vol_of_vol REAL,
+            last_sharpe REAL,
+            updated_at TEXT,
+            UNIQUE(pair, regime))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_per_pair
+            ON bayesian_kelly_per_pair(pair, regime)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
             text_hash TEXT PRIMARY KEY, binary_vec BLOB,

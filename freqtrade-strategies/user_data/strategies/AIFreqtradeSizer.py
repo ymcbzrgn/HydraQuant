@@ -1127,8 +1127,12 @@ class AIFreqtradeSizer(IStrategy):
             except Exception as e:
                 logger.debug(f"Confidence calibration skipped: {e}")
             
-            # Görev 1 Fix: Use PositionSizer to calculate fraction, which respects BayesianKelly and Autonomy logic
-            fraction = self._position_sizer.calculate_stake_fraction(confidence)
+            # Görev 1 Fix: Use PositionSizer to calculate fraction, which respects BayesianKelly and Autonomy logic.
+            # Phase 27 Task 1: pair is REQUIRED so per-pair Kelly (not the old global Kelly) drives sizing.
+            regime_for_kelly = ai_decision.get("regime") or "_global"
+            fraction = self._position_sizer.calculate_stake_fraction(
+                confidence, pair=pair, regime=regime_for_kelly
+            )
 
             # Let it scale down to "dust" sizes if confidence is terribly low
             final_stake = final_stake * fraction
@@ -1393,12 +1397,18 @@ class AIFreqtradeSizer(IStrategy):
 
         logger.info(f"[Trade Exit] {pair} reason={exit_reason}")
 
-        # Phase 3.5.2: Bayesian Kelly update — learn from this trade
+        # Phase 3.5.2 + Phase 27 Task 1: Per-pair Bayesian Kelly update on trade exit.
         try:
             pnl_pct = trade.calc_profit_ratio(rate) if hasattr(trade, 'calc_profit_ratio') else 0.0
             won = pnl_pct > 0
-            self._bayesian_kelly.update(won=won, pnl_pct=pnl_pct)
-            logger.info(f"[BayesianKelly] Updated: {'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → win_p={self._bayesian_kelly.win_probability():.3f} kelly_f={self._bayesian_kelly.kelly_fraction():.4f}")
+            # Pair is mandatory so each market learns its own Beta posterior (Prensip 0).
+            self._bayesian_kelly.update(won=won, pnl_pct=pnl_pct, pair=pair)
+            wp = self._bayesian_kelly.win_probability(pair=pair)
+            kf = self._bayesian_kelly.kelly_fraction(pair=pair)
+            logger.info(
+                f"[BayesianKelly:{pair}] Updated: {'WIN' if won else 'LOSS'} "
+                f"pnl={pnl_pct:.4f} → win_p={wp:.3f} kelly_f={kf:.4f}"
+            )
         except Exception as e:
             logger.warning(f"[BayesianKelly] Update failed: {e}")
 

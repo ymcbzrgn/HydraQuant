@@ -587,6 +587,13 @@ class Hormones:
         # Phase 25: Allostasis — trend tracking for anticipation
         self._fng_history: List[int] = []
         self._drawdown_history: List[float] = []
+        # Phase 27 Fix 7 (H2 Ajani): Cortisol hysteresis — mirrors Amygdala.peak_fear.
+        # Without this, cortisol is recomputed statelessly on every tick and the
+        # stress of yesterday's big loss is forgotten within one hour.
+        # NOTE: `cortisol` is INVERTED (1.0=calm, lower=stressed) in compute(),
+        # so "peak cortisol memory" means the LOW we hit — we clamp downward.
+        self._trough_cortisol: float = 1.0
+        self._trough_cortisol_time: Optional[datetime] = None
 
     def compute(self, fng: Optional[int] = None, drawdown_pct: float = 0.0,
                 consec_wins: int = 0, consec_losses: int = 0,
@@ -617,6 +624,24 @@ class Hormones:
         # Phase 25: ALLOSTASIS — anticipate based on trends
         anticipation = self._compute_allostasis(fng, drawdown_pct)
         self.cortisol = max(0.5, min(1.0, self.cortisol + anticipation.get("cortisol_adj", 0)))
+
+        # Phase 27 Fix 7 (H2): cortisol hysteresis — 24h half-life decay from trough.
+        # Convention: LOW cortisol = STRESSED (code-wide). We track the trough
+        # (most-stressed point), then let "distance from calm" (1.0 − trough)
+        # decay toward zero. Effective cortisol = min(raw, decayed_trough) so
+        # yesterday's big loss still weighs on today's sizing (via hormonal_scalar).
+        raw_cortisol = self.cortisol
+        if self._trough_cortisol_time is not None and raw_cortisol > self._trough_cortisol:
+            hours = (datetime.now(tz=timezone.utc) - self._trough_cortisol_time).total_seconds() / 3600.0
+            decayed_trough = 1.0 - (1.0 - self._trough_cortisol) * (0.5 ** (hours / 24.0))
+            self.cortisol = max(0.5, min(raw_cortisol, decayed_trough))
+            logger.debug(
+                f"[Hormones] cortisol={self.cortisol:.3f} (peak_decay raw={raw_cortisol:.3f} "
+                f"trough={self._trough_cortisol:.3f} hours={hours:.1f})"
+            )
+        if self.cortisol <= self._trough_cortisol:
+            self._trough_cortisol = self.cortisol
+            self._trough_cortisol_time = datetime.now(tz=timezone.utc)
 
         return self.as_dict()
 
@@ -1540,6 +1565,10 @@ class NeuralOrganism:
         self._load_or_seed()
         self.immunity.load_from_db()
         self._load_cerebellum()
+        # Phase 27 Fix 7: restore hormonal + fear state so hysteresis memory
+        # survives bot restarts (yesterday's big loss still weighs on today).
+        self._load_hormones()
+        self._load_amygdala()
         logger.info(f"[NeuralOrganism] Initialized: {len(self._neurons)} neurons, "
                     f"{len(PARAM_REGISTRY)} params × {len(REGIMES)} regimes, 14 subsystems")
 
@@ -1995,15 +2024,69 @@ class NeuralOrganism:
         try:
             with self._get_conn() as conn:
                 h = self.hormones
+                # Phase 27 Fix 7: persist trough_cortisol + trough_cortisol_time so
+                # hysteresis survives bot restarts (otherwise yesterday's stress is
+                # forgotten immediately after a restart).
                 conn.execute(
                     "UPDATE hormone_state SET cortisol=?, dopamine=?, serotonin=?, adrenaline=?, "
-                    "market_stress=?, portfolio_health=?, info_quality=?, updated_at=? WHERE id=1",
+                    "market_stress=?, portfolio_health=?, info_quality=?, updated_at=?, "
+                    "trough_cortisol=?, trough_cortisol_time=? WHERE id=1",
                     (h.cortisol, h.dopamine, h.serotonin, h.adrenaline,
                      h._stress, h._health, h._info_q,
-                     datetime.now(tz=timezone.utc).isoformat()))
+                     datetime.now(tz=timezone.utc).isoformat(),
+                     h._trough_cortisol,
+                     h._trough_cortisol_time.isoformat() if h._trough_cortisol_time else None))
                 conn.commit()
         except Exception as e:
             logger.debug(f"[NeuralOrganism:Hormones] Persist failed: {e}")
+
+    def _load_hormones(self):
+        """Restore hormonal state (incl. Phase 27 Fix 7 hysteresis trough) on startup.
+
+        Without this the trough_cortisol / trough_cortisol_time we persist every
+        tick would be RE-INITIALIZED to (1.0, None) on every bot restart, and the
+        24h memory of yesterday's loss would effectively never persist beyond a
+        single process lifetime.
+        """
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT cortisol, dopamine, serotonin, adrenaline, "
+                    "market_stress, portfolio_health, info_quality, "
+                    "trough_cortisol, trough_cortisol_time "
+                    "FROM hormone_state WHERE id=1"
+                ).fetchone()
+            if row is None:
+                return
+            h = self.hormones
+            h.cortisol = float(row["cortisol"] or 1.0)
+            h.dopamine = float(row["dopamine"] or 1.0)
+            h.serotonin = float(row["serotonin"] or 1.0)
+            h.adrenaline = float(row["adrenaline"] or 1.0)
+            h._stress = float(row["market_stress"] or 0.0)
+            h._health = float(row["portfolio_health"] or 0.5)
+            h._info_q = float(row["info_quality"] or 0.5)
+            # Hysteresis state (columns may be absent on legacy rows, but the
+            # idempotent ALTER in db.py guarantees they exist post-migration.)
+            trough_val = row["trough_cortisol"] if "trough_cortisol" in row.keys() else None
+            h._trough_cortisol = float(trough_val) if trough_val is not None else 1.0
+            trough_ts = row["trough_cortisol_time"] if "trough_cortisol_time" in row.keys() else None
+            if trough_ts:
+                try:
+                    parsed = datetime.fromisoformat(trough_ts.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    h._trough_cortisol_time = parsed
+                except (ValueError, TypeError):
+                    h._trough_cortisol_time = None
+            else:
+                h._trough_cortisol_time = None
+            logger.info(
+                f"[NeuralOrganism:Hormones] Restored cortisol={h.cortisol:.3f}, "
+                f"trough={h._trough_cortisol:.3f}"
+            )
+        except Exception as e:
+            logger.debug(f"[NeuralOrganism:Hormones] Load failed: {e}")
 
     def _persist_amygdala(self):
         try:
@@ -2018,6 +2101,39 @@ class NeuralOrganism:
                 conn.commit()
         except Exception as e:
             logger.debug(f"[NeuralOrganism:Amygdala] Persist failed: {e}")
+
+    def _load_amygdala(self):
+        """Restore fear state on startup so 24h half-life decay is uninterrupted
+        across bot restarts (mirrors _load_hormones — same bug, same fix)."""
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT fear_level, peak_fear, peak_time, tier "
+                    "FROM amygdala_state WHERE id=1"
+                ).fetchone()
+            if row is None:
+                return
+            a = self.amygdala
+            a.fear_level = float(row["fear_level"] or 0.0)
+            a.peak_fear = float(row["peak_fear"] or 0.0)
+            a.tier = row["tier"] or "normal"
+            peak_ts = row["peak_time"]
+            if peak_ts:
+                try:
+                    parsed = datetime.fromisoformat(peak_ts.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    a.peak_time = parsed
+                except (ValueError, TypeError):
+                    a.peak_time = None
+            else:
+                a.peak_time = None
+            logger.info(
+                f"[NeuralOrganism:Amygdala] Restored fear={a.fear_level:.3f}, "
+                f"peak={a.peak_fear:.3f}, tier={a.tier}"
+            )
+        except Exception as e:
+            logger.debug(f"[NeuralOrganism:Amygdala] Load failed: {e}")
 
     def _write_audit(self, pair, pnl, hormones_dict, fear_tier, overrides, phase):
         try:
