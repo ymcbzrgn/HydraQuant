@@ -68,6 +68,31 @@ RPM_LIMITS = {
     "mistral-large": 2, "mistral-small": 2,
 }
 
+# Phase 27 Task 18 (G5 Ajani): daily request budgets. Free tier ceilings per
+# provider — Gemini 250 RPD/key, Groq 14 400 RPD, Mistral generous. We cap
+# actual usage at 80% of RPD so spikes don't blow the window entirely.
+RPD_LIMITS = {
+    "gemini-2.5-flash-lite": 1000, "gemini-3.1-flash-lite": 1000,
+    "gemini-2.5-flash": 250,       "gemini-3-flash": 250,       "gemini-3.1-flash": 250,
+    "gemini-2.5-pro": 100,         "gemini-3.1-pro": 100,
+    "llama-3.3-70b-versatile": 14400, "llama-3.1-8b-instant": 14400,
+    "qwen/qwen3-32b": 1000, "meta-llama/llama-4-scout": 1000,
+    "moonshotai/kimi-k2": 1000, "openai/gpt-oss-20b": 1000,
+    "openai/gpt-oss-120b": 1000,
+    "qwen-3-235b": 1700, "llama3.1-8b": 14400,
+    "Meta-Llama-3.3-70B": 14400, "Meta-Llama-3.1-8B": 14400,
+    "mistral-large": 86000, "mistral-small": 86000,
+}
+
+
+def _lookup_rpd(model_name: str) -> int:
+    """Substring match RPD ceiling. 500/day default for unknown models."""
+    for prefix, limit in RPD_LIMITS.items():
+        if prefix in model_name:
+            return limit
+    return 500
+
+
 def _lookup_rpm(model_name: str) -> int:
     """Substring match RPM limit. Default 10 for unknowns."""
     for prefix, limit in RPM_LIMITS.items():
@@ -113,6 +138,40 @@ def classify_error(e: Exception) -> str:
     return "other"
 
 
+# ─── DailyQuota ──────────────────────────────────────────────────────
+# Phase 27 Task 18: per-slot daily request budget. Each call stamps a UTC
+# date bucket; reset automatically on the first call of a new day.
+@dataclass
+class DailyQuota:
+    rpd_limit: int = 500
+    _bucket_date: str = ""
+    _calls_today: int = 0
+
+    def _today(self) -> str:
+        from datetime import datetime as _dt, timezone as _tz
+        return _dt.now(tz=_tz.utc).strftime("%Y-%m-%d")
+
+    def stamp(self) -> None:
+        today = self._today()
+        if today != self._bucket_date:
+            self._bucket_date = today
+            self._calls_today = 0
+        self._calls_today += 1
+
+    def is_within_budget(self, reserve_pct: float = 0.2) -> bool:
+        today = self._today()
+        if today != self._bucket_date:
+            return True  # day rolled over, quota resets on next stamp
+        ceiling = int(self.rpd_limit * (1 - reserve_pct))
+        return self._calls_today < ceiling
+
+    def remaining(self) -> int:
+        today = self._today()
+        if today != self._bucket_date:
+            return self.rpd_limit
+        return max(0, self.rpd_limit - self._calls_today)
+
+
 # ─── ModelSlot ───────────────────────────────────────────────────────
 @dataclass
 class ModelSlot:
@@ -133,6 +192,13 @@ class ModelSlot:
     quality_pass_count: int = 0
     disabled: bool = False
     max_context: int = 1_000_000
+    # Phase 27 Task 18 additions
+    rpd_limit: int = 500
+    daily_quota: Optional[DailyQuota] = None
+
+    def __post_init__(self):
+        if self.daily_quota is None:
+            self.daily_quota = DailyQuota(rpd_limit=self.rpd_limit)
 
     def sample(self, exploit: bool = False) -> float:
         """Thompson Sampling draw. exploit=True returns mean (no randomness)."""
@@ -145,6 +211,9 @@ class ModelSlot:
             return False
         if now < self.penalty_until:
             return False
+        # Phase 27 Task 18: enforce daily budget with 20% reserve headroom
+        if not self.daily_quota.is_within_budget(reserve_pct=0.2):
+            return False
         return self._rpm_ok(now)
 
     def _rpm_ok(self, now: float) -> bool:
@@ -154,20 +223,42 @@ class ModelSlot:
         return recent < self.rpm_limit * 0.8
 
     def record_success(self, quality: bool = True):
-        self.alpha += 1.0 if quality else 0.5
+        # Phase 27 Task 18 (G5, Sutton-Barto style): discounted Thompson Sampling.
+        # Phase 26 used hourly batch `alpha *= 0.99` which made recent calls
+        # invisible once total_calls grew large. Per-call discount `alpha =
+        # 0.997·alpha + reward` keeps the effective window to ~230 calls so
+        # the sampler tracks drift in quality across the day.
+        gamma = 0.997
+        reward = 1.0 if quality else 0.5
+        self.alpha = gamma * self.alpha + reward
+        self.alpha = max(self.alpha, 0.01)
         self.consecutive_fails = 0
         self.backoff_level = 0
         self.total_calls += 1
         self.success_count += 1
         if quality:
             self.quality_pass_count += 1
-        self.rpm_window.append(time.time())
+        now_ts = time.time()
+        self.rpm_window.append(now_ts)
+        self.daily_quota.stamp()
 
     def record_failure(self, error_type: str):
-        self.beta_param += 1.0
+        # Phase 27 Task 18: same discounted update for the failure arm.
+        gamma = 0.997
+        self.beta_param = gamma * self.beta_param + 1.0
+        self.beta_param = max(self.beta_param, 0.01)
         self.total_calls += 1
         self.consecutive_fails += 1
         self.rpm_window.append(time.time())
+        # Phase 27 audit fix: DO NOT stamp the daily quota on rate-limit errors.
+        # A 429 means the provider REJECTED the request — the call never
+        # actually consumed a daily-quota slot. Stamping here would double-
+        # count: RPM penalty cools the slot off the minute, but the phantom
+        # RPD stamp would make us think we spent a daily credit we didn't.
+        # Other error types (timeout, context_overflow, auth) DID consume
+        # bandwidth so they still stamp.
+        if error_type != "rate_limit":
+            self.daily_quota.stamp()
 
         if error_type == "auth":
             self.disabled = True
@@ -351,7 +442,8 @@ class LLMRouter:
                     self._provider_map[id(m)] = "gemini"
                     self.slots.append(ModelSlot(
                         provider="gemini", model_name=mn, model_obj=m, api_key=key,
-                        rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("gemini", mn)))
+                        rpm_limit=_lookup_rpm(mn), rpd_limit=_lookup_rpd(mn),
+                        alpha=_cold_start_alpha("gemini", mn)))
                 self.gemini_models_by_key[key] = models_for_key
             logger.info(f"Loaded {len(self.gemini_keys)} Gemini keys × {len(gemini_model_names)} models. "
                         f"Models: {gemini_model_names}")
@@ -370,7 +462,8 @@ class LLMRouter:
                 self._provider_map[id(m)] = "groq"
                 self.slots.append(ModelSlot(
                     provider="groq", model_name=mn, model_obj=m, api_key=self.groq_key,
-                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("groq", mn)))
+                    rpm_limit=_lookup_rpm(mn), rpd_limit=_lookup_rpd(mn),
+                    alpha=_cold_start_alpha("groq", mn)))
             self.fallback_1 = self.groq_models[0]
             logger.info(f"Loaded {len(self.groq_models)} Groq models")
 
@@ -386,7 +479,8 @@ class LLMRouter:
                 ctx = 8192 if "8b" in mn else 32768
                 self.slots.append(ModelSlot(
                     provider="cerebras", model_name=mn, model_obj=m, api_key=self.cerebras_key,
-                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("cerebras", mn), max_context=ctx))
+                    rpm_limit=_lookup_rpm(mn), rpd_limit=_lookup_rpd(mn),
+                    alpha=_cold_start_alpha("cerebras", mn), max_context=ctx))
             logger.info(f"Loaded {len(self.cerebras_models)} Cerebras models")
 
         # DeepSeek
@@ -414,7 +508,8 @@ class LLMRouter:
                 self._provider_map[id(m)] = "sambanova"
                 self.slots.append(ModelSlot(
                     provider="sambanova", model_name=mn, model_obj=m, api_key=self.sambanova_key,
-                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("sambanova", mn)))
+                    rpm_limit=_lookup_rpm(mn), rpd_limit=_lookup_rpd(mn),
+                    alpha=_cold_start_alpha("sambanova", mn)))
             logger.info(f"Loaded {len(self.sambanova_models)} SambaNova models")
 
         # Mistral
@@ -428,7 +523,8 @@ class LLMRouter:
                 self._provider_map[id(m)] = "mistral"
                 self.slots.append(ModelSlot(
                     provider="mistral", model_name=mn, model_obj=m, api_key=self.mistral_key,
-                    rpm_limit=_lookup_rpm(mn), alpha=_cold_start_alpha("mistral", mn)))
+                    rpm_limit=_lookup_rpm(mn), rpd_limit=_lookup_rpd(mn),
+                    alpha=_cold_start_alpha("mistral", mn)))
             logger.info(f"Loaded {len(self.mistral_models)} Mistral models")
 
         # OpenRouter
@@ -577,12 +673,17 @@ class LLMRouter:
         """Build ranked candidate list using Thompson Sampling."""
         now = time.time()
 
-        # Hourly decay: adapt to changing conditions
+        # Idle-slot decay: per-call discounted TS (record_success/failure) already
+        # shrinks α/β by γ=0.997 on every invocation. Slots that haven't been
+        # called in the last hour get this gentle extra pull toward the prior
+        # (0.995) so they don't retain stale high scores forever. Kept much
+        # softer than the Phase 26 0.99 to avoid double-decay on active slots
+        # that DID fire in the window.
         if now - self._last_decay > 3600:
             with self._state_lock:
                 for s in self.slots:
-                    s.alpha = max(s.alpha * 0.99, 1.0)
-                    s.beta_param = max(s.beta_param * 0.99, 1.0)
+                    s.alpha = max(s.alpha * 0.995, 1.0)
+                    s.beta_param = max(s.beta_param * 0.995, 1.0)
                 self._last_decay = now
 
         # Filter to available slots
@@ -739,6 +840,137 @@ class LLMRouter:
         return await loop.run_in_executor(
             None, lambda: self.invoke(messages, temperature=temperature,
                                       max_wall_time=max_wall_time, priority=priority, **kwargs))
+
+    # ── Phase 27 Task 18: query-type heuristic classifier ────────────────
+    @staticmethod
+    def classify_query(messages: List[Any]) -> str:
+        """Route short / code / analysis / default queries to different models.
+
+        Returns one of `simple`, `code`, `complex`, `medium` — callers can map
+        this to an appropriate `priority` so the Thompson sampler is biased
+        toward a model whose historical reward matches that query shape.
+        """
+        text = " ".join(str(getattr(m, "content", "")) for m in messages)
+        length = len(text)
+        lower = text.lower()
+        has_code = ("```" in text) or ("def " in text) or ("```python" in text)
+        analysis_keywords = ("why", "explain", "analysis", "analyze",
+                              "because", "reasoning", "debate", "compare")
+        if has_code:
+            return "code"
+        if length < 500:
+            return "simple"
+        if any(k in lower for k in analysis_keywords) or length > 4000:
+            return "complex"
+        return "medium"
+
+    # ── Phase 27 Task 17: cross-provider LLM ensemble ────────────────────
+    async def ensemble_invoke(self, messages: List[Any],
+                              n_judges: int = 3,
+                              temperature: Optional[float] = None,
+                              **kwargs) -> Dict[str, Any]:
+        """Invoke `n_judges` DISTINCT providers in parallel for disagreement-
+        aware fusion. Useful for RLAIF / judge-style consumers who want a
+        worst-case-robust signal instead of a single lucky draw.
+
+        Returns dict with:
+          `responses`: list of raw content strings (one per provider)
+          `providers`: matching provider names
+          `weights`:   Beta-mean weights used for fusion
+          `cdr`:       Conflict Detection Rate in [0, 1] — higher = less
+                       agreement on the parsed signal direction
+        """
+        import asyncio as _asyncio
+
+        now = time.time()
+        # Group eligible slots by provider and take the freshest per provider
+        per_provider: Dict[str, ModelSlot] = {}
+        for s in self.slots:
+            if not s.is_available(now):
+                continue
+            # Prefer higher Beta mean within provider
+            existing = per_provider.get(s.provider)
+            if existing is None:
+                per_provider[s.provider] = s
+                continue
+            if s.sample(exploit=True) > existing.sample(exploit=True):
+                per_provider[s.provider] = s
+        if not per_provider:
+            raise ValueError("ensemble_invoke: no providers available")
+
+        selected: List[ModelSlot] = list(per_provider.values())[:n_judges]
+        if not selected:
+            raise ValueError("ensemble_invoke: no slots selected")
+
+        loop = _asyncio.get_event_loop()
+
+        async def _one(slot: ModelSlot) -> Dict[str, Any]:
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._try_model(slot, messages, temperature, **kwargs),
+                )
+                resp_obj, error_type = response if isinstance(response, tuple) else (response, None)
+                if resp_obj is None:
+                    with self._state_lock:
+                        slot.record_failure(error_type or "other")
+                    return {"slot": slot, "content": None, "error": error_type}
+                content = str(getattr(resp_obj, "content", ""))
+                is_quality = len(content.strip()) > 20
+                with self._state_lock:
+                    slot.record_success(quality=is_quality)
+                return {"slot": slot, "content": content, "error": None}
+            except Exception as e:
+                with self._state_lock:
+                    slot.record_failure("other")
+                return {"slot": slot, "content": None, "error": str(e)}
+
+        results = await _asyncio.gather(*[_one(s) for s in selected])
+
+        responses = [r["content"] for r in results if r["content"]]
+        providers = [r["slot"].provider for r in results if r["content"]]
+        weights = [
+            (r["slot"].alpha / (r["slot"].alpha + r["slot"].beta_param))
+            for r in results if r["content"]
+        ]
+
+        # Conflict Detection Rate — inspect the first word of each response
+        # as a crude "direction" token. Consumers (RLAIF) typically structure
+        # the prompt so the first token is BULLISH/BEARISH/NEUTRAL.
+        directions = []
+        for content in responses:
+            head = content.strip().split()[:1]
+            if head:
+                tok = head[0].upper().strip(".,:;\"'")
+                if tok in ("BULLISH", "BEARISH", "NEUTRAL", "LONG", "SHORT"):
+                    directions.append(tok)
+        if directions:
+            unique = set(directions)
+            cdr = (len(unique) - 1) / max(len(directions) - 1, 1)
+        else:
+            cdr = 0.0
+
+        return {
+            "responses": responses,
+            "providers": providers,
+            "weights": weights,
+            "cdr": round(float(cdr), 3),
+            "n_success": len(responses),
+            "n_requested": len(selected),
+        }
+
+    def rpd_status(self) -> List[Dict[str, Any]]:
+        """Phase 27 Task 18: snapshot of per-slot daily quota usage."""
+        out = []
+        for s in self.slots:
+            out.append({
+                "slot_id": s.slot_id,
+                "rpd_limit": s.rpd_limit,
+                "remaining": s.daily_quota.remaining(),
+                "calls_today": s.rpd_limit - s.daily_quota.remaining(),
+                "within_budget": s.daily_quota.is_within_budget(),
+            })
+        return out
 
     # ── Public API ────────────────────────────────────────────────────
 
