@@ -48,6 +48,86 @@ ORGANISM_MODULES = [
 ]
 
 
+# Phase 27 Item 8: custom Lempel-Ziv complexity used for the PhiC (Effortful
+# Tononi-Christof Compression) approximation. ETC = LZ(combined sequence) −
+# Σ LZ(per-module sequence). The library `etcpy` doesn't ship for Python
+# 3.13 — this re-implementation is ~30 lines, license-free, and has the
+# numerical properties we need (monotone in pattern repetition).
+def _lz_complexity(seq: List[int]) -> int:
+    """Lempel-Ziv 1976 complexity: number of distinct substrings the LZ parser
+    needs to reproduce the sequence. Implemented with a sliding-window scan."""
+    if not seq:
+        return 0
+    n = len(seq)
+    i, k, l = 0, 1, 1
+    c = 1
+    k_max = 1
+    while True:
+        if k + l > n:
+            c += 1
+            break
+        # Extend match if possible
+        if seq[i + k - 1] == seq[k + l - 1]:
+            k += 1
+            if i + k > n - 1:
+                c += 1
+                break
+        else:
+            if k > k_max:
+                k_max = k
+            i += 1
+            if i == l:
+                c += 1
+                l += k_max
+                if l + 1 > n:
+                    break
+                i = 0
+                k = 1
+                k_max = 1
+            else:
+                k = 1
+    return c
+
+
+def _quantize(values: List[float], n_bins: int = 8) -> List[int]:
+    """Quantise a continuous activation series into integer tokens for LZ."""
+    if not values:
+        return []
+    arr = np.asarray(values, dtype=float)
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi - lo < 1e-12:
+        return [0] * len(values)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    return [int(min(n_bins - 1, np.searchsorted(edges, v, side="right") - 1))
+            for v in values]
+
+
+def compute_etc(module_activations: Dict[str, List[float]]) -> float:
+    """ETC / PhiC approximation: irreducible-integration measure.
+
+    PhiC = LZ(joint) − Σ LZ(per-module). Normalised to [0, 1] so dashboards
+    can show it next to the other Φ components.
+    """
+    if not module_activations:
+        return 0.0
+    quantised = {k: _quantize(v) for k, v in module_activations.items() if v}
+    if not quantised:
+        return 0.0
+    combined: List[int] = []
+    base_offset = 0
+    parts_lz = 0
+    for tokens in quantised.values():
+        # Offset per module so cross-module patterns are distinguishable
+        # from intra-module patterns when concatenated.
+        combined.extend(t + base_offset for t in tokens)
+        base_offset += 8
+        parts_lz += _lz_complexity(tokens)
+    whole_lz = _lz_complexity(combined)
+    if whole_lz <= 0:
+        return 0.0
+    return max(0.0, min(1.0, (whole_lz - parts_lz) / whole_lz))
+
+
 class PhiConsciousness:
     """Integrated Information Theory Φ metric for the trading organism."""
 

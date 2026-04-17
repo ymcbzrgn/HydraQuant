@@ -119,6 +119,42 @@ def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Op
             X_list.append(features)
             y_list.append(label)
 
+        # Phase 27 Item 13: sim2real noise augmentation. For every real
+        # training sample we ALSO push 2 randomised twins (slippage + fee +
+        # spread noise on the original PnL). Tripled training set teaches
+        # CatBoost to be robust to live execution friction. Best-effort:
+        # skip if sim2real isn't importable.
+        try:
+            from sim2real_pipeline import get_sim2real
+            sim2real = get_sim2real(seed=42)
+            sim2real.set_level(0.5)  # half-strength noise for augmentation
+            augmented_X: List = []
+            augmented_y: List = []
+            for row, base_features, base_label in zip(rows, list(X_list), list(y_list)):
+                base_pnl = float(row["outcome_pnl"] or 0.0)
+                for _ in range(2):
+                    noisy = sim2real.randomize_trade(
+                        {"profit_ratio": base_pnl / 100.0, "pair": row["pair"]}
+                    )
+                    new_pnl_pct = float(noisy.get("profit_ratio", base_pnl / 100.0)) * 100.0
+                    if new_pnl_pct > 0.5:
+                        new_label = 2
+                    elif new_pnl_pct < -0.5:
+                        new_label = 0
+                    else:
+                        new_label = 1
+                    augmented_X.append(base_features)
+                    augmented_y.append(new_label)
+            if augmented_X:
+                X_list.extend(augmented_X)
+                y_list.extend(augmented_y)
+                logger.info(
+                    f"[Sim2Real] augmented {len(augmented_X)} noisy twins "
+                    f"(total samples now {len(X_list)})"
+                )
+        except Exception as e:
+            logger.debug(f"[Sim2Real] augmentation skipped: {e}")
+
         return np.array(X_list), np.array(y_list), feature_names
 
     finally:

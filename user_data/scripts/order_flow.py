@@ -95,6 +95,10 @@ class HawkesIntensityTracker:
         self._intensity = self.mu
         self._last_t: Optional[float] = None
         self._last_refit: Optional[float] = None
+        # Phase 27 Item 7: rolling event timestamps for the custom MLE refit.
+        # 1024 events ≈ 17 hours of typical 1/min flow — enough to fit α,β,μ
+        # without unbounded memory growth.
+        self._event_times: deque = deque(maxlen=1024)
 
     def register_event(self, ts: Optional[float] = None) -> float:
         """Record an event and return the new intensity λ(t).
@@ -107,6 +111,7 @@ class HawkesIntensityTracker:
             decayed = (self._intensity - self.mu) * math.exp(-self.beta * dt)
             self._intensity = self.mu + decayed + self.alpha
         self._last_t = now
+        self._event_times.append(now)
         return self._intensity
 
     def current_intensity(self, ts: Optional[float] = None) -> float:
@@ -541,37 +546,71 @@ class OrderFlowAnalyzer:
         return max(mult, 0.2)
 
     def refit_hawkes_mle(self) -> int:
-        """Phase 27 Task 10: weekly/hourly MLE refit of Hawkes (α, β) per pair.
+        """Phase 27 Task 10 / Item 7: custom Hawkes-Exp MLE refit per pair.
 
-        Uses the `tick` library when available — refit is a no-op otherwise
-        (tracker keeps its current parameters, O(1) updates continue). Returns
-        the number of pairs whose parameters were updated.
+        Replaces the `tick` library dependency with a scipy.optimize.minimize
+        negative-log-likelihood pass. For univariate Hawkes-Exp the NLL on
+        an event sequence t_1 < ... < t_n in [0, T] is:
+
+           NLL(μ,α,β) = ∫ λ(s) ds  −  Σ log λ(t_i)
+                     = μT + α/β · Σ (1 − exp(−β(T−t_i)))
+                       −  Σ log(μ + α · A_i)
+
+        where A_i = Σ_{j<i} exp(−β(t_i − t_j)) is computed in O(n) recursively.
+
+        Each tracker maintains a rolling deque of event timestamps in
+        `_event_times` (added below); MLE only fires when ≥30 events accumulate.
         """
-        if not _TICK_AVAILABLE:
-            return 0
+        from scipy import optimize as _optim
+        import math as _math
+
         updated = 0
-        try:
-            from tick.hawkes import HawkesExpKern  # type: ignore
-        except Exception:
-            return 0
         for pair, tracker in self._hawkes.items():
+            events = list(getattr(tracker, "_event_times", []) or [])
+            if len(events) < 30:
+                continue
+            # Normalise so t_0 = 0 (numerical stability).
+            t0 = events[0]
+            ev = [t - t0 for t in events]
+            T = ev[-1] + 1e-6
+
+            def _nll(params):
+                mu, alpha, beta = params
+                if mu <= 0 or alpha < 0 or beta <= 0 or alpha >= 0.99 * beta:
+                    return 1e9
+                # Σ log λ(t_i) — O(n) recursion: A_i = exp(−β·dt)·(A_{i-1}+1)
+                A_prev = 0.0
+                log_sum = 0.0
+                for i in range(len(ev)):
+                    if i == 0:
+                        A_i = 0.0
+                    else:
+                        dt = ev[i] - ev[i - 1]
+                        A_i = _math.exp(-beta * dt) * (A_prev + 1.0)
+                    lam = mu + alpha * A_i
+                    if lam <= 0:
+                        return 1e9
+                    log_sum += _math.log(lam)
+                    A_prev = A_i
+                # Compensator integral
+                integ = mu * T + (alpha / beta) * sum(
+                    1.0 - _math.exp(-beta * (T - t)) for t in ev
+                )
+                return integ - log_sum
+
             try:
-                # Need event timestamps — we only keep intensity + last_t, so
-                # the real fit would need a rolling event log. For now, skip
-                # pairs without history hooks; this is the integration point
-                # for a dedicated events buffer in Sprint 3B.
-                if tracker._last_t is None:
-                    continue
-                # Placeholder: reuse current params as the "fitted" values so
-                # the scheduler callback reports progress. When the event log
-                # is wired in, replace with:
-                #   learner = HawkesExpKern(decays=[tracker.beta])
-                #   learner.fit(events_array)
-                #   tracker.set_params(learner.adjacency[0][0], tracker.beta)
-                tracker.set_params(tracker.alpha, tracker.beta, tracker.mu)
-                updated += 1
+                x0 = [max(tracker.mu, 0.1), max(tracker.alpha, 0.1),
+                      max(tracker.beta, 1.0)]
+                bounds = [(1e-3, 100.0), (0.0, 10.0), (1e-2, 100.0)]
+                res = _optim.minimize(_nll, x0=x0, method="L-BFGS-B",
+                                       bounds=bounds, options={"maxiter": 50})
+                if res.success:
+                    mu_hat, alpha_hat, beta_hat = res.x
+                    tracker.set_params(alpha=alpha_hat, beta=beta_hat,
+                                        mu=mu_hat)
+                    updated += 1
             except Exception as e:
-                logger.debug(f"[Hawkes:MLE] refit {pair} skipped: {e}")
+                logger.debug(f"[Hawkes:MLE] {pair} optimise failed: {e}")
         return updated
 
     def publish_to_pheromone(self, result: Dict, pair: str):

@@ -313,6 +313,93 @@ class ExternalDataIntegrator:
 # Singleton
 _integrator_instance = None
 
+# Phase 27 Item 6: real Binance public data fetch. Binance publishes free
+# OHLCV CSV zips at https://data.binance.vision/ (no API key). We download a
+# single day for BTCUSDT 1h, unzip, parse, and feed through the triple-barrier
+# labeller into catboost_trainer. This is the minimum viable "real data fetch"
+# required by the audit — it can be expanded to N pairs / date ranges.
+
+def fetch_binance_ohlcv_public(symbol: str = "BTCUSDT",
+                                interval: str = "1h",
+                                date: Optional[str] = None) -> Optional[str]:
+    """Download one day of Binance klines CSV for `symbol` at `interval`.
+
+    Returns the local CSV path or None on failure. Cached under `data/binance/`.
+    """
+    import httpx
+    import zipfile
+    import io
+    from datetime import datetime as _dt, timedelta as _td
+
+    if date is None:
+        # Yesterday UTC so the archive is guaranteed to exist.
+        date = (_dt.utcnow() - _td(days=1)).strftime("%Y-%m-%d")
+
+    out_dir = os.path.join(DATA_DIR, "binance", symbol)
+    os.makedirs(out_dir, exist_ok=True)
+    out_csv = os.path.join(out_dir, f"{symbol}-{interval}-{date}.csv")
+    if os.path.exists(out_csv):
+        return out_csv
+
+    url = (f"https://data.binance.vision/data/spot/daily/klines/"
+           f"{symbol}/{interval}/{symbol}-{interval}-{date}.zip")
+    try:
+        resp = httpx.get(url, timeout=30.0)
+        if resp.status_code != 200:
+            logger.info(f"[ExtData] Binance archive {date} not yet published (HTTP {resp.status_code})")
+            return None
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            names = zf.namelist()
+            if not names:
+                return None
+            with zf.open(names[0]) as csvfile:
+                data = csvfile.read().decode("utf-8")
+        # Prepend header (Binance CSVs are header-less).
+        header = ("open_time,open,high,low,close,volume,close_time,"
+                  "quote_asset_volume,trades,taker_buy_base,"
+                  "taker_buy_quote,ignore\n")
+        with open(out_csv, "w") as f:
+            f.write(header + data)
+        logger.info(f"[ExtData] Downloaded Binance {symbol} {interval} {date} → {out_csv}")
+        return out_csv
+    except Exception as e:
+        logger.warning(f"[ExtData] Binance fetch failed: {e}")
+        return None
+
+
+def scheduled_external_fetch() -> Dict:
+    """Phase 27 Item 6: scheduler entrypoint for monthly external data fetch.
+
+    Pulls yesterday's BTCUSDT 1h klines from Binance public data, runs the
+    triple-barrier labeller over them, and feeds the labelled samples into
+    catboost_trainer via the existing BacktestLabelGenerator pipeline. This
+    gives the CatBoost v2 retrain job a supplemental data source that's
+    completely independent of our own live trades.
+    """
+    init_db()
+    csv_path = fetch_binance_ohlcv_public("BTCUSDT", "1h")
+    if csv_path is None:
+        return {"status": "no_data", "reason": "Binance archive unavailable"}
+    integ = get_integrator()
+    n_samples = integ.integrate_ohlcv_with_triple_barrier("BTC/USDT:USDT", csv_path)
+    # Feed newly-labelled rows into the CatBoost pipeline, best-effort.
+    trained_rows = 0
+    try:
+        from backtest_label_generator import BacktestLabelGenerator
+        gen = BacktestLabelGenerator()
+        trained_rows = gen.generate_from_backtests()
+    except Exception as e:
+        logger.debug(f"[ExtData] BacktestLabelGenerator chain: {e}")
+    logger.info(
+        f"[ExtData:Scheduled] Binance fetch OK — {n_samples} triple-barrier samples; "
+        f"CatBoost pipeline generated {trained_rows} new labels"
+    )
+    return {"status": "ok", "source": "binance_public",
+            "samples_labelled": n_samples,
+            "catboost_rows_added": trained_rows,
+            "csv": csv_path}
+
+
 def get_integrator() -> ExternalDataIntegrator:
     global _integrator_instance
     if _integrator_instance is None:

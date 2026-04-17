@@ -1121,6 +1121,38 @@ class AIFreqtradeSizer(IStrategy):
             logger.debug(f"[Phase27:4LayerRegime] skipped ({pair}): {e}")
             breakdown["regime_4layer"] = 1.0
 
+        # ── Item 9: trinity_fusion sizing hook ──
+        # trinity_fusion combines perception + sentiment + macro into a single
+        # confidence-weighted signal. We use its `confidence_multiplier` as an
+        # additional sizing factor — clamped to [0.5, 1.5] so it can't dominate.
+        try:
+            from trinity_fusion import get_trinity
+            trinity = get_trinity()
+            fusion_result = trinity.fuse(pair=pair, regime=regime)
+            decision = fusion_result.get("decision", {}) if fusion_result.get("fused") else {}
+            fusion_size = float(decision.get("sizing_multiplier", 1.0))
+            fusion_mult = max(0.5, min(1.5, fusion_size))
+            mult *= fusion_mult
+            breakdown["trinity_fusion"] = round(fusion_mult, 3)
+        except Exception as e:
+            logger.debug(f"[Phase27:TrinityFusion] skipped: {e}")
+            breakdown["trinity_fusion"] = 1.0
+
+        # ── Item 11: HRL meta-policy organ selection ──
+        # hrl_meta_policy picks which RL motor (IQL / SAC) should drive this
+        # trade's sizing refinement. We read the meta-policy's organ weight
+        # for 'sizing' and use it as a sizing modifier.
+        try:
+            from hrl_meta_policy import get_meta_policy
+            meta = get_meta_policy()
+            sizing_weight = meta.get_organ_weight("sizing") if hasattr(meta, "get_organ_weight") else 1.0
+            meta_mult = max(0.7, min(1.3, float(sizing_weight)))
+            mult *= meta_mult
+            breakdown["hrl_meta"] = round(meta_mult, 3)
+        except Exception as e:
+            logger.debug(f"[Phase27:HRLMeta] skipped: {e}")
+            breakdown["hrl_meta"] = 1.0
+
         # ── PARÇA 10: Forgone alpha adjustment ──
         try:
             from db import get_db_connection
@@ -2206,7 +2238,45 @@ class AIFreqtradeSizer(IStrategy):
     def custom_entry_price(self, pair: str, trade: 'Trade | None', current_time: datetime,
                            proposed_rate: float, entry_tag: str | None, side: str,
                            **kwargs) -> float:
-        """Orderbook-aware entry pricing (Phase 22 #11)."""
+        """Orderbook-aware entry pricing (Phase 22 #11) + Phase 27 Item 12
+        market_maker_mode hook.
+
+        When ADX < 20 (ranging regime) and the pair is liquid we ask
+        market_maker_mode for an inventory-skewed quote — Stoikov GLFT-style
+        bid/ask placement that is more aggressive than the +0.1% Phase 22
+        offset. Falls back to legacy bid/ask shading if MM is unavailable.
+        """
+        try:
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            last = dataframe.iloc[-1] if dataframe is not None and len(dataframe) else None
+            adx_val = float(last.get("adx") or last.get("adx_14") or 0.0) if last is not None else 0.0
+        except Exception:
+            adx_val = 0.0
+
+        # Item 12: market_maker_mode quote when ranging.
+        if adx_val and adx_val < 20.0:
+            try:
+                from market_maker_mode import get_market_maker
+                mm = get_market_maker()
+                ob = self.dp.orderbook(pair, 5)
+                if ob and ob.get("bids") and ob.get("asks"):
+                    best_bid = float(ob["bids"][0][0])
+                    best_ask = float(ob["asks"][0][0])
+                    mid = (best_bid + best_ask) / 2.0
+                    spread = best_ask - best_bid
+                    # GLFT skew: shrink half-spread by 30%, then bias by inventory.
+                    inventory = mm._position.get(pair, 0.0) if hasattr(mm, "_position") else 0.0
+                    skew = -0.0001 * inventory  # negative inventory → quote tighter on the bid
+                    if side == "long":
+                        quoted = mid - 0.35 * spread + skew * mid
+                        return max(min(proposed_rate, quoted), best_bid)
+                    elif side == "short":
+                        quoted = mid + 0.35 * spread + skew * mid
+                        return min(max(proposed_rate, quoted), best_ask)
+            except Exception as e:
+                logger.debug(f"[MarketMaker:Entry] {pair} skipped: {e}")
+
+        # Legacy Phase 22 path.
         try:
             ob = self.dp.orderbook(pair, 5)
             if ob and side == 'long' and ob.get('bids'):

@@ -80,15 +80,17 @@ class TriplePerception:
         self._try_load_kronos()
 
     def _try_load_kronos(self) -> None:
-        """Phase 27 Task 13: lazy-load HuggingFace NeoQuasar/Kronos-mini when
-        (a) `transformers` is installed, (b) the user opted in via env var,
-        and (c) a short CPU benchmark comes under the latency budget (200ms).
+        """Phase 27 Task 13 (default-on): try HuggingFace NeoQuasar/Kronos-mini.
 
-        Keeping this guarded prevents the organism from silently paying a
-        hundreds-of-ms inference tax on every perception cycle.
+        Default behaviour is opt-in (env var `HQ_ENABLE_KRONOS=0`) — Kronos uses
+        a custom model_type that AutoModel can't recognise, so loading fails on
+        most installs. We try `trust_remote_code=True` once, log a clear skip
+        message if the model class is incompatible, and continue with triple
+        perception. Per-cycle latency budget (200ms) is enforced when load
+        succeeds.
         """
-        if os.environ.get("HQ_ENABLE_KRONOS", "0") != "1":
-            logger.debug("[TriplePerception:Kronos] disabled via HQ_ENABLE_KRONOS")
+        if os.environ.get("HQ_ENABLE_KRONOS", "1") == "0":
+            logger.debug("[TriplePerception:Kronos] explicitly disabled (HQ_ENABLE_KRONOS=0)")
             return
         try:
             import time as _time
@@ -102,27 +104,34 @@ class TriplePerception:
                 "NeoQuasar/Kronos-mini", trust_remote_code=True
             )
             model.eval()
-            # CPU benchmark — 1 dummy forward pass
+        except Exception as e:
+            # Custom model_type → AutoModel can't dispatch. Log once + skip.
+            msg = str(e)[:140]
+            logger.warning(
+                f"[TriplePerception:Kronos] Kronos model incompatible, skipping ({msg})"
+            )
+            return
+        try:
             with _torch.no_grad():
-                dummy = _torch.randn(1, 64, 5)  # (batch, seq_len, features)
+                dummy = _torch.randn(1, 64, 5)
                 t0 = _time.perf_counter()
                 try:
                     model(dummy)
                 except Exception:
-                    # Signature mismatch is fine for the benchmark
                     pass
                 elapsed_ms = (_time.perf_counter() - t0) * 1000.0
             if elapsed_ms > 200.0:
                 logger.warning(
-                    f"[TriplePerception:Kronos] benchmark {elapsed_ms:.0f}ms > 200ms budget "
-                    "— disabling to preserve per-cycle latency"
+                    f"[TriplePerception:Kronos] benchmark {elapsed_ms:.0f}ms > 200ms; disabling"
                 )
                 return
             self._kronos_model = model
             self._kronos_available = True
             logger.info(f"[TriplePerception:Kronos] loaded (benchmark {elapsed_ms:.0f}ms)")
         except Exception as e:
-            logger.info(f"[TriplePerception:Kronos] load failed ({e}); staying with triple perception")
+            logger.warning(
+                f"[TriplePerception:Kronos] benchmark failed ({e}); staying with triple perception"
+            )
 
     def _kronos_predict(self, df) -> Optional[float]:
         """Run Kronos-mini over the last 64 candles. Returns a scalar direction

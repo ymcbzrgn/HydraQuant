@@ -30,7 +30,7 @@ import sys
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -385,9 +385,56 @@ class SACOnlineTrainer:
             logger.error(f"[SAC] Failed to load: {e}")
             return False
 
+    # Phase 27 Item 10: scheduler entry — pull live transitions, train N steps.
+    def online_step(self, n_steps: int = 200) -> Dict[str, Any]:
+        """Pull recent transitions from rl_replay_buffer and run `n_steps`
+        gradient updates. Lightweight enough to fit in a Sunday cron window.
+        """
+        if not self._initialized:
+            return {"status": "skipped", "reason": "not initialized"}
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            rows = conn.execute("""
+                SELECT state_json, action_json, reward, next_state_json, done
+                FROM rl_replay_buffer
+                WHERE source IN ('live', 'dream')
+                ORDER BY id DESC LIMIT 5000
+            """).fetchall()
+            conn.close()
+            import json as _json
+            n_added = 0
+            for r in rows:
+                try:
+                    state = np.asarray(_json.loads(r["state_json"]), dtype=np.float32)
+                    next_state = np.asarray(_json.loads(r["next_state_json"]), dtype=np.float32)
+                    action = np.asarray(_json.loads(r["action_json"]), dtype=np.float32)
+                    self.add_transition(state, action, float(r["reward"] or 0.0),
+                                         next_state, bool(r["done"]))
+                    n_added += 1
+                except Exception:
+                    continue
+        except Exception as e:
+            return {"status": "skipped", "reason": f"replay load: {e}"}
+
+        losses: List[Dict] = []
+        for _ in range(int(n_steps)):
+            res = self.train_step()
+            if res is not None:
+                losses.append(res)
+        if losses:
+            avg_q = float(np.mean([l.get("q_loss", 0.0) for l in losses]))
+            avg_p = float(np.mean([l.get("policy_loss", 0.0) for l in losses]))
+            return {"status": "trained", "n_added": n_added,
+                    "n_steps": len(losses),
+                    "avg_q_loss": round(avg_q, 4),
+                    "avg_policy_loss": round(avg_p, 4)}
+        return {"status": "no_data", "n_added": n_added}
+
 
 # Singleton accessor
 _sac_instance = None
+
 
 def get_sac_trainer() -> SACOnlineTrainer:
     """Get or create SAC trainer singleton."""

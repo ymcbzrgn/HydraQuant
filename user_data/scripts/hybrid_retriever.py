@@ -510,7 +510,45 @@ class HybridRetriever:
             colbert_results = self.colbert_reranker.rerank(query, passages, top_k=len(passages))
             
         final_results = self._ensemble_rerank(passages, flashrank_results, colbert_results)
-        
+
+        # Phase 27 Item 14: graph-augmented retrieval. Pull top GAM-RAG winning
+        # patterns for the regime hinted in the query and merge them at the
+        # FRONT of the result list (de-duplicated by id). This injects the
+        # organism's own historical winning logic alongside news/RAG context.
+        try:
+            regime_hint = None
+            for cand_regime in ("trending_bull", "trending_bear", "ranging",
+                                "high_volatility", "transitional"):
+                if cand_regime.replace("_", " ") in original_query.lower() or \
+                   cand_regime in original_query.lower():
+                    regime_hint = cand_regime
+                    break
+            if regime_hint is None:
+                regime_hint = "trending_bull"  # default — broadest historical winners
+            from gam_rag import GamRAG
+            gam = GamRAG()
+            gam_docs = gam.retrieve_past_wisdom(
+                current_regime=regime_hint,
+                pair=original_query[:24],
+                k=2,
+            )
+            if gam_docs:
+                gam_id_set = {f"gam:{i}" for i in range(len(gam_docs))}
+                gam_passages = [
+                    {"id": f"gam:{i}", "text": str(doc),
+                     "meta": {"source": "gam_rag", "regime": regime_hint}}
+                    for i, doc in enumerate(gam_docs)
+                ]
+                # De-duplicate (no overlap normally, but defensive).
+                existing_ids = {p["id"] for p in final_results}
+                fresh = [p for p in gam_passages if p["id"] not in existing_ids]
+                if fresh:
+                    final_results = fresh + final_results
+                    logger.info(f"[GAM-RAG] Injected {len(fresh)} winning-pattern passages "
+                                f"into hybrid search (regime={regime_hint})")
+        except Exception as e:
+            logger.debug(f"[GAM-RAG] hybrid integration skipped: {e}")
+
         # Return final top_k
         return final_results[:top_k]
 
