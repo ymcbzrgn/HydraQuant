@@ -188,7 +188,8 @@ def run_full_smoke_test() -> dict:
         from position_sizer import PositionSizer
         sizer = PositionSizer()
         with patch('position_sizer.BayesianKelly.update'):
-            frac = sizer.calculate_stake_fraction(0.85)
+            # Phase 27 Task 1: pair is REQUIRED (Prensip 0).
+            frac = sizer.calculate_stake_fraction(0.85, pair="BTC/USDT:USDT")
             assert 0 <= frac <= 1
 
     def test_risk_budget():

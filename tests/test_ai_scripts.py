@@ -81,19 +81,23 @@ def test_llm_router_has_lock():
 # Test 3: Position Sizer Confidence Curve
 # ============================================================
 def test_position_sizer_confidence_curve():
-    """Confidence=0.5 with exponent=2 should give 0.25 * max_risk."""
+    """Confidence^exponent * max_risk should be the stake fraction.
+    Phase 27 Task 1: pair is REQUIRED (Prensip 0 — no global Kelly).
+    NOTE: _p() overrides constructor args from the NeuralOrganism registry,
+    so we force sizer.exponent / sizer.max_risk explicitly after construction."""
     from position_sizer import PositionSizer
 
     sizer = PositionSizer(max_portfolio_risk_per_trade=0.05, confidence_exponent=2.0)
-    # Override autonomy Kelly to allow real trades in test
     sizer.autonomy.current_level = 5  # L5 Kelly=0.75
+    sizer.exponent = 2.0
+    sizer.max_risk = 0.05
 
     # 0.5^2 = 0.25 * 0.05 = 0.0125
-    stake = sizer.calculate_stake_fraction(0.5)
+    stake = sizer.calculate_stake_fraction(0.5, pair="BTC/USDT:USDT")
     assert abs(stake - 0.0125) < 0.001, f"Expected 0.0125, got {stake}"
 
     # 0.9^2 = 0.81 * 0.05 = 0.0405
-    stake_high = sizer.calculate_stake_fraction(0.9)
+    stake_high = sizer.calculate_stake_fraction(0.9, pair="BTC/USDT:USDT")
     assert abs(stake_high - 0.0405) < 0.001, f"Expected 0.0405, got {stake_high}"
 
 
@@ -101,12 +105,13 @@ def test_position_sizer_confidence_curve():
 # Test 4: Position Sizer Zero Confidence
 # ============================================================
 def test_position_sizer_zero_confidence():
-    """Trade-First: confidence=0.0 should still produce a dust stake (never zero)."""
+    """Trade-First: confidence=0.0 should still produce a dust stake (never zero).
+    Phase 27 Task 1: pair is REQUIRED (Prensip 0)."""
     from position_sizer import PositionSizer
 
     sizer = PositionSizer()
     sizer.autonomy.current_level = 5  # L5 Kelly=0.75
-    stake = sizer.calculate_stake_fraction(0.0)
+    stake = sizer.calculate_stake_fraction(0.0, pair="BTC/USDT:USDT")
     # Trade-First: ALWAYS trade. Confidence modulates SIZE, not PERMISSION.
     assert stake > 0.0, f"Trade-First violation: stake must be > 0, got {stake}"
     assert stake < 0.01, f"Zero confidence should yield dust trade, got {stake}"
@@ -613,44 +618,52 @@ def test_bull_bear_debate():
 # ============================================================
 def test_bayesian_kelly_update(tmp_db):
     """10 wins, 2 losses with decay=0.98 → recent trades weighted more.
-    Without decay: 11/14=0.785. With decay: ~0.764 (recent losses count more)."""
+    Phase 27 Task 1: per-pair Beta posterior (pair required, Prensip 0).
+    Prior α=β=2 (informative) so 10W/2L → α≈8.4, β≈2.7 → p≈0.76."""
     from position_sizer import BayesianKelly
 
     bk = BayesianKelly(db_path=tmp_db)
+    pair = "TEST/USDT:USDT"
 
     for _ in range(10):
-        bk.update(won=True, pnl_pct=0.05)
+        bk.update(won=True, pnl_pct=0.05, pair=pair)
     for _ in range(2):
-        bk.update(won=False, pnl_pct=-0.03)
+        bk.update(won=False, pnl_pct=-0.03, pair=pair)
 
-    prob = bk.win_probability()
-    # With decay=0.98, win_p ≈ 0.764 (not 0.785) because recent losses are heavier
-    assert 0.70 < prob < 0.80, f"Expected ~0.764, got {prob}"
+    prob = bk.win_probability(pair=pair)
+    # With decay=0.98 + prior α=β=2, 10W/2L → p ≈ 0.76
+    assert 0.70 < prob < 0.82, f"Expected ~0.76, got {prob}"
     # Kelly fraction should be positive (more wins than losses)
-    assert bk.kelly_fraction() > 0, "Kelly fraction should be positive with 10W/2L"
+    assert bk.kelly_fraction(pair=pair) > 0, "Kelly fraction should be positive with 10W/2L"
 
 
 # ============================================================
 # Test 28: Bayesian Kelly Fraction calculation
 # ============================================================
 def test_bayesian_kelly_fraction(tmp_db):
-    """f* = (b*p - q)/b capped at 0.25"""
+    """f* = (b*p - q)/b capped at 0.25 — per-pair (Phase 27 Task 1).
+    Uses set_pair_stats() instead of direct attribute assignment since
+    BayesianKelly is now stateless (DB is source of truth, Prensip 0)."""
     from position_sizer import BayesianKelly
 
     bk = BayesianKelly(db_path=tmp_db)
-    # Force high win rate
-    bk.alpha = 90.0
-    bk.beta_param = 10.0
-    bk.avg_win_loss_ratio = 2.0
+    pair_win = "WIN/USDT:USDT"
+    pair_loss = "LOSS/USDT:USDT"
 
-    f = bk.kelly_fraction()
+    # High win rate pair: α=90, β=10, W/L=2.0 → f=(2*0.9-0.1)/2=0.85 → capped 0.25
+    bk.set_pair_stats(pair_win, alpha=90.0, beta_param=10.0,
+                      avg_win=2.0, avg_loss=1.0, n_trades=100)
+    f = bk.kelly_fraction(pair=pair_win)
     assert f == 0.25, f"Should be capped at 0.25, got {f}"
 
-    # Force losing strategy
-    bk.alpha = 10.0
-    bk.beta_param = 90.0
-    f_loss = bk.kelly_fraction()
+    # Losing pair: α=10, β=90, W/L=1.0 → f=(1*0.1-0.9)/1=-0.8 → floored 0.0
+    bk.set_pair_stats(pair_loss, alpha=10.0, beta_param=90.0,
+                      avg_win=1.0, avg_loss=1.0, n_trades=100)
+    f_loss = bk.kelly_fraction(pair=pair_loss)
     assert f_loss == 0.0, f"Should be 0.0 for losing strategies, got {f_loss}"
+
+    # Per-pair isolation: winning pair still positive after losing pair written
+    assert bk.kelly_fraction(pair=pair_win) == 0.25, "Per-pair isolation violated"
 
 
 # ============================================================
@@ -4231,4 +4244,157 @@ def test_cross_pair_persist_and_load(tmp_db):
     latest = intel2.get_latest()
     assert latest.get("market_bias", {}).get("bias") == "BEARISH", (
         f"Fresh instance should load persisted BEARISH bias, got {latest}"
+    )
+
+
+# ============================================================
+# Phase 27 Fix 1: Wasserstein OOD Detector
+# ============================================================
+
+def _ood_detector_fresh(tmp_path):
+    """Construct a MarketOODDetector that writes state to an isolated path.
+    The detector persists to ../models/ood_detector_state.json relative to its
+    own file; we override that attribute so tests don't touch production state.
+    """
+    import os
+    from ood_detector import MarketOODDetector
+
+    det = MarketOODDetector()
+    det._model_path = os.path.join(str(tmp_path), "ood_state.json")
+    # Ensure a clean slate (no legacy state from an earlier test)
+    det._fitted = False
+    det._global_stats = None
+    det._regime_stats = {}
+    return det
+
+
+def test_ood_wasserstein_fit_and_detect(tmp_path):
+    """After fit(), an in-distribution sample must report is_ood=False and a
+    distance well below threshold. Regression guard against the Phase 26 bug
+    where every sample landed at distance=500 regardless of input."""
+    import numpy as np
+    import pandas as pd
+
+    np.random.seed(2704)
+    n = 200
+    df = pd.DataFrame({
+        "feat_a": np.random.normal(0.0, 1.0, n),
+        "feat_b": np.random.normal(5.0, 2.0, n),
+        "feat_c": np.random.exponential(1.0, n),
+    })
+    regimes = pd.Series(["ranging"] * 100 + ["trending_bull"] * 100)
+
+    det = _ood_detector_fresh(tmp_path)
+    det.fit(df, regimes)
+
+    assert det._fitted is True, "fit() should mark detector as fitted"
+    assert "ranging" in det._regime_stats, "Expected per-regime reference to be built"
+
+    # Mean values are deep inside the training distribution
+    result = det.detect({"feat_a": 0.0, "feat_b": 5.0, "feat_c": 1.0}, regime="ranging")
+    required_keys = {"is_ood", "distance", "threshold", "p_value",
+                     "defensive_multiplier", "closest_regime"}
+    assert required_keys.issubset(result.keys()), (
+        f"Return dict keys must be preserved for Phase 26 callers, "
+        f"missing: {required_keys - set(result.keys())}"
+    )
+    assert result["is_ood"] is False, f"In-dist sample flagged OOD: {result}"
+    assert result["distance"] < result["threshold"], (
+        f"In-dist distance {result['distance']} should be below threshold "
+        f"{result['threshold']}"
+    )
+    # Phase 26 regression: distance used to sit at 500 for every sample
+    assert result["distance"] < 10.0, (
+        f"Distance looks Mahalanobis-broken (>=10): {result['distance']}"
+    )
+
+
+def test_ood_wasserstein_ood_sample(tmp_path):
+    """Far-out-of-distribution samples must flip is_ood=True and the sigmoid
+    defensive_multiplier must drop below 0.5 (meaningful sizing cut)."""
+    import numpy as np
+    import pandas as pd
+
+    np.random.seed(2705)
+    n = 200
+    df = pd.DataFrame({
+        "feat_a": np.random.normal(0.0, 1.0, n),
+        "feat_b": np.random.normal(5.0, 2.0, n),
+        "feat_c": np.random.exponential(1.0, n),
+    })
+    regimes = pd.Series(["ranging"] * 100 + ["trending_bull"] * 100)
+
+    det = _ood_detector_fresh(tmp_path)
+    det.fit(df, regimes)
+
+    # Values 10σ+ away in every feature
+    result = det.detect({"feat_a": 20.0, "feat_b": 50.0, "feat_c": 100.0},
+                        regime="ranging")
+    assert result["is_ood"] is True, f"OOD sample not flagged: {result}"
+    assert result["defensive_multiplier"] < 0.5, (
+        f"Deep OOD should push sizing under 0.5, got "
+        f"{result['defensive_multiplier']}"
+    )
+    assert result["defensive_multiplier"] >= 0.10, (
+        f"Defensive multiplier must respect the 0.10 floor, got "
+        f"{result['defensive_multiplier']}"
+    )
+    assert result["p_value"] < 0.1, (
+        f"Empirical p-value should be small for deep OOD: {result['p_value']}"
+    )
+
+
+def test_ood_v1_state_fallback(tmp_path):
+    """Legacy Phase 26 Gaussian (v1) state on disk must trigger a safe fallback:
+    detector stays unfitted, detect() returns defensive_multiplier=1.0 (no false
+    OOD alarm) until the scheduler weekly refit produces a v2 state file."""
+    import json
+    import os
+    from ood_detector import MarketOODDetector
+
+    # Write a realistic v1 Gaussian state (no format_version, mean+precision shape)
+    state_path = os.path.join(str(tmp_path), "ood_state.json")
+    legacy_v1 = {
+        "feature_names": ["confidence", "trust_score", "duration"],
+        "global": {
+            "mean": [0.5, 0.5, 3600.0],
+            "precision": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "n_features": 3, "n_samples": 500,
+            "feature_names": ["confidence", "trust_score", "duration"],
+        },
+        "regimes": {
+            "ranging": {
+                "mean": [0.5, 0.5, 3600.0],
+                "precision": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                "n_features": 3, "n_samples": 200,
+                "feature_names": ["confidence", "trust_score", "duration"],
+            }
+        },
+    }
+    with open(state_path, "w") as f:
+        json.dump(legacy_v1, f)
+
+    det = MarketOODDetector()
+    det._model_path = state_path
+    det._fitted = False
+    det._global_stats = None
+    det._regime_stats = {}
+    det._load_state()  # Should detect v1 and refuse to use it
+
+    assert det._fitted is False, (
+        "v1 state must not be interpreted as fitted — it would crash the "
+        "Wasserstein distance computation."
+    )
+    assert det._global_stats is None, "v1 global stats must not be loaded"
+    assert det._regime_stats == {}, "v1 regime stats must not be loaded"
+
+    # detect() on unfitted must return the safe defaults
+    result = det.detect({"confidence": 0.5, "trust_score": 0.5,
+                         "duration": 3600.0}, regime="ranging")
+    assert result["is_ood"] is False, (
+        f"Unfitted detector must never flag OOD: {result}"
+    )
+    assert result["defensive_multiplier"] == 1.0, (
+        f"Unfitted detector must return mult=1.0 (no sizing cut), "
+        f"got {result['defensive_multiplier']}"
     )
