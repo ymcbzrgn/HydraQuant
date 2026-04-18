@@ -1634,6 +1634,35 @@ class AIFreqtradeSizer(IStrategy):
         # Phase 21: Removed Graduated Kelly — PositionSizer already applies confidence^1.5 curve.
         # Double confidence reduction was destroying stake sizes ($50→$0.02).
 
+        # ═══ Phase 27 EMERGENCY FIX B — Shadow trade gate ═══
+        # CAAT correctly shrinks dust trades to <$1, but exchange min_stake then
+        # promotes them back into real $5+ orders that just bleed fees. Audit
+        # showed 248 such micro-trades earning $2.34 net (commission absorbed
+        # the alpha). The fix: when CAAT-multiplied stake is genuinely tiny,
+        # log a SHADOW trade (forgone_pnl_engine) and SKIP the real entry.
+        # Returns 0 → Freqtrade interprets as "no entry" → fees zero, learning
+        # signal still captured because forgone_resolver re-prices it later.
+        SHADOW_THRESHOLD_USD = 1.0
+        if final_stake < SHADOW_THRESHOLD_USD:
+            try:
+                ai_dec = ai_decision if 'ai_decision' in locals() else {}
+                self.forgone_engine.log_forgone_signal(
+                    pair=pair,
+                    signal_type=ai_dec.get("signal", "NEUTRAL"),
+                    confidence=float(ai_dec.get("confidence", 0.0) or 0.0),
+                    entry_price=float(current_rate),
+                    was_executed=False,
+                    regime=ai_dec.get("regime"),
+                )
+                logger.info(
+                    f"[Phase27:Shadow] {pair} CAAT stake ${final_stake:.4f} < "
+                    f"${SHADOW_THRESHOLD_USD:.2f} → SHADOW (no real entry, "
+                    f"fees=$0, learning intact)"
+                )
+            except Exception as e:
+                logger.debug(f"[Phase27:Shadow] log failed: {e}")
+            return 0.0  # Freqtrade: 0 = skip entry
+
         # Min stake floor: only enforce for real trades that passed the threshold
         if final_stake < min_stake:
             final_stake = min_stake
@@ -2379,9 +2408,100 @@ class AIFreqtradeSizer(IStrategy):
 
         # PYRAMID: Confidence up + profitable
         if confidence > 0.80 and current_profit > 0.01 and confidence > entry_conf + 0.1:
+            # ═══ Phase 27 EMERGENCY DCA GATE ═══
+            # Audit found: today ADA went $0.25 → $1,463 via 3 DCAs because this
+            # branch had ZERO Phase 27 controls. Apply per-pair Kelly + CAAT +
+            # Hawkes + Constitution position cap to every DCA proposal.
+            try:
+                regime_for_dca = cached.get("regime") or "_global"
+                # Gate 1: per-pair Bayesian Kelly — 0 means "this pair / regime
+                # has structurally negative edge right now, no more capital".
+                kelly_dca = self._position_sizer.bayesian_kelly.kelly_fraction(
+                    pair=trade.pair, regime=regime_for_dca
+                )
+                if kelly_dca <= 0.005:
+                    logger.warning(
+                        f"[DCA-GATE] {trade.pair} BLOCKED — per-pair Kelly={kelly_dca:.4f} "
+                        f"(no structural edge in {regime_for_dca})"
+                    )
+                    return None
+
+                # Gate 2: CAAT multiplier — if the asymmetric formula says the
+                # current state warrants <30% sizing, the LAST thing we want
+                # is to ADD on top of an existing position.
+                try:
+                    df_dca, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+                    last_for_dca = df_dca.iloc[-1].squeeze() if df_dca is not None and len(df_dca) else None
+                except Exception:
+                    last_for_dca = None
+                if last_for_dca is not None:
+                    try:
+                        caat_mult_dca, caat_breakdown_dca = self._caat_asymmetric_multiplier(
+                            pair=trade.pair, regime=regime_for_dca,
+                            confidence=confidence,
+                            ai_decision=cached, last_candle=last_for_dca,
+                            proposed_stake=trade.stake_amount,
+                        )
+                        if caat_mult_dca < 0.30:
+                            logger.warning(
+                                f"[DCA-GATE] {trade.pair} BLOCKED — CAAT mult={caat_mult_dca:.3f} "
+                                f"<0.30 ({caat_breakdown_dca})"
+                            )
+                            return None
+                    except Exception:
+                        caat_mult_dca = 1.0
+                else:
+                    caat_mult_dca = 1.0
+
+                # Gate 3: Hawkes cascade veto — if the branching ratio is in
+                # the danger zone, don't pour fuel on the fire.
+                try:
+                    from order_flow import get_order_flow
+                    of_dca = get_order_flow()
+                    of_state = of_dca.analyze(trade.pair, trades=[])
+                    n_branch = float(of_state.get("hawkes_branching_ratio", 0.0))
+                    if n_branch >= 0.80:
+                        logger.warning(
+                            f"[DCA-GATE] {trade.pair} BLOCKED — Hawkes n={n_branch:.2f} "
+                            "≥0.80 (cascade risk)"
+                        )
+                        return None
+                except Exception:
+                    pass
+
+                # Gate 4: Constitution-style absolute position cap. Per ALPHA
+                # PRENSİP 0 + constitution.max_single_position_pct=3%, the
+                # combined (current_stake + proposed DCA) can NEVER exceed
+                # 3% of portfolio value. This is the hard ceiling that would
+                # have stopped today's MNT $6,826 monster.
+                try:
+                    from constitution import IDENTITY_LIMITS, CONSTITUTION
+                    portfolio_value = float(getattr(self.risk_budget, "portfolio_value", 0.0) or 0.0)
+                    max_pos_pct = float(CONSTITUTION["safety_limits"]["max_single_position_pct"]) / 100.0
+                    if portfolio_value > 0:
+                        max_total_stake = portfolio_value * max_pos_pct
+                        proposed_dca = max_stake * 0.3
+                        proposed_total = float(trade.stake_amount or 0) + proposed_dca
+                        if proposed_total > max_total_stake:
+                            logger.warning(
+                                f"[DCA-GATE] {trade.pair} BLOCKED — proposed total "
+                                f"${proposed_total:.2f} > {max_pos_pct*100:.1f}% portfolio cap "
+                                f"(${max_total_stake:.2f})"
+                            )
+                            return None
+                except Exception as e:
+                    logger.debug(f"[DCA-GATE] constitution cap check failed: {e}")
+            except Exception as e:
+                logger.warning(f"[DCA-GATE] guard chain failed open ({e}); blocking DCA defensively")
+                return None
+
+            # All four Phase 27 gates passed — DCA is risk-bounded.
             add_stake = max_stake * 0.3
             if min_stake and add_stake >= min_stake:
-                logger.info(f"[DCA] {trade.pair} PYRAMID: conf {confidence:.0%}")
+                logger.info(
+                    f"[DCA] {trade.pair} PYRAMID: conf {confidence:.0%} "
+                    f"(Kelly={kelly_dca:.3f}, CAAT={caat_mult_dca:.2f})"
+                )
                 return add_stake
 
         # REDUCE: Confidence dropped + losing
