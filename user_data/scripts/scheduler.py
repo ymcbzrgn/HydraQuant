@@ -489,14 +489,25 @@ class PipelineScheduler:
             'cron', day_of_week='sun', hour=6,
             id='multimodal_train', name='MultiModal Encoder Weekly Training',
             max_instances=1, replace_existing=True)
-        # Phase 27 Item 6: External data fetch (monthly, 1st of month 09:00 UTC).
+        # Data Acceleration Fix 3: WEEKLY external data fetch (was monthly).
+        # Binance publishes the previous day's klines at ~01:00 UTC, so Sunday
+        # 01:00 captures the full prior week of fresh market data before
+        # CatBoost retrain at 03:00 consumes it.
         self.scheduler.add_job(self._external_data_cycle,
-            'cron', day=1, hour=9,
-            id='external_data_fetch', name='Binance Public Data Monthly Fetch',
+            'cron', day_of_week='sun', hour=1,
+            id='external_data_fetch', name='Binance Public Data Weekly Fetch',
+            max_instances=1, replace_existing=True)
+        # Data Acceleration Fix 2: DAILY backtest-label injection (05:00 UTC).
+        # Reuses existing backtest results + live trades + NEW shadow trades,
+        # feeds the joint dataset into backtest_training_data every day so
+        # CatBoost always has thousands more training samples the next cycle.
+        self.scheduler.add_job(self._backtest_injection_daily,
+            'cron', hour=5,
+            id='backtest_injection', name='Backtest Label Injection Daily',
             max_instances=1, replace_existing=True)
 
         self.scheduler.start()
-        logger.info("[Scheduler] Started with 65 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 14 phase27)")
+        logger.info("[Scheduler] Started with 66 jobs (26 base + 6 organism + 2 phase26 + 17 sprint2 + 15 phase27)")
         return True
 
     def stop(self):
@@ -2111,10 +2122,16 @@ class PipelineScheduler:
     def _forgone_shadow_resolver(self):
         """Phase 27 Fix 6 (H3): Resolve shadow trades whose 4h window has elapsed.
 
-        Every 30 minutes, pick up unresolved forgone_profit rows older than 4h,
-        fetch the current Bybit last-price, and call
-        ForgonePnLEngine.resolve_forgone_trade so forgone_pnl is populated and
-        the adaptive-threshold job has signal.
+        Every 30 minutes, pick up ALL unresolved forgone_profit rows older
+        than 4h (post-audit Data Acceleration 1: LIMIT 100 was a throttle
+        that capped us at 4800 resolves/day when target is 2000+ shadow/day
+        × 4h-ago horizon = ~15k pending at any moment). Bybit ticker fetches
+        are cached per-pair in this pass so we do one HTTP per unique pair,
+        not one per shadow row.
+
+        After resolving, kicks `_forgone_learn_feedback` to push the fresh
+        WIN/LOSS outcomes into per-pair Kelly + argument_quality so every
+        shadow trade trains the organism.
         """
         try:
             import httpx
@@ -2124,21 +2141,23 @@ class PipelineScheduler:
             engine = ForgonePnLEngine()
             conn = get_db_connection()
             unresolved = conn.execute("""
-                SELECT id, pair, signal_type, entry_price, signal_time
+                SELECT id, pair, signal_type, entry_price, signal_time, regime
                 FROM forgone_profit
                 WHERE was_executed = 0
                   AND forgone_pnl IS NULL
                   AND signal_time < datetime('now', '-4 hours')
                 ORDER BY signal_time ASC
-                LIMIT 100
             """).fetchall()
             conn.close()
 
             if not unresolved:
                 return
 
-            def _bybit_last_price(pair):
-                # "BTC/USDT:USDT" → "BTCUSDT" linear perp symbol
+            # Per-pair ticker cache — avoid hammering Bybit with N duplicate calls.
+            ticker_cache: Dict[str, Optional[float]] = {} if False else {}
+            def _bybit_last_price(pair: str):
+                if pair in ticker_cache:
+                    return ticker_cache[pair]
                 symbol = pair.split(":")[0].replace("/", "")
                 try:
                     r = httpx.get(
@@ -2147,26 +2166,82 @@ class PipelineScheduler:
                         timeout=5.0,
                     )
                     data = r.json().get("result", {}).get("list", [])
-                    if data:
-                        return float(data[0].get("lastPrice", 0))
+                    price = float(data[0].get("lastPrice", 0)) if data else None
                 except Exception:
-                    return None
-                return None
+                    price = None
+                ticker_cache[pair] = price
+                return price
 
-            resolved = 0
+            resolved_ids: List[int] = []
             for row in unresolved:
                 try:
                     price = _bybit_last_price(row["pair"])
                     if price and price > 0:
                         if engine.resolve_forgone_trade(row["id"], float(price)):
-                            resolved += 1
+                            resolved_ids.append(row["id"])
                 except Exception as e:
                     logger.debug(f"[Phase27:ShadowResolve] {row['pair']} skip: {e}")
-            logger.info(f"[Phase27:ShadowResolve] Resolved {resolved}/{len(unresolved)} shadow trades")
+
+            logger.info(
+                f"[Phase27:ShadowResolve] Resolved {len(resolved_ids)}/{len(unresolved)} "
+                f"shadow trades (cache_hits={len(unresolved) - len(ticker_cache)})"
+            )
+
+            # Data Acceleration Fix 1: feed the fresh shadow outcomes into the
+            # organism's learning hooks (Kelly, argument_quality). Separate
+            # method so it can be called independently from tests.
+            if resolved_ids:
+                self._forgone_learn_feedback(resolved_ids)
         except ImportError as e:
             logger.debug(f"[Phase27:ShadowResolve] disabled: {e}")
         except Exception as e:
             logger.warning(f"[Phase27:ShadowResolve] Job failed: {e}")
+
+    def _forgone_learn_feedback(self, resolved_ids: list) -> None:
+        """Data Acceleration Fix 1: shadow WIN/LOSS → BayesianKelly + argument
+        quality. Every resolved forgone row is pushed through the same feedback
+        path a real closed trade would take — turning shadow data from
+        diagnostic-only into an active training signal.
+        """
+        if not resolved_ids:
+            return
+        try:
+            from db import get_db_connection
+            from position_sizer import BayesianKelly
+            bk = BayesianKelly()
+            conn = get_db_connection()
+            placeholders = ",".join("?" * len(resolved_ids))
+            rows = conn.execute(
+                f"""
+                SELECT pair, signal_type, confidence, regime, forgone_pnl
+                FROM forgone_profit
+                WHERE id IN ({placeholders})
+                  AND forgone_pnl IS NOT NULL
+                """,
+                resolved_ids,
+            ).fetchall()
+            conn.close()
+
+            kelly_updates = 0
+            for r in rows:
+                try:
+                    pair = r["pair"]
+                    if not pair:
+                        continue
+                    regime = r["regime"] or "_global"
+                    pnl_pct = float(r["forgone_pnl"] or 0.0)
+                    won = pnl_pct > 0
+                    bk.update(won=won, pnl_pct=pnl_pct,
+                               pair=pair, regime=regime)
+                    kelly_updates += 1
+                except Exception as e:
+                    logger.debug(f"[Phase27:ShadowLearn] Kelly update skip: {e}")
+            logger.info(
+                f"[Phase27:ShadowLearn] fed {kelly_updates} shadow outcomes "
+                f"into per-pair Kelly (wins + losses)"
+            )
+        except Exception as e:
+            logger.warning(f"[Phase27:ShadowLearn] feedback failed: {e}")
 
     def _forgone_threshold_adapt(self):
         """Phase 27 Fix 6 (H3): Adjust pair_thresholds based on 7d forgone alpha.
@@ -2558,13 +2633,66 @@ class PipelineScheduler:
             logger.warning(f"[Phase27:MultiModal] cycle failed: {e}")
 
     def _external_data_cycle(self):
-        """Phase 27 Item 6: monthly Binance public data fetch + label."""
+        """Data Acceleration Fix 3: weekly Binance public data fetch.
+
+        Pulls the last 7 days of BTCUSDT 1h klines (incremental — skips
+        already-cached dates), triple-barrier labels them, and funnels
+        through to backtest_training_data via the label generator.
+        """
         try:
-            from external_data_integrator import scheduled_external_fetch
-            result = scheduled_external_fetch()
-            logger.info(f"[Phase27:ExtData] {result}")
+            from external_data_integrator import (
+                fetch_binance_ohlcv_public, get_integrator)
+            from backtest_label_generator import BacktestLabelGenerator
+            from datetime import datetime as _dt, timedelta as _td
+
+            integ = get_integrator()
+            fetched = 0
+            labelled = 0
+            # Last 7 UTC days, skipping today (Binance archive lags 24h).
+            for i in range(1, 8):
+                d = (_dt.utcnow() - _td(days=i)).strftime("%Y-%m-%d")
+                csv_path = fetch_binance_ohlcv_public("BTCUSDT", "1h", date=d)
+                if csv_path:
+                    fetched += 1
+                    n = integ.integrate_ohlcv_with_triple_barrier(
+                        "BTC/USDT:USDT", csv_path
+                    )
+                    labelled += int(n or 0)
+            # Chain into catboost pipeline via the daily label injector.
+            try:
+                gen = BacktestLabelGenerator()
+                gen.generate_from_backtests()
+                gen.enrich_from_live_trades(min_trades=10)
+                gen.enrich_from_forgone_trades(min_trades=20)
+            except Exception as e:
+                logger.debug(f"[Phase27:ExtData] label chain: {e}")
+            logger.info(
+                f"[Phase27:ExtData] Weekly fetch: {fetched}/7 days, "
+                f"{labelled} triple-barrier samples labelled"
+            )
         except Exception as e:
             logger.warning(f"[Phase27:ExtData] fetch failed: {e}")
+
+    def _backtest_injection_daily(self):
+        """Data Acceleration Fix 2: daily backtest-label injection cycle.
+
+        Runs the full BacktestLabelGenerator pipeline — backtest results +
+        live trades + shadow trades — so backtest_training_data keeps growing
+        regardless of when the weekly cycle fires. CatBoost retrain (Sunday
+        03:00) finds a strictly larger, fresher training set every week.
+        """
+        try:
+            from backtest_label_generator import BacktestLabelGenerator
+            gen = BacktestLabelGenerator()
+            res_bt = gen.generate_from_backtests()
+            res_live = gen.enrich_from_live_trades(min_trades=10)
+            res_shadow = gen.enrich_from_forgone_trades(min_trades=20)
+            logger.info(
+                f"[Phase27:LabelInject] daily — backtest={res_bt}, "
+                f"live={res_live}, shadow={res_shadow}"
+            )
+        except Exception as e:
+            logger.warning(f"[Phase27:LabelInject] daily job failed: {e}")
 
     def _trade_language_cycle(self):
         """Phase 27 Task 25: weekly trade-as-language pattern mining."""

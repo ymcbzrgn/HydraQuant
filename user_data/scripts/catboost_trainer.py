@@ -119,6 +119,56 @@ def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Op
             X_list.append(features)
             y_list.append(label)
 
+        # Data Acceleration Fix 3: shadow-trade ingestion from forgone_profit.
+        # Every resolved shadow row is an "if we had traded this" observation
+        # with a real PnL outcome — free labelled data that teaches CatBoost
+        # from the signals we INTENTIONALLY didn't execute. Converts forgone
+        # from diagnostic into active training signal.
+        try:
+            shadow_rows = conn.execute("""
+                SELECT pair, signal_type, confidence, regime, forgone_pnl
+                FROM forgone_profit
+                WHERE was_executed = 0
+                  AND forgone_pnl IS NOT NULL
+                  AND resolved_at > datetime('now', '-30 days')
+            """).fetchall()
+            shadow_added = 0
+            for s in shadow_rows:
+                try:
+                    pnl = float(s["forgone_pnl"] or 0.0)
+                    conf = float(s["confidence"] or 0.5)
+                    regime = s["regime"] or "transitional"
+                    # Shadow feature vector — mirrors real-trade layout so the
+                    # CatBoost model sees a consistent schema. Missing metrics
+                    # (trust, sub_*) default to the prior neutral values.
+                    features = [
+                        conf,                           # confidence
+                        0.5,                            # trust_score
+                        14400.0,                        # outcome_duration (~4h = resolver window)
+                        0.35,                           # max_cap
+                        {"trending_bull": 4, "ranging": 2, "transitional": 3,
+                         "trending_bear": 1, "high_volatility": 5}.get(regime, 3),
+                        0.5, 0.5, 0.5, 0.5, 0.5, 0.5,    # sub_* defaults
+                    ]
+                    if pnl > 0.5:
+                        label = 2
+                    elif pnl < -0.5:
+                        label = 0
+                    else:
+                        label = 1
+                    X_list.append(features)
+                    y_list.append(label)
+                    shadow_added += 1
+                except Exception:
+                    continue
+            if shadow_added:
+                logger.info(
+                    f"[Shadow] ingested {shadow_added} resolved shadow trades "
+                    f"(total samples now {len(X_list)})"
+                )
+        except Exception as e:
+            logger.debug(f"[Shadow] ingest skipped: {e}")
+
         # Phase 27 Item 13: sim2real noise augmentation. For every real
         # training sample we ALSO push 2 randomised twins (slippage + fee +
         # spread noise on the original PnL). Tripled training set teaches

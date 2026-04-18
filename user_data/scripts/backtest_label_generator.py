@@ -608,6 +608,85 @@ class BacktestLabelGenerator:
     # Training Data Export (for catboost_trainer.py)
     # ===================================================================
 
+    def enrich_from_forgone_trades(self, min_trades: int = 20) -> int:
+        """Data Acceleration Fix 2: pull resolved shadow trades from
+        `forgone_profit` into `backtest_training_data`.
+
+        Every resolved shadow is an "if we had taken this trade" observation
+        with entry_price, exit_price, forgone_pnl, regime, pair and
+        confidence. Cheap labelled data — free alpha for CatBoost.
+        """
+        conn = get_db_connection(self.db_path)
+        try:
+            rows = conn.execute("""
+                SELECT pair, signal_type, confidence, regime,
+                       entry_price, exit_price, forgone_pnl,
+                       signal_time, resolved_at
+                FROM forgone_profit
+                WHERE was_executed = 0
+                  AND forgone_pnl IS NOT NULL
+                  AND resolved_at IS NOT NULL
+            """).fetchall()
+            if len(rows) < min_trades:
+                logger.info(f"[LabelGen:Forgone] {len(rows)} resolved shadow trades (need {min_trades})")
+                return 0
+
+            logger.info(f"[LabelGen:Forgone] Enriching with {len(rows)} resolved shadow trades")
+            batch = []
+            skipped = 0
+
+            for row in rows:
+                pair = row["pair"] or "UNKNOWN"
+                signal_time = row["signal_time"]
+                pnl = float(row["forgone_pnl"] or 0.0)
+
+                # Chart features at signal time — reuse live path if available,
+                # otherwise fall back to minimal feature set.
+                features = self._compute_features_for_live_trade(pair, signal_time) or {}
+                features["shadow_confidence"] = float(row["confidence"] or 0.5)
+                features["shadow_signal_bull"] = 1.0 if row["signal_type"] == "BULL" else 0.0
+                features["shadow_signal_bear"] = 1.0 if row["signal_type"] == "BEAR" else 0.0
+                features["shadow_entry_price"] = float(row["entry_price"] or 0.0)
+                features["shadow_exit_price"] = float(row["exit_price"] or 0.0)
+
+                if pnl > WIN_THRESHOLD:
+                    label, label_name = 2, "BULLISH"
+                elif pnl < LOSE_THRESHOLD:
+                    label, label_name = 0, "BEARISH"
+                else:
+                    label, label_name = 1, "NEUTRAL"
+
+                batch.append((
+                    pair, signal_time, row["resolved_at"], "long",
+                    round(pnl, 4), None,
+                    "shadow", label, label_name,
+                    json.dumps(features), len(features),
+                    "shadow", "AIFreqtradeSizer",
+                    row["regime"] or "_global", "1h",
+                ))
+
+            if not batch:
+                return 0
+
+            cur = conn.cursor()
+            cur.executemany("""
+                INSERT OR IGNORE INTO backtest_training_data
+                    (pair, open_date, close_date, direction, pnl_pct,
+                     duration_hours, regime_detected, label, label_name,
+                     features_json, n_features, source, strategy,
+                     regime, timeframe)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, batch)
+            inserted = cur.rowcount
+            conn.commit()
+            logger.info(
+                f"[LabelGen:Forgone] Inserted {inserted} shadow samples "
+                f"({len(batch) - inserted} duplicates ignored, {skipped} skipped)"
+            )
+            return inserted
+        finally:
+            conn.close()
+
     def get_training_dataset(self, min_samples: int = 100,
                              sources: List[str] = None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
         """Load training data from backtest_training_data table.
