@@ -683,6 +683,24 @@ def init_db():
             c.execute("ALTER TABLE forgone_profit ADD COLUMN regime TEXT")
         except sqlite3.OperationalError:
             pass
+        # Data Acceleration audit fix: capture the 6 evidence sub-scores +
+        # trust_score at signal time so the shadow-trade CatBoost pipeline
+        # gets REAL feature values instead of a constant 0.5 placeholder.
+        # Each ALTER is idempotent — silently ignored if the column already
+        # exists (legacy installs are auto-migrated on next init_db()).
+        for _col, _typ in (
+            ("trust_score", "REAL"),
+            ("sub_trend", "REAL"),
+            ("sub_momentum", "REAL"),
+            ("sub_crowd", "REAL"),
+            ("sub_evidence", "REAL"),
+            ("sub_macro", "REAL"),
+            ("sub_risk", "REAL"),
+        ):
+            try:
+                c.execute(f"ALTER TABLE forgone_profit ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS binary_embeddings (
             text_hash TEXT PRIMARY KEY, binary_vec BLOB,

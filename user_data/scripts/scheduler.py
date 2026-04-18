@@ -2223,6 +2223,21 @@ class PipelineScheduler:
             conn.close()
 
             kelly_updates = 0
+            # Data Acceleration audit: wire shadow outcomes into argument
+            # quality too. When a shadow signal was part of a debate round
+            # (agent_memory rows at the same pair/timestamp exist with a
+            # key_argument), grade each agent's reasoning pattern against
+            # the shadow's forgone PnL. Treat wins/losses as training signal
+            # for `argument_quality` just like real trade exits.
+            pool = None
+            try:
+                from agent_pool import AgentPool
+                from ai_config import AI_DB_PATH as _AIDB
+                pool = AgentPool(db_path=_AIDB)
+            except Exception:
+                pool = None
+            arg_updates = 0
+
             for r in rows:
                 try:
                     pair = r["pair"]
@@ -2234,11 +2249,45 @@ class PipelineScheduler:
                     bk.update(won=won, pnl_pct=pnl_pct,
                                pair=pair, regime=regime)
                     kelly_updates += 1
+
+                    # Argument quality feedback — grade every agent that
+                    # debated this pair in the last 6 hours against the
+                    # shadow's outcome. Matches the pattern used on real
+                    # trade exits (agent_pool.record_trade_outcome).
+                    if pool is None:
+                        continue
+                    try:
+                        debate_conn = get_db_connection()
+                        debate_rows = debate_conn.execute("""
+                            SELECT agent_type, key_argument
+                            FROM agent_memory
+                            WHERE pair = ?
+                              AND timestamp > datetime('now', '-6 hours')
+                            ORDER BY timestamp DESC LIMIT 10
+                        """, (pair,)).fetchall()
+                        debate_conn.close()
+                    except Exception:
+                        debate_rows = []
+                    for dr in debate_rows:
+                        pattern = pool._extract_argument_pattern(dr["key_argument"] or "")
+                        if not pattern:
+                            continue
+                        try:
+                            pool._update_argument_quality(
+                                agent_type=dr["agent_type"],
+                                pattern=pattern,
+                                regime=regime,
+                                was_correct=bool(won),
+                                outcome_pnl=float(pnl_pct),
+                            )
+                            arg_updates += 1
+                        except Exception as e:
+                            logger.debug(f"[Phase27:ShadowLearn] arg update skip: {e}")
                 except Exception as e:
                     logger.debug(f"[Phase27:ShadowLearn] Kelly update skip: {e}")
             logger.info(
                 f"[Phase27:ShadowLearn] fed {kelly_updates} shadow outcomes "
-                f"into per-pair Kelly (wins + losses)"
+                f"into per-pair Kelly + {arg_updates} argument_quality updates"
             )
         except Exception as e:
             logger.warning(f"[Phase27:ShadowLearn] feedback failed: {e}")

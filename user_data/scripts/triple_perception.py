@@ -181,11 +181,48 @@ class TriplePerception:
                 self._catboost_model = CatBoostClassifier()
                 self._catboost_model.load_model(model_path)
                 self._catboost_available = True
+                # Data Acceleration audit fix 4: record the checkpoint file
+                # mtime + path so _reload_catboost_if_updated can detect new
+                # weekly retrain artefacts without restarting the bot.
+                self._catboost_path = model_path
+                try:
+                    self._catboost_mtime = os.path.getmtime(model_path)
+                except Exception:
+                    self._catboost_mtime = 0.0
                 logger.info(f"[TriplePerception] CatBoost loaded from {model_path}")
             except Exception as e:
                 logger.warning(f"[TriplePerception] CatBoost load error: {e}")
         else:
             logger.info("[TriplePerception] No pre-trained CatBoost model yet. Will use TTM+Chronos only until first training.")
+
+    def _reload_catboost_if_updated(self) -> None:
+        """Data Acceleration audit fix 4: hot-reload CatBoost when the weekly
+        retrain writes a newer `.cbm` file. Called at the top of perceive()
+        so a fresh model takes effect without a bot restart.
+        """
+        import os
+        path = getattr(self, "_catboost_path", None)
+        if not path or not os.path.exists(path):
+            return
+        try:
+            current_mtime = os.path.getmtime(path)
+        except Exception:
+            return
+        if current_mtime <= getattr(self, "_catboost_mtime", 0.0):
+            return
+        try:
+            from catboost import CatBoostClassifier
+            new_model = CatBoostClassifier()
+            new_model.load_model(path)
+            self._catboost_model = new_model
+            self._catboost_mtime = current_mtime
+            self._catboost_available = True
+            logger.info(
+                f"[TriplePerception:HotReload] CatBoost re-loaded "
+                f"(mtime={current_mtime:.0f}) from {path}"
+            )
+        except Exception as e:
+            logger.warning(f"[TriplePerception:HotReload] failed: {e}")
 
     def perceive(
         self,
@@ -222,6 +259,11 @@ class TriplePerception:
             }
         """
         self._ensure_init()
+        # Data Acceleration audit fix 4: check for a fresh CatBoost checkpoint
+        # every perceive() call. Cheap (one stat call); skips re-load if
+        # mtime unchanged. Weekly retrain artefacts are picked up without
+        # restarting the bot.
+        self._reload_catboost_if_updated()
         start = time.time()
 
         result = {

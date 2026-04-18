@@ -621,7 +621,9 @@ class BacktestLabelGenerator:
             rows = conn.execute("""
                 SELECT pair, signal_type, confidence, regime,
                        entry_price, exit_price, forgone_pnl,
-                       signal_time, resolved_at
+                       signal_time, resolved_at,
+                       trust_score, sub_trend, sub_momentum, sub_crowd,
+                       sub_evidence, sub_macro, sub_risk
                 FROM forgone_profit
                 WHERE was_executed = 0
                   AND forgone_pnl IS NOT NULL
@@ -648,6 +650,16 @@ class BacktestLabelGenerator:
                 features["shadow_signal_bear"] = 1.0 if row["signal_type"] == "BEAR" else 0.0
                 features["shadow_entry_price"] = float(row["entry_price"] or 0.0)
                 features["shadow_exit_price"] = float(row["exit_price"] or 0.0)
+                # Data Acceleration audit: carry REAL evidence sub-scores into
+                # the training set. Keys mirror the live-trade layout so
+                # get_training_dataset() can surface them directly.
+                features["trust_score"] = float(row["trust_score"] or 0.5)
+                features["sub_technical"] = float(row["sub_trend"] or 0.5)
+                features["sub_sentiment"] = float(row["sub_crowd"] or 0.5)
+                features["sub_momentum"] = float(row["sub_momentum"] or 0.5)
+                features["sub_volatility"] = float(row["sub_risk"] or 0.5)
+                features["sub_correlation"] = float(row["sub_macro"] or 0.5)
+                features["sub_divergence"] = float(row["sub_evidence"] or 0.5)
 
                 if pnl > WIN_THRESHOLD:
                     label, label_name = 2, "BULLISH"
@@ -669,10 +681,15 @@ class BacktestLabelGenerator:
                 return 0
 
             cur = conn.cursor()
+            # Data Acceleration audit fix 1: column names must match the
+            # actual schema in db.py — previous version used pnl_pct /
+            # duration_hours / regime_detected which don't exist, causing
+            # INSERT OR IGNORE to silently accept 0 rows. Correct names:
+            # profit_pct / trade_duration_hours / exit_reason.
             cur.executemany("""
                 INSERT OR IGNORE INTO backtest_training_data
-                    (pair, open_date, close_date, direction, pnl_pct,
-                     duration_hours, regime_detected, label, label_name,
+                    (pair, open_date, close_date, direction, profit_pct,
+                     trade_duration_hours, exit_reason, label, label_name,
                      features_json, n_features, source, strategy,
                      regime, timeframe)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

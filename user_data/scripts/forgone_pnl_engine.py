@@ -64,6 +64,16 @@ class ForgonePnLEngine:
                 # Phase 27 Fix 6 (H3): regime tag so threshold-adaptation job
                 # can group forgone alpha by regime, not only by pair.
                 ('regime', 'TEXT'),
+                # Data Acceleration audit: real sub-scores at signal time so
+                # the shadow → CatBoost pipeline stops poisoning training
+                # data with constant 0.5 placeholders.
+                ('trust_score', 'REAL'),
+                ('sub_trend', 'REAL'),
+                ('sub_momentum', 'REAL'),
+                ('sub_crowd', 'REAL'),
+                ('sub_evidence', 'REAL'),
+                ('sub_macro', 'REAL'),
+                ('sub_risk', 'REAL'),
             ]:
                 if col_name not in columns:
                     c.execute(f'ALTER TABLE forgone_profit ADD COLUMN {col_name} {col_type}')
@@ -77,6 +87,13 @@ class ForgonePnLEngine:
         entry_price: float,
         was_executed: bool = False,
         regime: Optional[str] = None,
+        trust_score: Optional[float] = None,
+        sub_trend: Optional[float] = None,
+        sub_momentum: Optional[float] = None,
+        sub_crowd: Optional[float] = None,
+        sub_evidence: Optional[float] = None,
+        sub_macro: Optional[float] = None,
+        sub_risk: Optional[float] = None,
     ) -> Optional[int]:
         """
         Called for EVERY AI signal, whether executed or rejected.
@@ -84,8 +101,10 @@ class ForgonePnLEngine:
         If was_executed=True, we log it for completeness but the real P&L comes from Freqtrade.
 
         Phase 27 Fix 6: `regime` is optional so legacy callers still work.
-        When provided it lets the adaptive-threshold job slice forgone alpha
-        by (pair, regime) instead of treating every signal identically.
+        Data Acceleration audit fix: the 7 sub-score kwargs (trust_score +
+        6 q-scores) persist the REAL evidence-engine feature values at signal
+        time. NULL columns on legacy rows fall back to 0.5 in downstream
+        trainers; fresh rows feed clean signal into CatBoost.
 
         Returns:
             int: The row ID of the forgone_profit entry, or None on failure.
@@ -95,10 +114,14 @@ class ForgonePnLEngine:
                 c = conn.cursor()
                 c.execute('''
                     INSERT INTO forgone_profit
-                        (pair, signal_type, confidence, entry_price, was_executed, regime)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (pair, signal_type, confidence, entry_price, was_executed, regime,
+                         trust_score, sub_trend, sub_momentum, sub_crowd,
+                         sub_evidence, sub_macro, sub_risk)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (pair, signal_type, confidence, entry_price,
-                      1 if was_executed else 0, regime))
+                      1 if was_executed else 0, regime,
+                      trust_score, sub_trend, sub_momentum, sub_crowd,
+                      sub_evidence, sub_macro, sub_risk))
                 conn.commit()
                 row_id: int = c.lastrowid
 

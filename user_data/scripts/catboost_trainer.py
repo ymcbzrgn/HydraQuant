@@ -119,14 +119,80 @@ def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Op
             X_list.append(features)
             y_list.append(label)
 
+        # Data Acceleration audit fix 2: backtest_training_data ingestion.
+        # All Data-Acceleration writers (generate_from_backtests /
+        # enrich_from_live_trades / enrich_from_forgone_trades / weekly
+        # external fetch) ultimately land rows in `backtest_training_data`.
+        # Without this block the CatBoost retrain NEVER saw them. We pull
+        # every sample from the last 60 days, reconstruct an 11-feature
+        # vector that matches the live-trade layout, and splice into the
+        # training set.
+        try:
+            regime_map_bt = {
+                "trending_bull": 4, "ranging": 2, "transitional": 3,
+                "trending_bear": 1, "high_volatility": 5,
+            }
+            bt_rows = conn.execute("""
+                SELECT features_json, profit_pct, regime, source
+                FROM backtest_training_data
+                WHERE created_at > datetime('now', '-60 days')
+                ORDER BY open_date ASC
+            """).fetchall()
+            bt_added = 0
+            for r in bt_rows:
+                try:
+                    feat = json.loads(r["features_json"]) if r["features_json"] else {}
+                    pnl = float(r["profit_pct"] or 0.0)
+                    regime = r["regime"] or "transitional"
+                    # Map rich feature dict → the 11-slot layout the live
+                    # trainer uses. Defaults keep the schema consistent.
+                    features = [
+                        float(feat.get("live_confidence")
+                              or feat.get("shadow_confidence", 0.5)),
+                        float(feat.get("trust_score", 0.5)),
+                        float(feat.get("trade_duration_hours",
+                                        feat.get("outcome_duration", 4.0))),
+                        float(feat.get("max_cap", 0.35)),
+                        regime_map_bt.get(regime, 3),
+                        float(feat.get("sub_technical", 0.5)),
+                        float(feat.get("sub_sentiment", 0.5)),
+                        float(feat.get("sub_momentum", 0.5)),
+                        float(feat.get("sub_volatility", 0.5)),
+                        float(feat.get("sub_correlation", 0.5)),
+                        float(feat.get("sub_divergence", 0.5)),
+                    ]
+                    if pnl > 0.5:
+                        label = 2
+                    elif pnl < -0.5:
+                        label = 0
+                    else:
+                        label = 1
+                    X_list.append(features)
+                    y_list.append(label)
+                    bt_added += 1
+                except Exception:
+                    continue
+            if bt_added:
+                logger.info(
+                    f"[Backtest] ingested {bt_added} rows from backtest_training_data "
+                    f"(total samples now {len(X_list)})"
+                )
+        except Exception as e:
+            logger.debug(f"[Backtest] ingest skipped: {e}")
+
         # Data Acceleration Fix 3: shadow-trade ingestion from forgone_profit.
         # Every resolved shadow row is an "if we had traded this" observation
         # with a real PnL outcome — free labelled data that teaches CatBoost
         # from the signals we INTENTIONALLY didn't execute. Converts forgone
         # from diagnostic into active training signal.
         try:
+            # Data Acceleration audit: read REAL sub-scores + trust_score
+            # from the new forgone_profit columns. Legacy rows with NULLs
+            # fall back to 0.5 (neutral); fresh rows feed clean signal.
             shadow_rows = conn.execute("""
-                SELECT pair, signal_type, confidence, regime, forgone_pnl
+                SELECT pair, signal_type, confidence, regime, forgone_pnl,
+                       trust_score, sub_trend, sub_momentum, sub_crowd,
+                       sub_evidence, sub_macro, sub_risk
                 FROM forgone_profit
                 WHERE was_executed = 0
                   AND forgone_pnl IS NOT NULL
@@ -138,17 +204,22 @@ def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Op
                     pnl = float(s["forgone_pnl"] or 0.0)
                     conf = float(s["confidence"] or 0.5)
                     regime = s["regime"] or "transitional"
-                    # Shadow feature vector — mirrors real-trade layout so the
-                    # CatBoost model sees a consistent schema. Missing metrics
-                    # (trust, sub_*) default to the prior neutral values.
+                    # Shadow feature vector — mirrors real-trade layout. Sub-
+                    # score slots now carry the REAL evidence signal at the
+                    # moment the shadow was logged (or 0.5 for legacy NULLs).
                     features = [
-                        conf,                           # confidence
-                        0.5,                            # trust_score
-                        14400.0,                        # outcome_duration (~4h = resolver window)
-                        0.35,                           # max_cap
+                        conf,                                           # confidence
+                        float(s["trust_score"] or 0.5),                 # trust_score REAL
+                        240.0,                                           # outcome_duration (minutes, 4h)
+                        0.35,                                            # max_cap (constant OK)
                         {"trending_bull": 4, "ranging": 2, "transitional": 3,
                          "trending_bear": 1, "high_volatility": 5}.get(regime, 3),
-                        0.5, 0.5, 0.5, 0.5, 0.5, 0.5,    # sub_* defaults
+                        float(s["sub_trend"] or 0.5),                   # sub_technical (q1_trend)
+                        float(s["sub_crowd"] or 0.5),                   # sub_sentiment (q3_crowd)
+                        float(s["sub_momentum"] or 0.5),                # sub_momentum (q2)
+                        float(s["sub_risk"] or 0.5),                    # sub_volatility (q6_risk)
+                        float(s["sub_macro"] or 0.5),                   # sub_correlation (q5_macro)
+                        float(s["sub_evidence"] or 0.5),                # sub_divergence (q4_evidence)
                     ]
                     if pnl > 0.5:
                         label = 2
@@ -164,7 +235,7 @@ def gather_training_data(min_trades: int = 50) -> Tuple[Optional[np.ndarray], Op
             if shadow_added:
                 logger.info(
                     f"[Shadow] ingested {shadow_added} resolved shadow trades "
-                    f"(total samples now {len(X_list)})"
+                    f"with REAL sub-scores (total samples now {len(X_list)})"
                 )
         except Exception as e:
             logger.debug(f"[Shadow] ingest skipped: {e}")
