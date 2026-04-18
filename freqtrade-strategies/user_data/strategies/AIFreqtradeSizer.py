@@ -876,14 +876,27 @@ class AIFreqtradeSizer(IStrategy):
             else:
                 exec_mode = "SHADOW_WEAK"  # Garbage signal, still log for learning
 
-            # Log EVERY signal to forgone engine (shadow or real)
+            # Log EVERY signal to forgone engine (shadow or real).
+            # Data Acceleration audit: pass the REAL sub-scores from the
+            # evidence engine so the shadow → CatBoost pipeline stops
+            # training on constant 0.5 placeholders. ai_decision["sub_scores"]
+            # is populated by evidence_engine._synthesize().
             sig_label = "BULL" if is_bullish else ("BEAR" if is_bearish else "NEUTRAL")
+            _sub = ai_decision.get("sub_scores", {}) or {}
             fid = self.forgone_engine.log_forgone_signal(
                 pair=pair,
                 signal_type=sig_label,
                 confidence=confidence,
                 entry_price=float(current_rate),
-                was_executed=(exec_mode == "REAL")
+                was_executed=(exec_mode == "REAL"),
+                regime=ai_decision.get("regime"),
+                trust_score=float(ai_decision.get("trust_score", 0.5) or 0.5),
+                sub_trend=float(_sub.get("q1_trend", 0.5) or 0.5),
+                sub_momentum=float(_sub.get("q2_momentum", 0.5) or 0.5),
+                sub_crowd=float(_sub.get("q3_crowd", 0.5) or 0.5),
+                sub_evidence=float(_sub.get("q4_evidence", 0.5) or 0.5),
+                sub_macro=float(_sub.get("q5_macro", 0.5) or 0.5),
+                sub_risk=float(_sub.get("q6_risk", 0.5) or 0.5),
             )
             if fid:
                 self._forgone_ids[pair] = fid
@@ -1704,6 +1717,13 @@ class AIFreqtradeSizer(IStrategy):
                 trade.set_custom_data("ai_confidence", round(confidence, 4))
                 trade.set_custom_data("ai_signal", signal_type)
                 trade.set_custom_data("ai_reasoning", reasoning[:500] if reasoning else "")
+                # Audit fix 3: capture the regime at entry so confirm_trade_exit
+                # can pass the right (pair, regime) pair into BayesianKelly even
+                # if ai_signal_cache has flipped by the time the trade closes.
+                trade.set_custom_data(
+                    "entry_regime",
+                    ai_decision.get("regime") or "_global",
+                )
                 # Snapshot market state at entry for exit comparison
                 dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
                 if dataframe is not None and len(dataframe) > 0:
@@ -1773,13 +1793,25 @@ class AIFreqtradeSizer(IStrategy):
         try:
             pnl_pct = trade.calc_profit_ratio(rate) if hasattr(trade, 'calc_profit_ratio') else 0.0
             won = pnl_pct > 0
-            # Pair is mandatory so each market learns its own Beta posterior (Prensip 0).
-            self._bayesian_kelly.update(won=won, pnl_pct=pnl_pct, pair=pair)
-            wp = self._bayesian_kelly.win_probability(pair=pair)
-            kf = self._bayesian_kelly.kelly_fraction(pair=pair)
+            # Data Acceleration audit fix 3: pass regime so real trades update
+            # the SAME (pair, regime) row shadows are training. Without this,
+            # every real exit fell into regime="_global" and per-pair-per-regime
+            # Kelly only ever learned from shadow data.
+            cached_exit = self.ai_signal_cache.get(pair, {})
+            regime_for_exit = (
+                cached_exit.get("regime")
+                or trade.get_custom_data("entry_regime")
+                or "_global"
+            )
+            self._bayesian_kelly.update(
+                won=won, pnl_pct=pnl_pct, pair=pair, regime=regime_for_exit
+            )
+            wp = self._bayesian_kelly.win_probability(pair=pair, regime=regime_for_exit)
+            kf = self._bayesian_kelly.kelly_fraction(pair=pair, regime=regime_for_exit)
             logger.info(
-                f"[BayesianKelly:{pair}] Updated: {'WIN' if won else 'LOSS'} "
-                f"pnl={pnl_pct:.4f} → win_p={wp:.3f} kelly_f={kf:.4f}"
+                f"[BayesianKelly:{pair}/{regime_for_exit}] Updated: "
+                f"{'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → "
+                f"win_p={wp:.3f} kelly_f={kf:.4f}"
             )
         except Exception as e:
             logger.warning(f"[BayesianKelly] Update failed: {e}")

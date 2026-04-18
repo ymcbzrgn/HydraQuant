@@ -1102,6 +1102,18 @@ class EvidenceEngine:
             "reasoning": reasoning,
             "source": "EVIDENCE_ENGINE",
             "_max_cap": max_cap,  # internal, for audit log
+            # Data Acceleration audit: expose the 6 sub-question scores so
+            # shadow-trade logs can persist REAL evidence signals instead of
+            # a constant 0.5 placeholder. Keys match the weight-scheme in
+            # EVIDENCE_WEIGHTS and the columns we add to forgone_profit.
+            "sub_scores": {
+                "q1_trend":    float(scores.get("q1_trend", 0.5)),
+                "q2_momentum": float(scores.get("q2_momentum", 0.5)),
+                "q3_crowd":    float(scores.get("q3_crowd", 0.5)),
+                "q4_evidence": float(scores.get("q4_evidence", 0.5)),
+                "q5_macro":    float(scores.get("q5_macro", 0.5)),
+                "q6_risk":     float(scores.get("q6_risk", 0.5)),
+            },
         }
 
         logger.info(f"[EvidenceEngine:Synthesis] {pair}: {signal} conf={confidence:.2f} "
