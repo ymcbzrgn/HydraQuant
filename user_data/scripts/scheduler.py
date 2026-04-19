@@ -446,12 +446,15 @@ class PipelineScheduler:
         self.scheduler.add_job(self._sleep_wake_tick, 'interval', minutes=30,
             id='sleep_wake', name='Sleep-Wake Cycle Tick',
             max_instances=1, replace_existing=True)
-        # Phase 27 Task 20: Foundation model fine-tuning — Sunday 02:30 UTC
-        # (after CatBoost retrain 03:00… wait, we run BEFORE so the fine-tuned
-        # head can feed the CatBoost feature set). Head retraining only, full
-        # backbone is frozen (IBM few-shot recipe).
+        # Phase 27 Task 20: Foundation model fine-tuning. Audit fix
+        # (2026-04-19): the original 02:30 slot collided with iql_retrain
+        # (02:00) + catboost_retrain (03:00) + foundation + organism_sleep
+        # (03:30) + ood_refit (04:15) all in the same memory window → 10 OOM
+        # kills in 24h. Move foundation to 06:00 — well after the heavy
+        # train trio (world_model 01:30, iql 02:00, catboost 03:00) has
+        # finished and gc'd.
         self.scheduler.add_job(self._foundation_fine_tune,
-            'cron', day_of_week='sun', hour=2, minute=30,
+            'cron', day_of_week='sun', hour=6, minute=0,
             id='foundation_fine_tune', name='TTM/Chronos Fine-Tune',
             max_instances=1, replace_existing=True)
         # Phase 27 Dead Code batch 2 warm-up — hourly imports + minimal call
@@ -479,14 +482,19 @@ class PipelineScheduler:
             'cron', day_of_week='sun', hour=8,
             id='trade_language', name='Trade-as-Language Pattern Mining',
             max_instances=1, replace_existing=True)
-        # Phase 27 Item 10: SAC online RL training cycle (Sun 04:30 UTC).
+        # Phase 27 Item 10: SAC online RL cycle. Audit fix (2026-04-19):
+        # 04:30 collided with ood_refit 04:15 + organism_evolution 04:00 +
+        # ensemble_refit 05:00 in a 1h memory burst. Moved to 05:30 — stays
+        # in the post-CatBoost window but no longer overlaps OOD/ensemble.
         self.scheduler.add_job(self._sac_online_cycle,
-            'cron', day_of_week='sun', hour=4, minute=30,
+            'cron', day_of_week='sun', hour=5, minute=30,
             id='sac_online', name='SAC Online RL Cycle',
             max_instances=1, replace_existing=True)
-        # Phase 27 Item 3: MultiModal encoder training (Sun 06:00 UTC).
+        # Phase 27 Item 3: MultiModal encoder training. Audit fix
+        # (2026-04-19): 06:00 now collides with foundation_fine_tune; pushed
+        # to 07:30 so foundation finishes + gc completes before MM starts.
         self.scheduler.add_job(self._multimodal_train_cycle,
-            'cron', day_of_week='sun', hour=6,
+            'cron', day_of_week='sun', hour=7, minute=30,
             id='multimodal_train', name='MultiModal Encoder Weekly Training',
             max_instances=1, replace_existing=True)
         # Data Acceleration Fix 3: WEEKLY external data fetch (was monthly).
@@ -2096,26 +2104,60 @@ class PipelineScheduler:
             logger.warning(f"[Sprint2:CatBoost] v1 retrain also failed: {e}")
 
     def _ood_refit(self):
-        """Weekly: Refit OOD detector reference distributions with recent data."""
+        """Weekly: Refit OOD detector reference distributions with recent data.
+
+        Audit fix (2026-04-19): the previous version pulled only 3 features
+        (confidence / trust_score_at_decision / outcome_duration) AND
+        normalised the regime column with `.fillna("transitional")` — but the
+        OOD detector's hard-coded REGIMES list misspelled 'transitional' as
+        'transition', so per-regime masks matched zero rows. Result: refit
+        ran, persisted v2 state, but `0 regimes fit`. Two fixes:
+
+          1. Pull additional ai_decisions features (position_size, trust,
+             outcome_pnl, outcome_duration) so the detector has a richer
+             distribution to fit AND so even a degenerate regime split
+             still has enough samples per regime to clear the 15-row floor.
+          2. Map any unknown / null regime label to 'transitional' (matches
+             regime_classifier output), and only forward labels that are in
+             OOD's REGIMES list — otherwise force '_global'.
+        """
         try:
             from ood_detector import MarketOODDetector
             import pandas as pd
             from db import get_connection
             detector = MarketOODDetector()
+            valid_regimes = set(MarketOODDetector.REGIMES)
             with get_connection() as conn:
                 rows = conn.execute("""
-                    SELECT confidence, trust_score_at_decision, outcome_duration, regime
-                    FROM ai_decisions WHERE outcome_pnl IS NOT NULL
-                    ORDER BY timestamp DESC LIMIT 500
+                    SELECT confidence,
+                           COALESCE(trust_score_at_decision, 0.5) AS trust_score_at_decision,
+                           COALESCE(outcome_duration, 3600.0)     AS outcome_duration,
+                           COALESCE(position_size, 0.0)            AS position_size,
+                           COALESCE(outcome_pnl, 0.0)              AS outcome_pnl,
+                           COALESCE(regime, 'transitional')        AS regime
+                    FROM ai_decisions
+                    WHERE outcome_pnl IS NOT NULL
+                    ORDER BY timestamp DESC LIMIT 1000
                 """).fetchall()
-            if len(rows) >= 30:
-                df = pd.DataFrame([dict(r) for r in rows])
-                features = df[["confidence", "trust_score_at_decision", "outcome_duration"]].fillna(0.5)
-                regimes = df["regime"].fillna("transitional")
-                detector.fit(features, regimes)
-                logger.info(f"[Phase28:OOD] Refit on {len(rows)} trades")
-            else:
-                logger.info("[Phase28:OOD] Insufficient data for refit")
+            if len(rows) < 30:
+                logger.info(f"[Phase28:OOD] Insufficient data for refit ({len(rows)} rows)")
+                return
+            df = pd.DataFrame([dict(r) for r in rows])
+            feature_cols = ["confidence", "trust_score_at_decision",
+                            "outcome_duration", "position_size", "outcome_pnl"]
+            features = df[feature_cols].fillna(0.0)
+            # Map labels: anything not in REGIMES → 'transitional' (the
+            # closest valid bucket per RegimeClassifier semantics).
+            regimes = df["regime"].apply(
+                lambda r: r if r in valid_regimes else "transitional"
+            )
+            detector.fit(features, regimes)
+            n_regimes_fit = len(detector._regime_stats)
+            logger.info(
+                f"[Phase28:OOD] Refit on {len(rows)} trades, "
+                f"{n_regimes_fit}/{len(valid_regimes)} regimes fit "
+                f"(distribution: {dict(regimes.value_counts().head(6))})"
+            )
         except Exception as e:
             logger.warning(f"[Phase28:OOD] Refit failed: {e}")
 
@@ -2488,30 +2530,26 @@ class PipelineScheduler:
     def _foundation_fine_tune(self):
         """Phase 27 Task 20: fine-tune foundation model heads on recent data.
 
-        Safe-by-default: we only retrain the FINAL classification head on TTM
-        (frozen backbone, IBM few-shot recipe) and run a BitFit-style bias-only
-        update on Chronos-Bolt. Failures are swallowed — production models
-        stay intact because we write to a `*_ft.pt` sidecar. An A/B test hook
-        lives in triple_perception (Task 20b).
+        Heavy job: PyTorch / transformers loaded → gc-wrap so the ~600MB
+        peak (Chronos-Bolt + TTM head) frees back to libc/system before the
+        next Sunday cron fires.
         """
-        try:
-            # TTM head retraining
+        with self._heavy_job_gc("foundation_fine_tune"):
             try:
-                from ttm_perception import retrain_head_if_available  # type: ignore
-                ttm_result = retrain_head_if_available(min_samples=50)
-                logger.info(f"[Phase27:FineTune:TTM] {ttm_result}")
+                try:
+                    from ttm_perception import retrain_head_if_available  # type: ignore
+                    ttm_result = retrain_head_if_available(min_samples=50)
+                    logger.info(f"[Phase27:FineTune:TTM] {ttm_result}")
+                except Exception as e:
+                    logger.debug(f"[Phase27:FineTune:TTM] skipped: {e}")
+                try:
+                    from chronos_perception import bitfit_bias_update_if_available  # type: ignore
+                    chr_result = bitfit_bias_update_if_available(min_samples=50)
+                    logger.info(f"[Phase27:FineTune:Chronos] {chr_result}")
+                except Exception as e:
+                    logger.debug(f"[Phase27:FineTune:Chronos] skipped: {e}")
             except Exception as e:
-                logger.debug(f"[Phase27:FineTune:TTM] skipped: {e}")
-
-            # Chronos BitFit
-            try:
-                from chronos_perception import bitfit_bias_update_if_available  # type: ignore
-                chr_result = bitfit_bias_update_if_available(min_samples=50)
-                logger.info(f"[Phase27:FineTune:Chronos] {chr_result}")
-            except Exception as e:
-                logger.debug(f"[Phase27:FineTune:Chronos] skipped: {e}")
-        except Exception as e:
-            logger.warning(f"[Phase27:FineTune] job failed: {e}")
+                logger.warning(f"[Phase27:FineTune] job failed: {e}")
 
     def _phase27_dead_code_warmup(self):
         """Phase 27 dead-code batch 2 hook.
@@ -2589,22 +2627,54 @@ class PipelineScheduler:
     # Phase 27 Frontier (Grup 7) — DT + Exploit + TradeLang
     # ═══════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _heavy_job_gc(job_name: str):
+        """Audit fix (2026-04-19): post-job memory reclaim. Sundays were
+        OOM-killing the bot because ~5 heavy ML jobs landed in a 4-hour
+        window without anyone calling gc. Wrap heavy jobs with
+        `with self._heavy_job_gc(name):` (or call directly in finally) to
+        force a malloc_trim + gc collect after the job's PyTorch tensors
+        go out of scope.
+        """
+        import contextlib
+        @contextlib.contextmanager
+        def _ctx():
+            try:
+                yield
+            finally:
+                try:
+                    import gc
+                    gc.collect()
+                    try:
+                        import ctypes
+                        ctypes.CDLL("libc.so.6").malloc_trim(0)
+                    except Exception:
+                        pass  # malloc_trim only on Linux
+                    try:
+                        import torch  # type: ignore
+                        if hasattr(torch, "cuda") and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    logger.info(f"[Scheduler:GC] post-{job_name} reclaim done")
+                except Exception:
+                    pass
+        return _ctx()
+
     def _dt_training_cycle(self):
         """Phase 27 Task 21: Sunday 23:00 UTC Decision Transformer LoRA cycle.
 
-        Runs the REAL GPT-2 124M + LoRA training pipeline:
-        `decision_transformer.scheduled_cycle()` builds the (return-to-go,
-        state, action) corpus from ai_decisions and trains via peft LoRA
-        (rank 16, target_modules=["c_attn"]). Adapter weights land at
-        `user_data/models/dt_lora_<timestamp>.pt`. Sprint 3B task 21b adds
-        the inference path that loads the freshest checkpoint into sizing.
+        Runs the REAL GPT-2 124M + LoRA training pipeline. Adapter weights
+        land at `user_data/models/dt_lora_<timestamp>.pt`. Sprint 3B task 21b
+        adds the inference path that loads the freshest checkpoint into sizing.
         """
-        try:
-            from decision_transformer import scheduled_cycle
-            result = scheduled_cycle()
-            logger.info(f"[Phase27:DT] cycle result: {result}")
-        except Exception as e:
-            logger.warning(f"[Phase27:DT] cycle failed: {e}")
+        with self._heavy_job_gc("dt_training"):
+            try:
+                from decision_transformer import scheduled_cycle
+                result = scheduled_cycle()
+                logger.info(f"[Phase27:DT] cycle result: {result}")
+            except Exception as e:
+                logger.warning(f"[Phase27:DT] cycle failed: {e}")
 
     def _exploit_regression_batch(self):
         """Phase 27 Task 23: nightly exploit archive regression test.
@@ -2653,33 +2723,30 @@ class PipelineScheduler:
             logger.warning(f"[Phase27:ExploitBatch] failed: {e}")
 
     def _sac_online_cycle(self):
-        """Phase 27 Item 10: SAC online RL training cycle.
-
-        Pulls the IQL replay buffer + recent live transitions and runs a single
-        SAC actor-critic update pass. Lightweight (≤200 gradient steps) so it
-        fits in the Sunday window and never blocks live trading.
-        """
-        try:
-            from sac_online import get_sac_trainer
-            trainer = get_sac_trainer()
-            if hasattr(trainer, "online_step"):
-                result = trainer.online_step(n_steps=200)
-            elif hasattr(trainer, "train_one_cycle"):
-                result = trainer.train_one_cycle()
-            else:
-                result = {"status": "no_method"}
-            logger.info(f"[Phase27:SAC] cycle: {result}")
-        except Exception as e:
-            logger.warning(f"[Phase27:SAC] cycle failed: {e}")
+        """Phase 27 Item 10: SAC online RL training cycle. Heavy job → gc-wrap."""
+        with self._heavy_job_gc("sac_online"):
+            try:
+                from sac_online import get_sac_trainer
+                trainer = get_sac_trainer()
+                if hasattr(trainer, "online_step"):
+                    result = trainer.online_step(n_steps=200)
+                elif hasattr(trainer, "train_one_cycle"):
+                    result = trainer.train_one_cycle()
+                else:
+                    result = {"status": "no_method"}
+                logger.info(f"[Phase27:SAC] cycle: {result}")
+            except Exception as e:
+                logger.warning(f"[Phase27:SAC] cycle failed: {e}")
 
     def _multimodal_train_cycle(self):
-        """Phase 27 Item 3: weekly MultiModal encoder training pass."""
-        try:
-            from multimodal_encoder import weekly_training_cycle
-            result = weekly_training_cycle(min_samples=50, n_epochs=3)
-            logger.info(f"[Phase27:MultiModal] {result}")
-        except Exception as e:
-            logger.warning(f"[Phase27:MultiModal] cycle failed: {e}")
+        """Phase 27 Item 3: weekly MultiModal encoder training. Heavy job → gc-wrap."""
+        with self._heavy_job_gc("multimodal_train"):
+            try:
+                from multimodal_encoder import weekly_training_cycle
+                result = weekly_training_cycle(min_samples=50, n_epochs=3)
+                logger.info(f"[Phase27:MultiModal] {result}")
+            except Exception as e:
+                logger.warning(f"[Phase27:MultiModal] cycle failed: {e}")
 
     def _external_data_cycle(self):
         """Data Acceleration Fix 3: weekly Binance public data fetch.

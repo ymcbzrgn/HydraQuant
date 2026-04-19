@@ -299,17 +299,43 @@ class OrganismGNN:
     # ===================================================================
 
     def persist_patterns(self, patterns: List[Dict]):
-        """Store discovered patterns in causal_discoveries."""
+        """Store GNN attention patterns in `gnn_attention_patterns` table.
+
+        Audit fix (2026-04-19): Phase 26 wrote these to `causal_discoveries`
+        with `method='GNN_attention'`, polluting the table with non-causal
+        news-entity attention edges (e.g. 'binance → gary gensler') that
+        regime_classifier and other consumers were treating as PCMCI+ output.
+        GNN attention is co-occurrence, NOT causation. Now persisted to its
+        own table; downstream code that wants TRUE causal edges should query
+        causal_discoveries with `method='PCMCI+'`.
+        """
+        try:
+            from db import init_db
+            init_db()
+            execute_with_retry(
+                """CREATE TABLE IF NOT EXISTS gnn_attention_patterns (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       source_var TEXT NOT NULL,
+                       target_var TEXT NOT NULL,
+                       attention REAL,
+                       n_observations INTEGER,
+                       discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                       UNIQUE(source_var, target_var)
+                   )""",
+                params=None,
+                max_retries=2,
+            )
+        except Exception:
+            pass
         for pattern in patterns:
             try:
                 execute_with_retry(
-                    """INSERT OR REPLACE INTO causal_discoveries
-                       (source_var, target_var, causal_strength, time_lag,
-                        p_value, method, n_observations, regime, is_active)
-                       VALUES (?, ?, ?, 0, ?, 'GNN_attention', ?, '_global', 1)""",
+                    """INSERT OR REPLACE INTO gnn_attention_patterns
+                       (source_var, target_var, attention, n_observations)
+                       VALUES (?, ?, ?, ?)""",
                     (pattern["source"], pattern["target"],
-                     pattern["attention"], 1.0 - pattern["attention"],
-                     pattern.get("n_obs", 0)),
+                     float(pattern.get("attention", 0.0)),
+                     int(pattern.get("n_obs", 0))),
                     max_retries=3,
                 )
             except Exception as e:

@@ -409,7 +409,14 @@ class TriplePerception:
                 ood_result=ood_result,
                 chronos_sizing=result["sizing_multiplier"],
             )
-            result["sizing_multiplier"] = dual_result["final_sizing_multiplier"]
+            # Audit fix (2026-04-19): DualAxis was returning 0.10 floor on every
+            # uncalibrated pair, multiplying through to $0.02 stakes → 100%
+            # of signals shadow-routed → ZERO real trades for 2 days. CAAT in
+            # custom_stake_amount already applies its own 8-part sizing
+            # discipline; we only need DualAxis to add information when it
+            # has high-confidence intervals, NOT to pessimistically halve
+            # everything during cold-start. Hard floor 0.30.
+            result["sizing_multiplier"] = max(0.30, float(dual_result["final_sizing_multiplier"]))
             result["signal_quality"] = dual_result["signal_quality"]
             result["dual_axis_explanation"] = dual_result["explanation"]
         except Exception as e:

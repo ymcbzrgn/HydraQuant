@@ -70,7 +70,13 @@ class MarketOODDetector:
       - Binary defensive_multiplier → sigmoid on distance/threshold ratio
     """
 
-    REGIMES = ["trending_bull", "trending_bear", "ranging", "crash", "recovery", "transition"]
+    # Audit fix (2026-04-19): regime labels MUST match RegimeClassifier exactly.
+    # Pre-fix list had 'transition' (wrong, RegimeClassifier emits
+    # 'transitional') + 'crash'/'recovery' (never produced by the classifier),
+    # so per-regime fit found 0 matching rows and refit reported "0 regimes
+    # fit". Now mirrors regime_classifier.RegimeClassifier.ALL_REGIMES.
+    REGIMES = ["trending_bull", "trending_bear", "ranging",
+               "high_volatility", "transitional"]
 
     def __init__(self, confidence_level: float = 0.95):
         """
