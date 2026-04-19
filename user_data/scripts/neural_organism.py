@@ -184,7 +184,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
 
     # ─── ORGAN: sizing (6 params) — position_sizer.py:121-175 ───
     "sizing.max_risk":              {"organ": "sizing", "default": 0.05, "min": 0.01, "max": 0.10},
-    "sizing.confidence_exponent":   {"organ": "sizing", "default": 1.5,  "min": 1.0,  "max": 3.0},
+    "sizing.confidence_exponent":   {"organ": "sizing", "default": 1.0,  "min": 1.0,  "max": 3.0},
     "sizing.kelly_cap":             {"organ": "sizing", "default": 0.25, "min": 0.10, "max": 0.50},
     "sizing.min_fraction_mult":     {"organ": "sizing", "default": 0.01, "min": 0.001, "max": 0.05},
     "sizing.max_fraction_mult":     {"organ": "sizing", "default": 1.5,  "min": 1.0,  "max": 2.0},

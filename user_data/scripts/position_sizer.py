@@ -388,7 +388,7 @@ class PositionSizer:
     """
 
     def __init__(self, max_portfolio_risk_per_trade: float = 0.05,
-                 confidence_exponent: float = 1.5):
+                 confidence_exponent: float = 1.0):
         self.max_risk = _p("sizing.max_risk", max_portfolio_risk_per_trade)
         self.exponent = _p("sizing.confidence_exponent", confidence_exponent)
         self.autonomy = AutonomyManager()
