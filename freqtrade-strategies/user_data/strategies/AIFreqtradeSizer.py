@@ -1457,11 +1457,9 @@ class AIFreqtradeSizer(IStrategy):
             if hasattr(self, '_perception_cache') and pair in self._perception_cache:
                 sizing_mult = self._perception_cache[pair].get("sizing_multiplier", sizing_mult)
 
-            # ═══ Phase 27 Task 11: CAAT Asymmetric Alpha multiplier ═══
-            # Layers hormonal / dream / Shannon / impact / integral / forgone / 4-layer
-            # regime on TOP of the existing Kelly×confidence fraction. Hawkes
-            # veto is already handled by the OrderFlow block further below; we
-            # only add the remaining PARÇA multipliers here (3-7, 9-10).
+            # ═══ Phase 27 Task 11: CAAT Asymmetric Alpha multiplier (compute only) ═══
+            caat_mult = 1.0
+            caat_breakdown = {}
             try:
                 caat_mult, caat_breakdown = self._caat_asymmetric_multiplier(
                     pair=pair,
@@ -1471,13 +1469,6 @@ class AIFreqtradeSizer(IStrategy):
                     last_candle=last_candle,
                     proposed_stake=proposed_stake,
                 )
-                if caat_mult != 1.0:
-                    old_stake = final_stake
-                    final_stake *= caat_mult
-                    logger.info(
-                        f"[Phase27:CAAT] {pair} × {caat_mult:.3f} "
-                        f"({old_stake:.2f} → {final_stake:.2f}) breakdown={caat_breakdown}"
-                    )
                 # Per-pair confidence threshold gate — Task 11 forgone alpha feedback.
                 pair_thr = self._pair_confidence_threshold(pair, regime_for_kelly)
                 if confidence < pair_thr:
@@ -1489,13 +1480,50 @@ class AIFreqtradeSizer(IStrategy):
             except Exception as e:
                 logger.debug(f"[Phase27:CAAT] multiplier skipped: {e}")
 
-            if sizing_mult != 1.0:
-                old_stake = final_stake
-                final_stake *= sizing_mult
-                logger.info(
-                    f"[Phase28:SizingMultiplier] {pair} stake adjusted: "
-                    f"${old_stake:.2f} × {sizing_mult:.2f} = ${final_stake:.2f}"
-                )
+            # ═══ Phase 27 Fix: UNIFIED SIZING (weighted average, not multiplicative) ═══
+            # Death-spiral fix: $50 × 0.64 × 0.50 × 0.30 × 1.14 = $0.54 → shadow → zero trades.
+            # Kelly (confidence^1.5 already applied inside PositionSizer) stays as base;
+            # condition multipliers (CAAT, DualAxis, Cerebellum, Lifecycle) are blended
+            # via weighted average so one weak signal cannot annihilate the stake.
+            cerebellum_mult = 1.0
+            try:
+                from cerebellum_timing import get_cerebellum
+                cerebellum_mult = float(get_cerebellum().get_timing_multiplier())
+            except Exception as e:
+                logger.debug(f"[Sprint2:Cerebellum] timing skipped: {e}")
+
+            lifecycle_mult = 1.0
+            lifecycle_danger = "NORMAL"
+            try:
+                from pheromone_field import get_pheromone_field
+                lc_state = get_pheromone_field().read("lifecycle_state")
+                if lc_state and isinstance(lc_state, dict):
+                    lifecycle_mult = float(lc_state.get("sizing_mult", 1.0))
+                    lifecycle_danger = lc_state.get("danger_response", "NORMAL")
+            except Exception as e:
+                logger.debug(f"[Sprint2:Lifecycle] read skipped: {e}")
+
+            weights = {"caat": 0.45, "dual_axis": 0.30, "cerebellum": 0.10, "lifecycle": 0.15}
+            parts = {
+                "caat": float(caat_mult),
+                "dual_axis": float(sizing_mult),
+                "cerebellum": float(cerebellum_mult),
+                "lifecycle": float(lifecycle_mult),
+            }
+            unified_mult = sum(parts[k] * weights[k] for k in weights)
+            unified_mult = max(0.20, min(unified_mult, 1.50))
+
+            old_way = final_stake * caat_mult * sizing_mult * cerebellum_mult * lifecycle_mult
+            pre_unified = final_stake
+            final_stake = final_stake * unified_mult
+            logger.info(
+                f"[Phase27:UnifiedSizing] {pair} kelly=${pre_unified:.2f} × "
+                f"unified={unified_mult:.3f} = ${final_stake:.2f} "
+                f"(OLD multiplicative would be ${old_way:.2f}) "
+                f"parts={{caat:{caat_mult:.2f}, dual:{sizing_mult:.2f}, "
+                f"cereb:{cerebellum_mult:.2f}, life:{lifecycle_mult:.2f}, conf:{confidence:.2f}}} "
+                f"caat_breakdown={caat_breakdown} danger={lifecycle_danger}"
+            )
             
             # ═══ SPRINT 2: Constitution Check ═══
             try:
@@ -1545,30 +1573,9 @@ class AIFreqtradeSizer(IStrategy):
             except Exception as e:
                 logger.debug(f"[Sprint2:OrderFlow] Check skipped: {e}")
 
-            # ═══ SPRINT 2: Cerebellum Timing ═══
-            try:
-                from cerebellum_timing import get_cerebellum
-                cerebellum = get_cerebellum()
-                timing_mult = cerebellum.get_timing_multiplier()
-                if timing_mult != 1.0:
-                    final_stake *= timing_mult
-                    logger.info(f"[Sprint2:Cerebellum] {pair} timing: ×{timing_mult:.2f}")
-            except Exception as e:
-                logger.debug(f"[Sprint2:Cerebellum] Check skipped: {e}")
-
-            # ═══ SPRINT 2: Lifecycle Sizing (from pheromone) ═══
-            try:
-                from pheromone_field import get_pheromone_field
-                pfield = get_pheromone_field()
-                lc_state = pfield.read("lifecycle_state")
-                if lc_state and isinstance(lc_state, dict):
-                    lc_sizing = lc_state.get("sizing_mult", 1.0)
-                    if lc_sizing != 1.0:
-                        final_stake *= lc_sizing
-                        logger.info(f"[Sprint2:Lifecycle] {pair} sizing: ×{lc_sizing:.2f} "
-                                   f"(danger={lc_state.get('danger_response', 'NORMAL')})")
-            except Exception as e:
-                logger.debug(f"[Sprint2:Lifecycle] Check skipped: {e}")
+            # Cerebellum timing + Lifecycle sizing are now folded into the
+            # Phase 27 UnifiedSizing weighted average above — applying them
+            # again here would re-create the multiplicative death spiral.
 
             # ═══ SPRINT 2: Self-Model Competence ═══
             try:
