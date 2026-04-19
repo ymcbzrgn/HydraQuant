@@ -800,6 +800,14 @@ def init_db():
             discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_active BOOLEAN DEFAULT 1,
             UNIQUE(source_var, target_var, time_lag, regime))''')
+        # Audit fix (2026-04-19): purge legacy GNN_attention rows that were
+        # mis-tagged as causal edges. gnn_organism now writes to its own
+        # `gnn_attention_patterns` table; this DELETE is a one-shot cleanup
+        # that is harmless to re-run (only removes rows that shouldn't exist).
+        try:
+            c.execute("DELETE FROM causal_discoveries WHERE method != 'PCMCI+'")
+        except sqlite3.OperationalError:
+            pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS counterfactual_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT, original_trade_id INTEGER,

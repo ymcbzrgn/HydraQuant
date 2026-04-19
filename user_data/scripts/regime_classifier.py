@@ -260,18 +260,24 @@ class FourLayerRegimeDetector:
             import numpy as _np
             from db import get_db_connection
             conn = get_db_connection()
+            # Audit fix (2026-04-19): only honour TRUE PCMCI+ edges. Pre-fix,
+            # gnn_organism wrote attention patterns with method='GNN_attention'
+            # into the same table, polluting the instability index with
+            # news-entity co-occurrence noise.
             if regime_hint:
                 rows = conn.execute("""
                     SELECT source_var, target_var, causal_strength, regime
                     FROM causal_discoveries
                     WHERE discovered_at > datetime('now', '-14 days')
                       AND regime = ?
+                      AND method = 'PCMCI+'
                 """, (regime_hint,)).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT source_var, target_var, causal_strength, regime
                     FROM causal_discoveries
                     WHERE discovered_at > datetime('now', '-14 days')
+                      AND method = 'PCMCI+'
                 """).fetchall()
             conn.close()
             if not rows or len(rows) < 2:
