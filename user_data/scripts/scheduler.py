@@ -427,7 +427,9 @@ class PipelineScheduler:
         self.scheduler.add_job(self._forgone_shadow_resolver, 'interval', minutes=30,
             id='forgone_resolver', name='Forgone Shadow Trade Resolver',
             max_instances=1, replace_existing=True)
-        self.scheduler.add_job(self._forgone_threshold_adapt, 'cron', day_of_week='sun', hour=6,
+        # Audit fix (2026-04-19): collided with foundation_fine_tune at 06:00
+        # → SQLITE_BUSY when both write concurrently. Slide to 06:45.
+        self.scheduler.add_job(self._forgone_threshold_adapt, 'cron', day_of_week='sun', hour=6, minute=45,
             id='forgone_thresholds', name='Per-Pair Threshold Adaptation',
             max_instances=1, replace_existing=True)
         # Phase 27 Task 10: Hawkes MLE refit — hourly, only if `tick` is installed
