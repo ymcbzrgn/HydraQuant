@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
 from freqtrade.strategy import IStrategy
 from freqtrade.persistence import Trade
 from freqtrade.strategy import CategoricalParameter, DecimalParameter, IntParameter
@@ -115,6 +116,15 @@ class AIFreqtradeSizer(IStrategy):
         # Phase 20: OpportunityScanner singleton + rate limit (prevent file descriptor leak)
         self._opp_scanner = None        # Lazy init singleton
         self._last_scan_time = 0        # Rate limit: min 5 min between scans
+
+        # Phase 27 Signal Quality: DCA-GATE throttle state.
+        # Previously the 6 DCA block points all called logger.warning on every
+        # guard attempt — LINK alone produced hundreds of identical lines in
+        # 10 minutes. _emit_dca_gate() deduplicates per (pair, reason) for 60s
+        # and emits a rollup every 5 minutes so the blocked-volume is visible
+        # without the spam.
+        self._dca_gate_last_log: dict[tuple[str, str], float] = {}
+        self._dca_gate_counter: dict[tuple[str, str], dict] = {}
 
         logger.info("AIFreqtradeSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget, Telegram & Staggered Batching.")
 
@@ -825,6 +835,8 @@ class AIFreqtradeSizer(IStrategy):
                     df_4h=_tp_4h,
                     df_1d=_tp_1d,
                     chart_features=_tp_chart,
+                    pair=pair,
+                    timeframe=self.timeframe,
                 )
                 if _tp_result:
                     # Store for sizing/confidence enrichment downstream
@@ -1405,6 +1417,36 @@ class AIFreqtradeSizer(IStrategy):
             logger.debug(f"[Portfolio Sync] {stake}: stake=${total:.2f} total_usd=${total_portfolio_usd:.2f} assets={len(all_balances)}")
         except Exception as e:
             logger.debug(f"[Portfolio Sync] Skipped: {e}")
+
+    def _emit_dca_gate(self, pair: str, reason: str, detail: str,
+                        extra: Optional[Dict[str, Any]] = None) -> None:
+        """Throttled emitter for `[DCA-GATE]` block events.
+
+        Emits at most one WARNING per (pair, reason) in any 60-second window
+        and a single `[DCA-GATE:ROLLUP]` summary every 5 minutes so we retain
+        the audit trail (count, last sample) without flooding journalctl.
+        """
+        import time
+        key = (pair, reason)
+        now = time.time()
+        last = self._dca_gate_last_log.get(key, 0.0)
+        bucket = self._dca_gate_counter.setdefault(
+            key, {"count": 0, "ts": now, "sample": dict(extra) if extra else {}}
+        )
+        bucket["count"] += 1
+        if extra:
+            bucket["sample"] = dict(extra)
+
+        if now - last >= 60.0:
+            logger.warning(f"[DCA-GATE] {pair} BLOCKED ({reason}) — {detail}")
+            self._dca_gate_last_log[key] = now
+
+        if now - bucket["ts"] >= 300.0:
+            logger.info(
+                f"[DCA-GATE:ROLLUP] {pair} {reason}: {bucket['count']} blocks in "
+                f"{(now - bucket['ts']) / 60:.1f}m (sample={bucket['sample']})"
+            )
+            self._dca_gate_counter[key] = {"count": 0, "ts": now, "sample": {}}
 
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float, max_stake: float,
@@ -2503,9 +2545,11 @@ class AIFreqtradeSizer(IStrategy):
                     pair=trade.pair, regime=regime_for_dca
                 )
                 if kelly_dca <= 0.005:
-                    logger.warning(
-                        f"[DCA-GATE] {trade.pair} BLOCKED — per-pair Kelly={kelly_dca:.4f} "
-                        f"(no structural edge in {regime_for_dca})"
+                    self._emit_dca_gate(
+                        trade.pair, reason="kelly",
+                        detail=(f"per-pair Kelly={kelly_dca:.4f} "
+                                f"(no structural edge in {regime_for_dca})"),
+                        extra={"kelly": round(kelly_dca, 6), "regime": regime_for_dca},
                     )
                     return None
 
@@ -2526,9 +2570,11 @@ class AIFreqtradeSizer(IStrategy):
                             proposed_stake=trade.stake_amount,
                         )
                         if caat_mult_dca < 0.30:
-                            logger.warning(
-                                f"[DCA-GATE] {trade.pair} BLOCKED — CAAT mult={caat_mult_dca:.3f} "
-                                f"<0.30 ({caat_breakdown_dca})"
+                            self._emit_dca_gate(
+                                trade.pair, reason="caat",
+                                detail=(f"CAAT mult={caat_mult_dca:.3f} <0.30 "
+                                        f"({caat_breakdown_dca})"),
+                                extra={"caat": round(caat_mult_dca, 4)},
                             )
                             return None
                     except Exception:
@@ -2544,9 +2590,10 @@ class AIFreqtradeSizer(IStrategy):
                     of_state = of_dca.analyze(trade.pair, trades=[])
                     n_branch = float(of_state.get("hawkes_branching_ratio", 0.0))
                     if n_branch >= 0.80:
-                        logger.warning(
-                            f"[DCA-GATE] {trade.pair} BLOCKED — Hawkes n={n_branch:.2f} "
-                            "≥0.80 (cascade risk)"
+                        self._emit_dca_gate(
+                            trade.pair, reason="hawkes",
+                            detail=f"Hawkes n={n_branch:.2f} ≥0.80 (cascade risk)",
+                            extra={"hawkes_branching_ratio": round(n_branch, 4)},
                         )
                         return None
                 except Exception:
@@ -2566,16 +2613,26 @@ class AIFreqtradeSizer(IStrategy):
                         proposed_dca = max_stake * 0.3
                         proposed_total = float(trade.stake_amount or 0) + proposed_dca
                         if proposed_total > max_total_stake:
-                            logger.warning(
-                                f"[DCA-GATE] {trade.pair} BLOCKED — proposed total "
-                                f"${proposed_total:.2f} > {max_pos_pct*100:.1f}% portfolio cap "
-                                f"(${max_total_stake:.2f})"
+                            self._emit_dca_gate(
+                                trade.pair, reason="portfolio_cap",
+                                detail=(f"proposed total ${proposed_total:.2f} > "
+                                        f"{max_pos_pct*100:.1f}% portfolio cap "
+                                        f"(${max_total_stake:.2f})"),
+                                extra={
+                                    "proposed_total": round(proposed_total, 2),
+                                    "cap": round(max_total_stake, 2),
+                                    "cap_pct": max_pos_pct,
+                                },
                             )
                             return None
                 except Exception as e:
                     logger.debug(f"[DCA-GATE] constitution cap check failed: {e}")
             except Exception as e:
-                logger.warning(f"[DCA-GATE] guard chain failed open ({e}); blocking DCA defensively")
+                self._emit_dca_gate(
+                    trade.pair, reason="fail_open",
+                    detail=f"guard chain failed open ({type(e).__name__}: {e}); blocking DCA defensively",
+                    extra={"error_type": type(e).__name__},
+                )
                 return None
 
             # All four Phase 27 gates passed — DCA is risk-bounded.

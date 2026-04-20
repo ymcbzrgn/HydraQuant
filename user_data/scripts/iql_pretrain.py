@@ -174,6 +174,70 @@ class ReplayBuffer:
         finally:
             conn.close()
 
+    def load_from_world_model_states(self, state_dim: int, action_dim: int) -> int:
+        """Bootstrap transitions from `world_model_states` snapshots.
+
+        Neither DuckDB nor the SQLite `rl_replay_buffer` is populated in a
+        fresh install — dream_engine is the only writer, and dream_engine
+        needs a trained world_model first, so the system deadlocks at
+        `insufficient data: 0 < 64` forever. This fallback reads consecutive
+        perception snapshots persisted by TriplePerception._persist_world_model_state
+        and synthesises (state, zero-action, zero-reward, next_state, done)
+        tuples so WorldModel has something to learn dynamics from. No
+        counterfactual labels are introduced — rewards stay at 0.0, which
+        the world model ignores (only the state transition loss matters).
+        """
+        conn = get_db_connection(AI_DB_PATH)
+        try:
+            rows = conn.execute("""
+                SELECT pair, timeframe, timestamp, ttm_embedding
+                FROM world_model_states
+                WHERE ttm_embedding IS NOT NULL
+                ORDER BY pair, timeframe, timestamp
+                LIMIT ?
+            """, (self.max_size,)).fetchall()
+
+            if not rows:
+                return 0
+
+            loaded = 0
+            by_key: Dict[str, List] = {}
+            for row in rows:
+                key = f"{row['pair']}|{row['timeframe']}"
+                by_key.setdefault(key, []).append(row)
+
+            for key, seq in by_key.items():
+                if len(seq) < 2:
+                    continue
+                for i in range(len(seq) - 1):
+                    try:
+                        state_vec = np.frombuffer(seq[i]["ttm_embedding"], dtype=np.float32)
+                        next_vec = np.frombuffer(seq[i + 1]["ttm_embedding"], dtype=np.float32)
+                    except Exception:
+                        continue
+
+                    state = np.zeros(state_dim, dtype=np.float32)
+                    next_state = np.zeros(state_dim, dtype=np.float32)
+                    state[: min(len(state_vec), state_dim)] = state_vec[: state_dim]
+                    next_state[: min(len(next_vec), state_dim)] = next_vec[: state_dim]
+
+                    self.add(
+                        state,
+                        np.zeros(action_dim, dtype=np.float32),
+                        0.0,
+                        next_state,
+                        i == len(seq) - 2,
+                    )
+                    loaded += 1
+
+            logger.info(
+                f"[IQL] Bootstrapped {loaded} transitions from world_model_states"
+            )
+            return loaded
+
+        finally:
+            conn.close()
+
 
 class IQLTrainer:
     """Implicit Q-Learning trainer using PyTorch."""

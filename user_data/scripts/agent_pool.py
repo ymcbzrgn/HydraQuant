@@ -532,9 +532,11 @@ class AgentPool:
 
         llm_to_use = llm or self._llm
         if not llm_to_use:
-            logger.warning("[AgentPool:Debate] No LLM available. Returning empty.")
-            return {"signal": "NEUTRAL", "confidence": 0.0,
-                    "reasoning": "No LLM available for agent debate", "source": "AGENT_POOL"}
+            logger.warning(
+                "[AgentPool:Debate] No LLM available — returning None "
+                "(caller decides fallback; no NEUTRAL pollution)"
+            )
+            return None
 
         agents = self.select_agents(regime)
         positions = {}
@@ -591,16 +593,22 @@ class AgentPool:
                 raw_content = self._process_retrieval_requests(raw_content, pair, agent_name)
 
                 parsed = self._parse_agent_response(raw_content)
+                if parsed is None:
+                    logger.warning(
+                        f"[AgentPool:R1] {agent_name} parse returned None — "
+                        f"skipping (no NEUTRAL pollution)"
+                    )
+                    continue
                 positions[agent_name] = parsed
-                logger.info(f"[AgentPool:R1] {agent_name} → {parsed.get('direction', '?')} "
-                           f"str={parsed.get('strength', 0):.2f}")
+                logger.info(f"[AgentPool:R1] {agent_name} → {parsed['direction']} "
+                           f"str={parsed['strength']:.2f}")
 
             except Exception as e:
-                logger.warning(f"[AgentPool:R1] {agent_name} failed: {e}")
-                positions[agent_name] = {
-                    "direction": "NEUTRAL", "strength": 0.0,
-                    "key_argument": f"Agent failed: {e}", "key_risk": "Agent unavailable"
-                }
+                logger.warning(
+                    f"[AgentPool:R1] {agent_name} failed "
+                    f"({type(e).__name__}): {e} — skipping (no NEUTRAL pollution)"
+                )
+                continue
 
         # ── Round 2: Devil's Advocate cross-examination ──
         majority_dir = self._compute_majority(positions)
@@ -725,6 +733,12 @@ class AgentPool:
 
         # ── Weighted Synthesis ──
         result = self._weighted_synthesis(pair, positions, regime, evidence_factsheet)
+        if result is None:
+            logger.info(
+                f"[AgentPool:Debate] {pair} synthesis returned None — "
+                f"no side-effects recorded, caller decides fallback"
+            )
+            return None
 
         # ── Record agent memories ──
         self._record_agent_memories(pair, regime, positions, result.get("confidence", 0))
@@ -814,8 +828,10 @@ class AgentPool:
         for name, pos in positions.items():
             if name in ("DevilsAdvocate", "EvidenceValidator"):
                 continue
-            d = pos.get("direction", "NEUTRAL")
-            s = pos.get("strength", 0)
+            d = pos.get("direction")
+            s = pos.get("strength")
+            if not d or s is None:
+                continue
             if d == "BULLISH":
                 bull += s
             elif d == "BEARISH":
@@ -842,13 +858,18 @@ class AgentPool:
             if perf["n_signals"] >= 10:
                 weight = _p("agent.vote_weight_base", 0.8) + (perf["win_rate"] * _p("agent.vote_weight_scale", 0.4))
 
-            direction = pos.get("direction", "NEUTRAL")
+            direction = pos.get("direction")
+            if not direction:
+                continue
             # Use round2 revised direction if available
             r2 = pos.get("round2", {})
             if r2.get("revised_direction"):
                 direction = r2["revised_direction"]
 
-            strength = float(pos.get("strength", 0.5))
+            strength_raw = pos.get("strength")
+            if strength_raw is None:
+                continue
+            strength = float(strength_raw)
             if r2.get("revised_strength") is not None:
                 strength = float(r2["revised_strength"])
 
@@ -905,7 +926,13 @@ class AgentPool:
             confidence += r3_modifier
             logger.info(f"[AgentPool:Synth] R3 modifier {r3_modifier:+.2f} → conf={confidence:.4f}")
 
-        confidence = round(max(0.01, min(confidence, 0.85)), 4)
+        confidence = round(min(confidence, 0.85), 4)
+        if confidence < 0.10:
+            logger.info(
+                f"[AgentPool:Synthesis] {pair} confidence too low ({confidence:.4f}) "
+                f"after R1+R2+R3 — returning None (no pollution)"
+            )
+            return None
 
         # Build reasoning
         reasoning_parts = [f"[AgentPool] {pair} {signal} conf={confidence:.2f}"]
@@ -939,39 +966,54 @@ class AgentPool:
         content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
         content = content.replace("```json", "").replace("```", "").strip()
 
-        try:
-            data = json.loads(content)
-            return {
-                "direction": data.get("direction", "NEUTRAL").upper(),
-                "strength": min(max(float(data.get("strength", 0.5)), 0.0), 1.0),
-                "key_argument": str(data.get("key_argument", ""))[:500],
-                "key_risk": str(data.get("key_risk", ""))[:500],
-            }
-        except (json.JSONDecodeError, ValueError):
-            pass
+        parsed = self._extract_agent_fields(content)
+        if parsed is not None:
+            return parsed
 
-        # Brace extraction fallback
         brace_start = content.find('{')
         brace_end = content.rfind('}')
         if brace_start >= 0 and brace_end > brace_start:
-            try:
-                data = json.loads(content[brace_start:brace_end + 1])
-                return {
-                    "direction": data.get("direction", "NEUTRAL").upper(),
-                    "strength": min(max(float(data.get("strength", 0.5)), 0.0), 1.0),
-                    "key_argument": str(data.get("key_argument", ""))[:500],
-                    "key_risk": str(data.get("key_risk", ""))[:500],
-                }
-            except Exception:
-                pass
+            parsed = self._extract_agent_fields(content[brace_start:brace_end + 1])
+            if parsed is not None:
+                return parsed
 
-        # Keyword fallback
-        lower = content.lower()
-        if "bullish" in lower:
-            return {"direction": "BULLISH", "strength": 0.5, "key_argument": content[:200], "key_risk": "Parse failed"}
-        elif "bearish" in lower:
-            return {"direction": "BEARISH", "strength": 0.5, "key_argument": content[:200], "key_risk": "Parse failed"}
-        return {"direction": "NEUTRAL", "strength": 0.3, "key_argument": content[:200], "key_risk": "Parse failed"}
+        logger.warning(
+            f"[AgentPool] unparseable R1 response (len={len(content)}) — "
+            f"returning None to skip agent"
+        )
+        return None
+
+    @staticmethod
+    def _extract_agent_fields(raw: str) -> Optional[Dict]:
+        """Strictly parse an R1 agent JSON response.
+
+        Returns None when the payload is not valid JSON, or when `direction`
+        or `strength` are missing. No NEUTRAL/0.0 defaults — callers MUST skip
+        an agent whose output cannot be validated, otherwise polluted rows
+        poison agent_memory / weighted synthesis downstream.
+        """
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        direction = data.get("direction")
+        strength = data.get("strength")
+        if not direction or strength is None:
+            return None
+        try:
+            strength_f = float(strength)
+        except (TypeError, ValueError):
+            return None
+
+        return {
+            "direction": str(direction).upper(),
+            "strength": min(max(strength_f, 0.0), 1.0),
+            "key_argument": str(data.get("key_argument", ""))[:500],
+            "key_risk": str(data.get("key_risk", ""))[:500],
+        }
 
     def _parse_round2_response(self, content) -> Dict:
         """Parse Round 2 response."""
@@ -1098,8 +1140,12 @@ class AgentPool:
             for name, pos in positions.items():
                 if name == "ReflectionAgent":
                     continue
-                direction = pos.get("direction", "neutral").lower()
-                strength = float(pos.get("strength", 0.5) or 0.5)
+                raw_dir = pos.get("direction")
+                raw_str = pos.get("strength")
+                if not raw_dir or raw_str is None:
+                    continue
+                direction = str(raw_dir).lower()
+                strength = float(raw_str)
                 try:
                     self._graph_store.add_edge(
                         "entity", name.lower(),
@@ -1188,12 +1234,37 @@ class AgentPool:
 
     def _record_agent_memories(self, pair: str, regime: str, positions: Dict,
                                 evidence_confidence: float):
-        """Record what each agent said (for later outcome matching)."""
+        """Record what each agent said (for later outcome matching).
+
+        Guards (prevents NEUTRAL/0.0 pollution in agent_memory):
+          1. Missing direction or strength → skip that agent row.
+          2. Synthesis evidence_confidence <= 0.01 → skip the whole write
+             (synthesis had no real signal; storing it poisons track records).
+          3. R1 fallback `NEUTRAL` + strength 0 → skip that row.
+        """
+        if evidence_confidence is None or evidence_confidence <= 0.01:
+            logger.info(
+                f"[AgentPool:Memory] {pair} skip — evidence_confidence "
+                f"{evidence_confidence} too low, no real signal to record"
+            )
+            return
+
+        inserted = 0
+        skipped = 0
         try:
             conn = self._get_conn()
             for agent_name, pos in positions.items():
-                direction = pos.get("direction", "NEUTRAL")
-                strength = float(pos.get("strength", 0.5) or 0.5)
+                direction = pos.get("direction")
+                strength_raw = pos.get("strength")
+                if not direction or strength_raw is None:
+                    skipped += 1
+                    continue
+                try:
+                    strength = float(strength_raw)
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+
                 # Phase 27 audit fix: R2 revised_direction AND revised_strength must
                 # BOTH be taken into account — previously strength was pinned to R1.
                 r2 = pos.get("round2", {}) or {}
@@ -1205,6 +1276,10 @@ class AgentPool:
                     except (TypeError, ValueError):
                         pass
 
+                if direction == "NEUTRAL" and strength <= 0.0:
+                    skipped += 1
+                    continue
+
                 conn.execute("""
                     INSERT INTO agent_memory
                     (agent_type, pair, regime, signal, strength, key_argument, evidence_engine_confidence)
@@ -1213,9 +1288,12 @@ class AgentPool:
                       strength,
                       pos.get("key_argument", "")[:500],
                       evidence_confidence))
+                inserted += 1
             conn.commit()
             conn.close()
-            logger.debug(f"[AgentPool:Memory] {pair} {len(positions)} agent memories recorded")
+            logger.debug(
+                f"[AgentPool:Memory] {pair} inserted={inserted} skipped={skipped}"
+            )
         except Exception as e:
             logger.debug(f"[AgentPool:Memory] {pair} recording failed: {e}")
 
