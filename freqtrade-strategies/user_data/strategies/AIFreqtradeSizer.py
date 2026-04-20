@@ -1421,6 +1421,22 @@ class AIFreqtradeSizer(IStrategy):
         # Sync real exchange balance to AI modules (every trade entry)
         self._sync_portfolio_to_ai()
 
+        # ═══ Phase 27: Full-portfolio base stake — Kelly decides the fraction ═══
+        # Freqtrade's config stake_amount is a fixed dollar figure. Hand Kelly
+        # the FULL wallet; Kelly already answers "what fraction to risk?" and
+        # Constitution caps the ceiling. No hardcoded % band in between.
+        try:
+            portfolio_val = float(self.wallets.get_total_stake_amount())
+            if portfolio_val > 0:
+                old_proposed = proposed_stake
+                proposed_stake = min(portfolio_val, max_stake)
+                logger.info(
+                    f"[Phase27:DynamicBase] {pair} portfolio=${portfolio_val:.2f} "
+                    f"base=${proposed_stake:.2f} (was ${old_proposed:.2f}) — Kelly decides fraction"
+                )
+        except Exception as e:
+            logger.debug(f"[Phase27:DynamicBase] override skipped: {e}")
+
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
 
@@ -1683,8 +1699,36 @@ class AIFreqtradeSizer(IStrategy):
                 logger.debug(f"[Phase27:Shadow] log failed: {e}")
             return 0.0  # Freqtrade: 0 = skip entry
 
-        # Min stake floor: only enforce for real trades that passed the threshold
+        # ═══ Phase 27: Min-stake forced-ratio guard ═══
+        # Bybit BTC perp min ≈ $160. If Kelly/CAAT wanted $2, naively lifting
+        # to min_stake is an 80× forced bet — the exchange, not the organism,
+        # would be setting position size. We tolerate up to 3× inflation;
+        # beyond that, route to SHADOW so the pair sits out until Kelly grows.
         if final_stake < min_stake:
+            forced_ratio = min_stake / (final_stake + 1e-8)
+            if forced_ratio > 3.0:
+                try:
+                    ai_dec = ai_decision if 'ai_decision' in locals() else {}
+                    self.forgone_engine.log_forgone_signal(
+                        pair=pair,
+                        signal_type=ai_dec.get("signal", "NEUTRAL"),
+                        confidence=float(ai_dec.get("confidence", 0.0) or 0.0),
+                        entry_price=float(current_rate),
+                        was_executed=False,
+                        regime=ai_dec.get("regime"),
+                    )
+                except Exception as e:
+                    logger.debug(f"[Phase27:MinStakeGuard] shadow log failed: {e}")
+                logger.info(
+                    f"[Phase27:MinStakeGuard] {pair} SKIP — exchange min "
+                    f"${min_stake:.2f} vs desired ${final_stake:.2f} "
+                    f"(forced {forced_ratio:.1f}x — max tolerated 3x) → SHADOW"
+                )
+                return 0.0
+            logger.info(
+                f"[Phase27:MinStakeGuard] {pair} lift ${final_stake:.2f} → "
+                f"${min_stake:.2f} (forced {forced_ratio:.1f}x ≤ 3x tolerance)"
+            )
             final_stake = min_stake
 
         return min(final_stake, max_stake)
