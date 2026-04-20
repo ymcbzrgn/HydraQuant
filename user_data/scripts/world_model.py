@@ -241,6 +241,11 @@ class WorldModel:
         loaded = buffer.load_from_duckdb(TOTAL_STATE_DIM, DIM_ACTION)
         if loaded == 0:
             loaded = buffer.load_from_sqlite(TOTAL_STATE_DIM, DIM_ACTION)
+        if loaded == 0:
+            # Signal Quality bootstrap (2026-04-20): synthesise transitions
+            # from consecutive perception snapshots so the world model can
+            # learn dynamics before dream_engine has produced any rollouts.
+            loaded = buffer.load_from_world_model_states(TOTAL_STATE_DIM, DIM_ACTION)
 
         if loaded < batch_size:
             return {"error": f"insufficient data: {loaded} < {batch_size}"}

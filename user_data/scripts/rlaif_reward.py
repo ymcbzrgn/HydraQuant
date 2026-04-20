@@ -102,19 +102,21 @@ def _parse_rubric_response(content: str) -> Optional[Dict[str, float]]:
         data = json.loads(txt[start:end + 1])
     except (json.JSONDecodeError, ValueError):
         return None
-    # Post-audit fix: one missing / malformed dimension used to invalidate the
-    # WHOLE judge response — two out of three judges with a single typo each
-    # and WCO collapses to zero inputs. Now we fall back to 0.5 (neutral) for
-    # the missing dim and keep the rest. If EVERY dimension is malformed the
-    # caller still gets {dim: 0.5 for each}, which contributes a composite of
-    # 0.0 (matches "no information" intuition).
+    # Strict parse: ANY malformed dimension invalidates the provider response.
+    # Previous behaviour fell back to 0.5 (neutral) per missing dim, which
+    # silently injected "no information" into the WCO min and poisoned
+    # composite scoring. The Signal Quality audit (2026-04-20) reversed this
+    # — `rlaif_rewards` now stores only provider rows where every dim parsed.
     scores: Dict[str, float] = {}
     for dim in RUBRIC:
         raw = data.get(dim)
         try:
             val = float(raw)
         except (TypeError, ValueError):
-            val = 0.5  # neutral fallback — keep response, don't discard
+            logger.warning(
+                f"[RLAIF] dimension '{dim}' parse failed ({raw!r}) — skipping provider"
+            )
+            return None
         scores[dim] = max(0.0, min(1.0, val))
     return scores
 
@@ -237,8 +239,14 @@ class RLAIFRewardGenerator:
         judged = await self._score_with_judges(verdict, context)
         wco = judged.get("per_dim_wco")
         if wco is None:
-            # Judges unavailable → fall back to env-only reward.
-            record = {
+            # Judges unavailable → NO DB persist (previous behaviour stored NULL
+            # rubric rows that poisoned downstream rlaif analytics). The caller
+            # still gets an env-only reward so trade accounting is not blocked.
+            logger.warning(
+                f"[RLAIF] {verdict.get('trade_id')} all judges failed "
+                f"({judged.get('error')}) — env-only reward, skipping DB persist"
+            )
+            return {
                 "trade_id": verdict.get("trade_id"),
                 "pair": verdict.get("pair"),
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -251,9 +259,8 @@ class RLAIFRewardGenerator:
                 "total_reward": float(env_reward),
                 "outcome_pnl": verdict.get("pnl"),
                 "error": judged.get("error"),
+                "persisted": False,
             }
-            self._persist(record)
-            return record
 
         composite = self._composite(wco)
         total = self.ENV_WEIGHT * env_reward + self.LLM_WEIGHT * composite
@@ -272,6 +279,7 @@ class RLAIFRewardGenerator:
             "cdr": judged.get("cdr"),
         }
         self._persist(record)
+        record["persisted"] = True
         logger.info(
             f"[RLAIF] trade={verdict.get('trade_id')} {verdict.get('pair')} "
             f"env={env_reward:+.2f} llm={composite:+.2f} → total={total:+.2f} "

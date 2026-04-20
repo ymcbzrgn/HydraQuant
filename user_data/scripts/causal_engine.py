@@ -384,7 +384,13 @@ class CausalEngine:
         # Assemble data
         df = self._assemble_time_series(regime=regime, lookback_days=lookback_days)
         if df is None:
-            return {"error": "insufficient data", "edges": []}
+            logger.warning(
+                f"[CausalEngine:{regime}] _assemble_time_series returned None — "
+                f"insufficient trade data or regime labels. Check the "
+                f"ai_decisions.regime distribution; if it's all one label, "
+                f"regime-specific series cannot be built and PCMCI+ is skipped."
+            )
+            return {"error": "insufficient data", "edges": [], "regime": regime}
 
         var_names = list(df.columns)
         data_array = df.values

@@ -231,6 +231,8 @@ class TriplePerception:
         df_1d: Optional[pd.DataFrame] = None,
         ee_subscores: Optional[Dict[str, float]] = None,
         chart_features: Optional[Dict[str, float]] = None,
+        pair: Optional[str] = None,
+        timeframe: str = "1h",
     ) -> Dict[str, any]:
         """Run Triple Perception pipeline.
 
@@ -451,7 +453,73 @@ class TriplePerception:
             f"CB={'Y' if result['components_available']['catboost'] else 'N'})"
         )
 
+        if pair and result["components_available"].get("ttm") and df_1h is not None and len(df_1h):
+            self._persist_world_model_state(
+                pair=pair, timeframe=timeframe, df_1h=df_1h,
+                ttm_embedding=result["ttm_embedding"],
+                chart_features=chart_features,
+            )
+
         return result
+
+    def _persist_world_model_state(
+        self,
+        pair: str,
+        timeframe: str,
+        df_1h: pd.DataFrame,
+        ttm_embedding: np.ndarray,
+        chart_features: Optional[Dict[str, float]],
+    ) -> None:
+        """Write the current perception snapshot to `world_model_states`.
+
+        This table is the input to world_model.train_from_buffer() AND the
+        source for TTM/Chronos fine-tuning pipelines. Before the Signal
+        Quality sprint (2026-04-20) no module actually wrote to it — only
+        readers existed — so WorldModel perpetually reported
+        `insufficient data: 0 < 64` and dream_scenarios stayed empty.
+
+        One row per (pair, timeframe, timestamp) — UNIQUE constraint makes
+        the write idempotent when perceive() fires multiple times within a
+        single candle. Schema columns missing from the live perception
+        (`fng`, `hormones_json`) are left NULL; downstream readers already
+        tolerate NULLs there.
+        """
+        try:
+            import json as _json
+            from datetime import datetime as _dt, timezone as _tz
+            from db import get_db_connection
+
+            last_ts = df_1h.index[-1] if hasattr(df_1h, "index") else _dt.now(tz=_tz.utc)
+            if hasattr(last_ts, "to_pydatetime"):
+                last_ts = last_ts.to_pydatetime()
+            if getattr(last_ts, "tzinfo", None) is None:
+                last_ts = last_ts.replace(tzinfo=_tz.utc) if hasattr(last_ts, "replace") else last_ts
+            ts_iso = last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts)
+
+            embedding_bytes = np.asarray(ttm_embedding, dtype=np.float32).tobytes()
+            chart_json = _json.dumps(chart_features) if chart_features else None
+
+            regime = None
+            try:
+                from rag_graph import _resolve_pair_regime
+                regime = _resolve_pair_regime(pair)
+            except Exception:
+                pass
+
+            conn = get_db_connection()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO world_model_states
+                       (pair, timeframe, timestamp, ttm_embedding,
+                        chart_features_json, regime, fng, hormones_json)
+                       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                    (pair, timeframe, ts_iso, embedding_bytes, chart_json, regime),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"[TriplePerception:Persist] {pair} {timeframe} failed: {e}")
 
     def _catboost_predict(
         self,

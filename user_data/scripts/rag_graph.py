@@ -4,7 +4,8 @@ import json
 import re
 import sys
 
-from typing import List, Dict, Any, Literal
+from concurrent.futures import TimeoutError as _FuturesTimeout
+from typing import List, Dict, Any, Literal, Optional
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 
@@ -418,14 +419,35 @@ def _format_tech_for_coordinator(td: dict) -> str:
 
 # --- Phase 18: Fallback Functions (when LLM is exhausted) ---
 
-def _technical_fallback(tech_data: dict, pair: str = "UNKNOWN") -> dict:
+def _abstain_signal(pair: str, reason: str, source: str = "ABSTAIN") -> dict:
+    """Canonical 'no usable signal' payload.
+
+    Returned (instead of legacy NEUTRAL/0.01) when every tier has declined
+    to emit a signal. Confidence 0.0 + source != 'AI' means:
+      - `_record_signal_health` guard skips it (no pollution).
+      - Strategy `custom_stake_amount` routes through UnifiedSizing → low
+        unified_mult → MinStakeGuard → SHADOW (no real entry, no fees).
+    The `abstain` flag is the explicit contract for downstream consumers
+    who want to skip even the SHADOW path.
+    """
+    return {
+        "signal": "NEUTRAL",
+        "confidence": 0.0,
+        "reasoning": f"[Abstain] {pair}: {reason}",
+        "source": source,
+        "abstain": True,
+    }
+
+
+def _technical_fallback(tech_data: dict, pair: str = "UNKNOWN") -> Optional[dict]:
     """
     Phase 20: Evidence Engine replaces the simple rule-based fallback.
     Falls back to legacy scoring if Evidence Engine fails.
+    Returns None when all tiers (EE + legacy) have no usable data —
+    callers must interpret None as "skip signal emission".
     """
-    # Try Evidence Engine first (LLM-free, 30+ data sources, 0.35-0.55 cap)
     try:
-        from evidence_engine import EvidenceEngine
+        from evidence_engine import EvidenceEngine, EvidenceEngineDataError
         engine = EvidenceEngine(
             pattern_store=_pattern_store,
             ohlcv_matcher=_ohlcv_matcher,
@@ -436,23 +458,30 @@ def _technical_fallback(tech_data: dict, pair: str = "UNKNOWN") -> dict:
         if result and result.get("confidence", 0) > 0:
             _record_signal_health(pair, "EVIDENCE_ENGINE", result["signal"], result["confidence"])
             _signal_stats["total"] += 1
-            _signal_stats["ai"] += 1  # Evidence Engine = data-driven AI
+            _signal_stats["ai"] += 1
             logger.info(f"[EvidenceEngine] {pair}: {result['signal']} conf={result['confidence']:.2f}")
             return result
+    except EvidenceEngineDataError as e:
+        logger.info(f"[EvidenceEngine] {pair} no usable data ({e}) — trying legacy")
     except Exception as e:
         logger.warning(f"[EvidenceEngine] {pair} failed, using legacy fallback: {e}")
 
     return _legacy_technical_fallback(tech_data)
 
 
-def _legacy_technical_fallback(tech_data: dict) -> dict:
+def _legacy_technical_fallback(tech_data: dict) -> Optional[dict]:
     """
     Legacy rule-based technical scoring (Phase 18 original).
     Used ONLY when Evidence Engine also fails. Max confidence cap: 0.35.
+    Returns None when no indicator data is available — callers must skip
+    trade emission rather than inject NEUTRAL/0.01 pollution.
     """
     if not tech_data or not tech_data.get("current_price"):
-        return {"signal": "NEUTRAL", "confidence": 0.01,
-                "reasoning": "[Legacy Fallback] No indicator data available", "source": "FALLBACK"}
+        logger.warning(
+            "[Legacy Fallback] no indicator data — returning None "
+            "(caller must skip signal emission)"
+        )
+        return None
 
     score = 0.0
     reasons = []
@@ -666,15 +695,127 @@ def _voting_fallback(tech_text: str, sent_text: str, news_text: str) -> dict:
     }
 
 
-def _record_signal_health(pair: str, source: str, signal_type: str, confidence: float):
-    """Helper: record a signal to the signal_health SQLite table."""
+def _ensemble_coord_pool(coord: dict, pool: dict) -> dict:
+    """Signal Quality sprint 2026-04-20 — MADAM parallel ensemble.
+
+    The Coordinator (single LLM) and the AgentPool (multi-round adaptive
+    debate) now run in parallel and their outputs are blended here:
+      * AGREE on direction → 0.55×coord + 0.45×pool confidence, +10% consensus
+        bonus, capped at 0.95.
+      * ONE NEUTRAL, ONE directional → trust the directional side but
+        haircut its confidence by 30% (one dissenter weakens conviction).
+      * DISAGREE (BULL vs BEAR) → NEUTRAL with confidence 0.0; fighting signals
+        are a reliable "stay out" indicator.
+    Reasoning strings are concatenated (truncated to 300 chars each) so
+    downstream auditing sees both sides of the debate, not a single synthesis.
+    """
+    coord_sig = coord.get("signal")
+    pool_sig = pool.get("signal")
+    coord_conf = float(coord.get("confidence", 0.0))
+    pool_conf = float(pool.get("confidence", 0.0))
+
+    if coord_sig == pool_sig:
+        ensemble_conf = 0.55 * coord_conf + 0.45 * pool_conf
+        ensemble_conf = min(ensemble_conf * 1.10, 0.95)
+        combined = (
+            f"[Coord] {str(coord.get('reasoning', ''))[:300]}\n"
+            f"[Pool] {str(pool.get('reasoning', ''))[:300]}"
+        )
+        return {
+            "signal": coord_sig,
+            "confidence": round(ensemble_conf, 4),
+            "reasoning": combined,
+            "source": "ENSEMBLE",
+        }
+
+    if "NEUTRAL" in (coord_sig, pool_sig):
+        directional = coord if coord_sig != "NEUTRAL" else pool
+        label = "Coord" if directional is coord else "Pool"
+        ensemble_conf = float(directional.get("confidence", 0.0)) * 0.70
+        return {
+            "signal": directional.get("signal"),
+            "confidence": round(ensemble_conf, 4),
+            "reasoning": (
+                f"[Ensemble: partial agreement — {coord_sig} vs {pool_sig}, "
+                f"trusting {label}] "
+                f"{str(directional.get('reasoning', ''))[:400]}"
+            ),
+            "source": "ENSEMBLE",
+        }
+
+    return {
+        "signal": "NEUTRAL",
+        "confidence": 0.0,
+        "reasoning": (
+            f"[Ensemble: disagreement — Coord={coord_sig} (conf={coord_conf:.2f}), "
+            f"Pool={pool_sig} (conf={pool_conf:.2f})]"
+        ),
+        "source": "ENSEMBLE",
+    }
+
+
+def _resolve_pair_regime(pair: str) -> str:
+    """Return the freshest regime label for `pair` from `regime_layers`.
+
+    The Signal Quality audit (2026-04-20) found that ai_decisions.regime held
+    a single hardcoded string for every row, which made per-regime causal
+    discovery (`causal_engine._assemble_time_series`) impossible — every
+    pass-through collapsed to the same bucket. This helper reads the latest
+    `regime_layers.layer3_adx_regime` (populated by FourLayerRegimeDetector)
+    and falls back to `RegimeClassifier.classify` on raw tech data if no
+    snapshot exists yet. The final fallback is `"transitional"` — the
+    neutral label already used elsewhere — so downstream joins never break
+    on NULL.
+    """
+    try:
+        from db import get_db_connection
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT layer3_adx_regime FROM regime_layers "
+                "WHERE pair = ? AND layer3_adx_regime IS NOT NULL "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (pair,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            return str(row[0])
+    except Exception as e:
+        logger.debug(f"[RegimeResolve] regime_layers lookup failed for {pair}: {e}")
+
+    return "transitional"
+
+
+def _record_signal_health(pair: str, source: str, signal_type: str, confidence):
+    """Helper: record a signal to the signal_health SQLite table.
+
+    Guards (prevents polluted NEUTRAL/0.0/0.01 rows that poisoned the table):
+      - Missing source, signal_type, or confidence → skip.
+      - Confidence below 0.10 → skip (synthesis had no real signal).
+      - NEUTRAL from any source ending in 'FALLBACK' or 'ABSTAIN' → skip.
+    """
+    if not source or not signal_type or confidence is None:
+        return
+    try:
+        confidence_f = float(confidence)
+    except (TypeError, ValueError):
+        return
+    if confidence_f < 0.10:
+        return
+    upper_source = source.upper()
+    if signal_type == "NEUTRAL" and (
+        upper_source.endswith("FALLBACK") or upper_source == "ABSTAIN"
+    ):
+        return
+
     conn = None
     try:
         from db import get_db_connection
         conn = get_db_connection()
         conn.execute(
             "INSERT INTO signal_health (pair, signal_source, signal_type, confidence) VALUES (?, ?, ?, ?)",
-            (pair, source, signal_type, confidence)
+            (pair, source, signal_type, confidence_f)
         )
         conn.commit()
     except Exception as e:
@@ -1565,10 +1706,23 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
         if not raw_content:
             return None
 
+        def _finalize(data):
+            sig = data.get("signal")
+            conf = data.get("confidence")
+            if not sig or conf is None:
+                raise ValueError(
+                    "coordinator parse: missing signal/confidence in JSON payload"
+                )
+            try:
+                conf_f = float(conf)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"coordinator parse: confidence not numeric ({conf!r})") from exc
+            return (str(sig).upper(), conf_f, data.get("reasoning", ""))
+
         # Tier A: Direct JSON parse (entire response is valid JSON)
         try:
             data = json.loads(raw_content)
-            return (data.get("signal", "NEUTRAL"), float(data.get("confidence", 0.0)), data.get("reasoning", ""))
+            return _finalize(data)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -1579,7 +1733,7 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
             try:
                 data = json.loads(raw_content[brace_start:brace_end + 1])
                 logger.info("[Coordinator] JSON extracted via brace extraction (text around JSON stripped)")
-                return (data.get("signal", "NEUTRAL"), float(data.get("confidence", 0.0)), data.get("reasoning", ""))
+                return _finalize(data)
             except (json.JSONDecodeError, ValueError):
                 pass
 
@@ -1597,72 +1751,162 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
         logger.error(f"Failed to parse Coordinator JSON (all 3 tiers). Raw: {raw_content[:300]}")
         return None
 
-    # Tier 1: Primary LLM call (temperature=0.7)
-    parsed = None
-    try:
-        response = llm.invoke(coordinator_msgs, temperature=0.7, priority="critical")
-        parsed = _parse_coordinator_response(response.content)
-    except Exception as e:
-        logger.error(f"[NODE] Coordinator primary LLM failed: {type(e).__name__}: {e}")
-
-    # Tier 2: Retry with lower temperature + stricter JSON-only prompt
-    if parsed is None:
-        logger.warning("[NODE] Coordinator: Primary failed/unparseable. Retrying with temperature=0.3 + strict JSON prompt...")
+    # Signal Quality sprint 2026-04-20 — Tier 0 MADAM PARALLEL ENSEMBLE.
+    # Coordinator LLM and AgentPool multi-agent debate now run concurrently;
+    # the Coordinator path never short-circuits AgentPool, so we get ENSEMBLE
+    # rows in signal_health instead of AI≫AGENT_POOL 100:1.
+    def _coordinator_path() -> Optional[Dict[str, Any]]:
+        parsed_local = None
         try:
-            strict_msgs = [
-                SystemMessage(content="""You are a JSON-only API endpoint. You receive trading analysis and return a single JSON object.
+            response = llm.invoke(coordinator_msgs, temperature=0.7, priority="critical")
+            parsed_local = _parse_coordinator_response(response.content)
+        except Exception as e:
+            logger.error(
+                f"[Ensemble:Coord] {pair} primary failed: {type(e).__name__}: {e}"
+            )
+
+        if parsed_local is None:
+            try:
+                strict_msgs = [
+                    SystemMessage(content="""You are a JSON-only API endpoint. You receive trading analysis and return a single JSON object.
 RULES:
 1. Your ENTIRE response is a JSON object. No text before. No text after. No markdown. No code fences.
 2. If you cannot decide, return: {"signal":"NEUTRAL","confidence":0.50,"reasoning":"Insufficient evidence for directional call."}
 3. Confidence range: 0.00 to 0.85. NEVER exceed 0.85.
 4. Signal must be exactly one of: "BULLISH", "BEARISH", "NEUTRAL"."""),
-                HumanMessage(content=prompt + "\n\nRESPOND WITH ONLY THE JSON OBJECT. Example format:\n{\"signal\":\"NEUTRAL\",\"confidence\":0.52,\"reasoning\":\"Mixed signals across agents.\"}")
-            ]
-            response = llm.invoke(strict_msgs, temperature=0.3, priority="critical")
-            parsed = _parse_coordinator_response(response.content)
+                    HumanMessage(content=prompt + "\n\nRESPOND WITH ONLY THE JSON OBJECT. Example format:\n{\"signal\":\"NEUTRAL\",\"confidence\":0.52,\"reasoning\":\"Mixed signals across agents.\"}"),
+                ]
+                response = llm.invoke(strict_msgs, temperature=0.3, priority="critical")
+                parsed_local = _parse_coordinator_response(response.content)
+            except Exception as e:
+                logger.error(
+                    f"[Ensemble:Coord] {pair} retry failed: {type(e).__name__}: {e}"
+                )
+
+        if parsed_local is None:
+            return None
+        signal_l, conf_l, reason_l = parsed_local
+        return {
+            "signal": signal_l,
+            "confidence": float(conf_l),
+            "reasoning": reason_l,
+            "source": "COORDINATOR",
+        }
+
+    def _agent_pool_path() -> Optional[Dict[str, Any]]:
+        try:
+            from agent_pool import AgentPool
+            _pool = AgentPool(llm_router=llm)
+            _pool_factsheet = ""
+            if _ee_cached_result:
+                try:
+                    from evidence_engine import EvidenceEngine
+                    _pool_factsheet = EvidenceEngine().format_factsheet(_ee_cached_result)
+                except Exception:
+                    _pool_factsheet = (
+                        f"Evidence: {_ee_cached_result.get('signal', 'NEUTRAL')} "
+                        f"conf={_ee_cached_result.get('confidence', 0):.2f}"
+                    )
+
+            _pool_regime = "transitional"
+            if _regime_classifier and tech_data:
+                try:
+                    _pool_regime = RegimeClassifier.classify(tech_data)
+                except Exception:
+                    pass
+
+            pool_local = _pool.run_debate(
+                pair=pair, evidence_factsheet=_pool_factsheet,
+                regime=_pool_regime, tech_data=tech_data, llm=llm,
+            )
+            if pool_local is None:
+                return None
+            return {
+                "signal": pool_local.get("signal"),
+                "confidence": float(pool_local.get("confidence", 0.0)),
+                "reasoning": pool_local.get("reasoning", ""),
+                "source": "AGENT_POOL",
+            }
         except Exception as e:
-            logger.error(f"[NODE] Coordinator retry also failed: {type(e).__name__}: {e}")
+            logger.warning(f"[Ensemble:Pool] {pair} debate failed: {e}")
+            return None
 
-    # Tier 1/2 success
-    if parsed is not None:
-        signal, conf, reason = parsed
-        return {"signal": signal, "confidence": conf, "reasoning": reason, "source": "AI"}
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    with _TPE(max_workers=2, thread_name_prefix=f"madam-{pair}") as _madam_pool:
+        _coord_future = _madam_pool.submit(_coordinator_path)
+        _pool_future = _madam_pool.submit(_agent_pool_path)
 
-    # Tier 2.5: AgentPool Debate (Phase 20 — adaptive agents with memory + track record)
-    # Uses Evidence Engine FactSheet (already computed above) as mandatory input
-    # 4 regime-adaptive agents with 2-round cross-examination debate
-    try:
-        from agent_pool import AgentPool
-        _pool = AgentPool(llm_router=llm)
-        _pool_factsheet = ""
-        if _ee_cached_result:
-            try:
-                from evidence_engine import EvidenceEngine
-                _pool_factsheet = EvidenceEngine().format_factsheet(_ee_cached_result)
-            except Exception:
-                _pool_factsheet = f"Evidence: {_ee_cached_result.get('signal', 'NEUTRAL')} conf={_ee_cached_result.get('confidence', 0):.2f}"
+        try:
+            coord_result = _coord_future.result(timeout=20)
+        except _FuturesTimeout:
+            logger.warning(
+                f"[Ensemble] {pair} coordinator path timed out after 20s — treating as None"
+            )
+            coord_result = None
+        except Exception as _e:
+            logger.warning(
+                f"[Ensemble] {pair} coordinator path failed: "
+                f"{type(_e).__name__}: {_e}"
+            )
+            coord_result = None
 
-        _pool_regime = "transitional"
-        if _regime_classifier and tech_data:
-            try:
-                _pool_regime = RegimeClassifier.classify(tech_data)
-            except Exception:
-                pass
+        try:
+            pool_debate_result = _pool_future.result(timeout=25)
+        except _FuturesTimeout:
+            logger.warning(
+                f"[Ensemble] {pair} pool debate timed out after 25s — treating as None"
+            )
+            pool_debate_result = None
+        except Exception as _e:
+            logger.warning(
+                f"[Ensemble] {pair} pool debate failed: "
+                f"{type(_e).__name__}: {_e}"
+            )
+            pool_debate_result = None
 
-        pool_result = _pool.run_debate(
-            pair=pair, evidence_factsheet=_pool_factsheet,
-            regime=_pool_regime, tech_data=tech_data, llm=llm)
+    coord_ok = (
+        coord_result is not None
+        and coord_result.get("signal") is not None
+        and coord_result.get("confidence", 0) > 0.10
+    )
+    pool_ok = (
+        pool_debate_result is not None
+        and pool_debate_result.get("signal") is not None
+        and pool_debate_result.get("confidence", 0) > 0.20
+    )
 
-        if pool_result and pool_result.get("confidence", 0) > 0.20:
-            _record_signal_health(pair, "AGENT_POOL", pool_result["signal"], pool_result["confidence"])
-            _signal_stats["total"] += 1
-            _signal_stats["ai"] += 1
-            logger.info(f"[Phase20:AgentPool] {pair} debate: {pool_result['signal']} "
-                       f"conf={pool_result['confidence']:.2f}")
-            return {"signal": pool_result["signal"], "confidence": pool_result["confidence"],
-                    "reasoning": pool_result.get("reasoning", ""), "source": "AGENT_POOL"}
-    except Exception as e:
-        logger.warning(f"[Phase20:AgentPool] {pair} debate failed: {e}")
+    # Audit Tur-2 Fix #3: these ensemble branches used to bump _signal_stats
+    # themselves, but the get_trading_signal final accounting counts every
+    # graph return once already — double-counting drove `ai_ratio_pct` above
+    # 100% in the audit. _record_signal_health keeps the per-tier source
+    # tag (ENSEMBLE / AGENT_POOL); stats live in a single central place now.
+    if coord_ok and pool_ok:
+        fused = _ensemble_coord_pool(coord_result, pool_debate_result)
+        _record_signal_health(pair, "ENSEMBLE", fused["signal"], fused["confidence"])
+        logger.info(
+            f"[Ensemble] {pair} coord={coord_result['signal']}/{coord_result['confidence']:.2f} "
+            f"+ pool={pool_debate_result['signal']}/{pool_debate_result['confidence']:.2f} "
+            f"→ {fused['signal']} conf={fused['confidence']:.2f}"
+        )
+        return fused
+
+    if coord_ok:
+        logger.info(
+            f"[Ensemble] {pair} coord-only ({coord_result['signal']}/"
+            f"{coord_result['confidence']:.2f}); pool declined"
+        )
+        return {**coord_result, "source": "COORDINATOR"}
+
+    if pool_ok:
+        logger.info(
+            f"[Ensemble] {pair} pool-only ({pool_debate_result['signal']}/"
+            f"{pool_debate_result['confidence']:.2f}); coord declined"
+        )
+        _record_signal_health(
+            pair, "AGENT_POOL",
+            pool_debate_result["signal"], pool_debate_result["confidence"],
+        )
+        return pool_debate_result
 
     # Tier 3: 3-Agent Voting Fallback (tech, sent, news — unbiased agents only)
     logger.warning("[NODE] Coordinator: Both LLM + AgentPool failed. Using VOTING FALLBACK.")
@@ -1673,6 +1917,10 @@ RULES:
     # Tier 3.5: Evidence Engine (LLM-free, comprehensive — Phase 20)
     # Reuse cached result from coordinator FactSheet generation (avoids duplicate computation)
     logger.warning("[NODE] Coordinator: Voting inconclusive. Trying EVIDENCE ENGINE.")
+    # Audit Tur-2 Fix #4: pre-init BEFORE try so `ee_result` is always bound
+    # when the guard below runs (EvidenceEngineDataError could skip every
+    # assignment inside the try block otherwise).
+    ee_result = None
     try:
         ee_result = _ee_cached_result  # Cached from coordinator FactSheet (line ~1317)
         if ee_result is None:
@@ -1684,9 +1932,9 @@ RULES:
             )
             ee_result = _ee_fallback.generate_signal(pair=pair, tech_data=tech_data)
         if ee_result and ee_result.get("confidence", 0) > 0.20:
+            # Audit Tur-2 Fix #3: final accounting in get_trading_signal
+            # counts this graph return — no local _signal_stats bump here.
             _record_signal_health(pair, "EVIDENCE_ENGINE", ee_result["signal"], ee_result["confidence"])
-            _signal_stats["total"] += 1
-            _signal_stats["ai"] += 1
             logger.info(f"[Phase20:Tier3.5] {pair} Evidence Engine: {ee_result['signal']} conf={ee_result['confidence']:.2f}")
             return ee_result
     except Exception as e:
@@ -1694,7 +1942,10 @@ RULES:
 
     # Tier 4: Legacy Technical Fallback (pure indicator scoring, 0.35 cap)
     logger.warning("[NODE] Coordinator: Using LEGACY TECHNICAL FALLBACK.")
-    return _legacy_technical_fallback(tech_data)
+    legacy = _legacy_technical_fallback(tech_data)
+    if legacy is None:
+        return _abstain_signal(pair, "all tiers exhausted — no indicator data for legacy fallback")
+    return legacy
 
 
 
@@ -1750,7 +2001,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
             cached_result = json.loads(cached_response_str)
             _signal_stats["total"] += 1
             _signal_stats["ai"] += 1
-            _record_signal_health(pair, "CACHE", cached_result.get("signal", "NEUTRAL"), cached_result.get("confidence", 0.0))
+            _record_signal_health(pair, "CACHE", cached_result.get("signal"), cached_result.get("confidence"))
             logger.info(f"[Semantic Cache] {pair} reusing cached: {cached_result.get('signal')} conf={cached_result.get('confidence', 0):.2f}")
             return cached_result
         except Exception:
@@ -1842,7 +2093,10 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
             _signal_stats["total"] += 1
             _signal_stats["ai"] += 1
             return ee_result
-        return _legacy_technical_fallback(technical_data or {})
+        legacy = _legacy_technical_fallback(technical_data or {})
+        if legacy is None:
+            return _abstain_signal(pair, "semaphore busy and legacy fallback has no data")
+        return legacy
 
     try:
         return _get_trading_signal_inner(pair, technical_data)
@@ -1866,7 +2120,7 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
             # Phase 18: Track cache hits in signal stats
             _signal_stats["total"] += 1
             _signal_stats["ai"] += 1  # cache = previous AI result
-            _record_signal_health(pair, "CACHE", cached_result.get("signal", "NEUTRAL"), cached_result.get("confidence", 0.0))
+            _record_signal_health(pair, "CACHE", cached_result.get("signal"), cached_result.get("confidence"))
             return cached_result
         except Exception as e:
             logger.error(f"Failed to parse cached response: {e}")
@@ -1966,13 +2220,18 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
     except Exception as e:
         logger.debug(f"[Phase20:CrossPair] {pair} overlay skipped: {e}")
 
-    # Log the decision persistently in Phase 3.5.1 Logger
+    # Log the decision persistently (Phase 3.5.1 logger).
+    # Signal Quality sprint 2026-04-20: replace the hardcoded
+    # "MULTI_AGENT_PHASE_5" label — which collapsed the whole regime column
+    # onto a single bucket and made per-regime causal discovery impossible —
+    # with the freshest `regime_layers.layer3_adx_regime` for this pair.
+    resolved_regime = _resolve_pair_regime(pair)
     decision_logger.log_decision(
         pair=pair,
         signal_type=signal,
         confidence=confidence,
         reasoning_summary=reasoning,
-        regime="MULTI_AGENT_PHASE_5"
+        regime=resolved_regime,
     )
 
     result_dict = {
@@ -1986,7 +2245,7 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
     _record_signal_health(pair, signal_source, signal, confidence)
 
     _signal_stats["total"] += 1
-    if signal_source in ("AI", "CACHE"):
+    if signal_source in ("AI", "CACHE", "ENSEMBLE", "AGENT_POOL", "COORDINATOR"):
         _signal_stats["ai"] += 1
     elif signal_source == "VOTING":
         _signal_stats["voting"] += 1
@@ -2037,8 +2296,9 @@ def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, techni
         return future.result(timeout=timeout_seconds)
     except FuturesTimeoutError:
         logger.warning(f"[TIMEOUT] Pipeline for {pair} exceeded {timeout_seconds}s. Using Evidence Engine fallback...")
-        # Evidence Engine with full tech_data (not empty!)
         result = _technical_fallback(technical_data or {}, pair=pair)
+        if result is None:
+            result = _abstain_signal(pair, f"pipeline timeout {timeout_seconds}s + no fallback data")
         _record_signal_health(pair, result.get("source", "FALLBACK"), result["signal"], result["confidence"])
         _signal_stats["total"] += 1
         _signal_stats["fallback"] += 1
@@ -2046,6 +2306,8 @@ def get_trading_signal_with_timeout(pair: str, timeout_seconds: int = 45, techni
     except Exception as e:
         logger.error(f"[ERROR] Pipeline for {pair} failed: {e}")
         result = _technical_fallback(technical_data or {}, pair=pair)
+        if result is None:
+            result = _abstain_signal(pair, f"pipeline error {type(e).__name__} + no fallback data")
         _record_signal_health(pair, result.get("source", "FALLBACK"), result["signal"], result["confidence"])
         _signal_stats["total"] += 1
         _signal_stats["fallback"] += 1
@@ -2128,7 +2390,11 @@ if __name__ == "__main__":
 
                 total = sum(r['cnt'] for r in rows)
                 dist = {r['signal_source']: r['cnt'] for r in rows}
-                ai_count = dist.get('AI', 0) + dist.get('CACHE', 0)
+                ai_count = (
+                    dist.get('AI', 0) + dist.get('CACHE', 0)
+                    + dist.get('ENSEMBLE', 0) + dist.get('AGENT_POOL', 0)
+                    + dist.get('COORDINATOR', 0)
+                )
                 ai_ratio = (ai_count / total * 100) if total > 0 else 100.0
 
                 return {

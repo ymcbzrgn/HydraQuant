@@ -38,6 +38,15 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(__file__))
 
 from ai_config import AI_DB_PATH
+
+
+class EvidenceEngineDataError(Exception):
+    """No price/indicator data available or computed confidence too low.
+
+    Raised from `generate_signal` and `_synthesize` to signal that the caller
+    must fall through to the next tier — we no longer emit NEUTRAL/0.01 rows
+    that poison downstream statistics (signal_health, RLAIF, calibrator).
+    """
 from db import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -204,10 +213,9 @@ class EvidenceEngine:
 
         price = tech_data.get("current_price")
         if not price or (isinstance(price, (int, float)) and price <= 0):
-            logger.info(f"[EvidenceEngine] {pair}: No tech_data and no DB fallback, returning NEUTRAL")
-            return {"signal": "NEUTRAL", "confidence": 0.01,
-                    "reasoning": "[EvidenceEngine] No indicator data available (no tech_data, no DB price)",
-                    "source": "EVIDENCE_ENGINE"}
+            raise EvidenceEngineDataError(
+                f"{pair}: no price data available (tech_data empty, DB fallback empty)"
+            )
 
         try:
             # Phase A: GATHER
@@ -268,7 +276,13 @@ class EvidenceEngine:
             # Apply perception boost to final confidence
             if perception_boost != 0.0:
                 old_conf = result.get("confidence", 0)
-                result["confidence"] = max(0.01, min(0.95, old_conf + perception_boost))
+                boosted = min(0.95, old_conf + perception_boost)
+                if boosted < 0.05:
+                    raise EvidenceEngineDataError(
+                        f"{pair}: perception boost pushed confidence below 0.05 "
+                        f"({old_conf:.3f} + {perception_boost:+.3f} = {boosted:.3f})"
+                    )
+                result["confidence"] = boosted
                 result["reasoning"] = result.get("reasoning", "") + f" [Perception: {perception_boost:+.3f}]"
 
             # Phase F: AUDIT LOG
@@ -287,10 +301,14 @@ class EvidenceEngine:
 
             return result
 
+        except EvidenceEngineDataError:
+            raise
         except Exception as e:
-            logger.error(f"[EvidenceEngine] {pair} pipeline failed: {type(e).__name__}: {e}")
-            return {"signal": "NEUTRAL", "confidence": 0.01,
-                    "reasoning": f"[EvidenceEngine] Pipeline error: {e}", "source": "EVIDENCE_ENGINE"}
+            logger.error(
+                f"[EvidenceEngine] {pair} pipeline failed: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            raise
 
     def format_factsheet(self, result: dict) -> str:
         """Format Evidence Engine result as a FactSheet for LLM coordinator prompt injection."""
@@ -1065,7 +1083,7 @@ class EvidenceEngine:
             len(contradictions) * _p("evidence.synthesis.contradiction_per", 0.05),
             _p("evidence.synthesis.contradiction_max", 0.15))
         confidence -= contradiction_penalty
-        confidence = max(0.01, confidence)  # Floor BEFORE regime modifier (prevents negative * modifier bug)
+        confidence = max(0.0, confidence)  # Clamp negative → 0 before regime modifier (not a floor)
 
         # Regime modifier (trending=1.0, ranging=0.80, volatile=0.75)
         if self._regime_classifier:
@@ -1087,9 +1105,12 @@ class EvidenceEngine:
             except Exception:
                 pass
 
-        # Floor — never return 0 confidence (Trade-First: confidence modulates SIZE)
-        confidence = max(0.01, confidence)
         confidence = round(confidence, 4)
+        if confidence < 0.05:
+            raise EvidenceEngineDataError(
+                f"{pair}: computed confidence too low ({confidence:.4f}) — "
+                f"no usable signal, caller should fall through"
+            )
 
         # Build human-readable reasoning
         reasoning = self._build_reasoning(pair, scores, contradictions, signal, confidence,

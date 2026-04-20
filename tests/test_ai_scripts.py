@@ -3769,15 +3769,15 @@ def test_dynamic_k_sigmoid_alignment(tmp_db):
 
 
 def test_adaptive_n_active_zero(tmp_db):
-    """With n_active=0 (no real data), should return low confidence."""
-    from evidence_engine import EvidenceEngine
+    """Signal Quality sprint 2026-04-20: EvidenceEngine now raises
+    EvidenceEngineDataError instead of returning NEUTRAL/0.01 when no
+    price data is available. Callers propagate / abstain."""
+    import pytest
+    from evidence_engine import EvidenceEngine, EvidenceEngineDataError
 
     engine = EvidenceEngine(db_path=tmp_db)
-    # Price=0 → early return with conf=0.01
-    result = engine.generate_signal("EMPTY/USDT", {"current_price": -1})
-    assert result["confidence"] <= 0.02, (
-        f"Negative price should give near-zero conf, got {result['confidence']}"
-    )
+    with pytest.raises(EvidenceEngineDataError):
+        engine.generate_signal("EMPTY/USDT", {"current_price": -1})
 
 
 def test_adaptive_db_only_penalty(tmp_db):
@@ -4047,32 +4047,45 @@ def test_agent_rebalance_runs(tmp_db):
 
 
 def test_agent_parse_response():
-    """Agent response parsing should handle JSON and fallback."""
+    """Signal Quality sprint 2026-04-20: _parse_agent_response returns
+    None for any input that doesn't contain a valid `direction`+`strength`
+    JSON payload, instead of synthesising NEUTRAL/0.3 pollution."""
     from agent_pool import AgentPool
 
     pool = AgentPool()
 
-    # Valid JSON
+    # Valid JSON with both required fields → structured dict
     result = pool._parse_agent_response(
         '{"direction": "BULLISH", "strength": 0.7, "key_argument": "test", "key_risk": "none"}'
     )
     assert result["direction"] == "BULLISH"
     assert result["strength"] == 0.7
 
-    # Keyword fallback
-    result = pool._parse_agent_response("I think this is clearly bullish because of momentum")
-    assert result["direction"] == "BULLISH"
+    # JSON with text wrapped around (brace extraction still succeeds)
+    wrapped = pool._parse_agent_response(
+        'thoughts: {"direction": "BEARISH", "strength": 0.4} final.'
+    )
+    assert wrapped["direction"] == "BEARISH"
 
-    # Neutral fallback
-    result = pool._parse_agent_response("unable to determine direction")
-    assert result["direction"] == "NEUTRAL"
+    # Keyword-only text → None (no direction/strength pair → skip agent)
+    assert pool._parse_agent_response(
+        "I think this is clearly bullish because of momentum"
+    ) is None
+
+    # Garbage input → None
+    assert pool._parse_agent_response("unable to determine direction") is None
 
 
 def test_agent_registry_completeness():
-    """All 10 agents should be registered with required fields."""
+    """All registered agents should carry the required prompt fields.
+    Count is validated against the current registry rather than a hardcoded
+    number so adding a new agent type (DefenderAgent, ExploitAgent, etc.)
+    doesn't break the check."""
     from agent_pool import AGENT_REGISTRY
 
-    assert len(AGENT_REGISTRY) == 10
+    assert len(AGENT_REGISTRY) >= 10, (
+        f"registry shrank below the 10-agent baseline: {sorted(AGENT_REGISTRY)}"
+    )
     for name, config in AGENT_REGISTRY.items():
         assert "best_regimes" in config, f"{name} missing best_regimes"
         assert "system_prompt" in config, f"{name} missing system_prompt"
@@ -4594,3 +4607,388 @@ def test_debate_pheromone_deposit():
     assert dissent2 is not None, "Dissent pheromone expected for 0.6 vs 0.6 split"
     assert dissent2["bull_strength"] >= 0.3
     assert dissent2["bear_strength"] >= 0.3
+
+
+# ============================================================
+# Signal Quality Sprint — Revize Tur-2 smoke tests
+# ============================================================
+
+def test_ensemble_coord_pool_agreement():
+    """Both paths agreeing on direction → consensus bonus, higher confidence."""
+    from rag_graph import _ensemble_coord_pool
+
+    coord = {"signal": "BULLISH", "confidence": 0.70, "reasoning": "coord rationale"}
+    pool = {"signal": "BULLISH", "confidence": 0.60, "reasoning": "pool rationale"}
+    result = _ensemble_coord_pool(coord, pool)
+
+    assert result["signal"] == "BULLISH"
+    assert result["source"] == "ENSEMBLE"
+    # weighted avg = 0.55*0.70 + 0.45*0.60 = 0.660 → × 1.10 consensus = 0.726, cap 0.95
+    assert 0.60 < result["confidence"] <= 0.95
+    assert "[Coord]" in result["reasoning"] and "[Pool]" in result["reasoning"]
+
+
+def test_ensemble_coord_pool_disagreement():
+    """BULL vs BEAR → NEUTRAL 0.0 (hard stay-out signal)."""
+    from rag_graph import _ensemble_coord_pool
+
+    coord = {"signal": "BULLISH", "confidence": 0.70}
+    pool = {"signal": "BEARISH", "confidence": 0.65}
+    result = _ensemble_coord_pool(coord, pool)
+
+    assert result["signal"] == "NEUTRAL"
+    assert result["confidence"] == 0.0
+    assert result["source"] == "ENSEMBLE"
+
+
+def test_ensemble_coord_pool_partial_agreement():
+    """One NEUTRAL, one directional → trust directional × 0.70 haircut."""
+    from rag_graph import _ensemble_coord_pool
+
+    coord = {"signal": "BULLISH", "confidence": 0.80, "reasoning": "c"}
+    pool = {"signal": "NEUTRAL", "confidence": 0.50}
+    result = _ensemble_coord_pool(coord, pool)
+
+    assert result["signal"] == "BULLISH"
+    assert result["source"] == "ENSEMBLE"
+    # 0.80 * 0.70 = 0.56 (haircut for partial agreement)
+    assert abs(result["confidence"] - 0.56) < 1e-4
+
+
+def _load_sizer_module():
+    """Import the AIFreqtradeSizer strategy module from its Freqtrade location
+    without going through the full IStrategy machinery. Cached on the module
+    so repeated test calls stay cheap."""
+    import importlib.util
+    if "_cached_sizer_module" in globals():
+        return globals()["_cached_sizer_module"]
+    sizer_path = os.path.join(
+        os.path.dirname(__file__), "..",
+        "freqtrade-strategies", "user_data", "strategies", "AIFreqtradeSizer.py",
+    )
+    spec = importlib.util.spec_from_file_location("AIFreqtradeSizer", sizer_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    globals()["_cached_sizer_module"] = mod
+    return mod
+
+
+def _make_bare_sizer():
+    """Construct an AIFreqtradeSizer shell with only the DCA-gate state
+    required by `_emit_dca_gate`, bypassing Freqtrade's heavy IStrategy init."""
+    mod = _load_sizer_module()
+    sizer = mod.AIFreqtradeSizer.__new__(mod.AIFreqtradeSizer)
+    sizer._dca_gate_last_log = {}
+    sizer._dca_gate_counter = {}
+    return sizer
+
+
+def test_emit_dca_gate_dedup_within_60s(monkeypatch, caplog):
+    """3 calls within <60s → exactly 1 WARNING line, counter reflects all 3."""
+    import logging
+    sizer = _make_bare_sizer()
+
+    # Freeze the clock so we can simulate the 60s window.
+    fake_now = [1_000_000.0]
+    import time as _time
+    monkeypatch.setattr(_time, "time", lambda: fake_now[0])
+
+    with caplog.at_level(logging.WARNING, logger="AIFreqtradeSizer"):
+        for _ in range(3):
+            sizer._emit_dca_gate(
+                "BTC/USDT", reason="kelly",
+                detail="Kelly 0.001 no edge",
+                extra={"kelly": 0.001},
+            )
+            fake_now[0] += 10.0  # 10s between calls → all within 60s window
+
+    dca_warnings = [r for r in caplog.records
+                    if r.levelname == "WARNING" and "[DCA-GATE]" in r.getMessage()
+                    and "ROLLUP" not in r.getMessage()]
+    assert len(dca_warnings) == 1, (
+        f"expected exactly one throttled WARNING, got {len(dca_warnings)}: "
+        f"{[r.getMessage() for r in dca_warnings]}"
+    )
+    counter = sizer._dca_gate_counter[("BTC/USDT", "kelly")]
+    assert counter["count"] == 3
+
+
+def test_emit_dca_gate_rollup_after_5min(monkeypatch, caplog):
+    """After 5min window, the rollup INFO line fires and the bucket resets."""
+    import logging
+    sizer = _make_bare_sizer()
+
+    fake_now = [2_000_000.0]
+    import time as _time
+    monkeypatch.setattr(_time, "time", lambda: fake_now[0])
+
+    with caplog.at_level(logging.INFO, logger="AIFreqtradeSizer"):
+        # First burst (inside 60s window)
+        for _ in range(4):
+            sizer._emit_dca_gate(
+                "ETH/USDT", reason="portfolio_cap",
+                detail="$120 > 3%",
+                extra={"proposed": 120.0, "cap": 90.0},
+            )
+        # Jump past 5 minutes and fire once more → rollup should land
+        fake_now[0] += 301.0
+        sizer._emit_dca_gate(
+            "ETH/USDT", reason="portfolio_cap",
+            detail="$130 > 3%",
+            extra={"proposed": 130.0, "cap": 90.0},
+        )
+
+    rollups = [r for r in caplog.records if "[DCA-GATE:ROLLUP]" in r.getMessage()]
+    assert len(rollups) == 1, (
+        f"expected exactly one rollup line, got {len(rollups)}: "
+        f"{[r.getMessage() for r in rollups]}"
+    )
+    # After the rollup the bucket is cleared for the next window.
+    counter = sizer._dca_gate_counter[("ETH/USDT", "portfolio_cap")]
+    assert counter["count"] == 0
+
+
+def _prepare_wms_db(tmp_path):
+    """Create a tmp SQLite with the minimal world_model_states schema
+    expected by `load_from_world_model_states`."""
+    db_path = str(tmp_path / "wms.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE world_model_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timeframe TEXT DEFAULT '1h',
+            timestamp TEXT NOT NULL,
+            ttm_embedding BLOB,
+            chart_features_json TEXT,
+            regime TEXT,
+            fng INTEGER,
+            hormones_json TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_replay_buffer_load_from_world_model_states_empty_db(tmp_path, monkeypatch):
+    """Empty world_model_states → loaded == 0, buffer stays empty."""
+    db_path = _prepare_wms_db(tmp_path)
+
+    import iql_pretrain
+    monkeypatch.setattr(iql_pretrain, "AI_DB_PATH", db_path)
+
+    buf = iql_pretrain.ReplayBuffer(state_dim=16, action_dim=4, max_size=1000)
+    loaded = buf.load_from_world_model_states(16, 4)
+    assert loaded == 0
+    assert buf.size == 0
+
+
+def test_replay_buffer_load_from_world_model_states_populated(tmp_path, monkeypatch):
+    """Two consecutive snapshots → one synthetic transition materialized."""
+    import numpy as np
+    db_path = _prepare_wms_db(tmp_path)
+
+    emb1 = np.arange(16, dtype=np.float32).tobytes()
+    emb2 = (np.arange(16, dtype=np.float32) + 0.5).tobytes()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO world_model_states (pair, timeframe, timestamp, ttm_embedding) VALUES (?, ?, ?, ?)",
+        ("BTC/USDT", "1h", "2026-04-20T09:00:00", emb1),
+    )
+    conn.execute(
+        "INSERT INTO world_model_states (pair, timeframe, timestamp, ttm_embedding) VALUES (?, ?, ?, ?)",
+        ("BTC/USDT", "1h", "2026-04-20T10:00:00", emb2),
+    )
+    conn.commit()
+    conn.close()
+
+    import iql_pretrain
+    monkeypatch.setattr(iql_pretrain, "AI_DB_PATH", db_path)
+
+    buf = iql_pretrain.ReplayBuffer(state_dim=16, action_dim=4, max_size=1000)
+    loaded = buf.load_from_world_model_states(16, 4)
+    assert loaded == 1  # N consecutive rows → N-1 transitions
+    assert buf.size == 1
+    # terminal flag set on the last pair-timeframe row
+    assert float(buf.dones[0]) == 1.0
+
+
+def _patch_rag_db(monkeypatch, db_path):
+    """Redirect rag_graph's `_resolve_pair_regime` to a tmp sqlite file."""
+    import db as db_module
+
+    def _fake_get_db_connection(requested_path=None):
+        conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(db_module, "get_db_connection", _fake_get_db_connection)
+    return db_path
+
+
+def _seed_regime_layers_schema(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE regime_layers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            layer3_adx_regime TEXT,
+            UNIQUE(pair, timestamp)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def test_resolve_pair_regime_fallback_to_transitional(tmp_path, monkeypatch):
+    """Empty regime_layers → resolver returns the neutral fallback."""
+    db_path = str(tmp_path / "regime.sqlite")
+    _seed_regime_layers_schema(db_path)
+    _patch_rag_db(monkeypatch, db_path)
+
+    from rag_graph import _resolve_pair_regime
+    assert _resolve_pair_regime("SOL/USDT") == "transitional"
+
+
+def test_resolve_pair_regime_reads_layer3(tmp_path, monkeypatch):
+    """Most recent non-null layer3_adx_regime is returned verbatim."""
+    db_path = str(tmp_path / "regime.sqlite")
+    _seed_regime_layers_schema(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO regime_layers (pair, timestamp, layer3_adx_regime) VALUES (?, ?, ?)",
+        ("ETH/USDT", "2026-04-20T09:00:00", "ranging"),
+    )
+    conn.execute(
+        "INSERT INTO regime_layers (pair, timestamp, layer3_adx_regime) VALUES (?, ?, ?)",
+        ("ETH/USDT", "2026-04-20T10:00:00", "trending_bull"),
+    )
+    conn.commit()
+    conn.close()
+
+    _patch_rag_db(monkeypatch, db_path)
+
+    from rag_graph import _resolve_pair_regime
+    assert _resolve_pair_regime("ETH/USDT") == "trending_bull"
+
+
+def _patch_triple_perception_db(monkeypatch, db_path):
+    """Redirect db.get_db_connection for triple_perception._persist_world_model_state."""
+    import db as db_module
+
+    def _fake_get_db_connection(requested_path=None):
+        conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(db_module, "get_db_connection", _fake_get_db_connection)
+
+
+def test_persist_world_model_state_idempotent(tmp_path, monkeypatch):
+    """INSERT OR REPLACE → two writes with the same (pair, timeframe, timestamp)
+    leave exactly one row."""
+    import numpy as np
+    import pandas as pd
+    from triple_perception import TriplePerception
+
+    db_path = str(tmp_path / "wms.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE world_model_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timeframe TEXT DEFAULT '1h',
+            timestamp TEXT NOT NULL,
+            ttm_embedding BLOB,
+            chart_features_json TEXT,
+            regime TEXT,
+            fng INTEGER,
+            hormones_json TEXT,
+            UNIQUE(pair, timeframe, timestamp)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    _patch_triple_perception_db(monkeypatch, db_path)
+    import rag_graph
+    monkeypatch.setattr(rag_graph, "_resolve_pair_regime", lambda pair: "transitional")
+
+    tp = TriplePerception.__new__(TriplePerception)
+    idx = pd.date_range("2026-04-20 09:00", periods=2, freq="h", tz="UTC")
+    df = pd.DataFrame({"close": [100.0, 101.0]}, index=idx)
+    emb = np.ones(64, dtype=np.float32)
+
+    tp._persist_world_model_state(
+        pair="BTC/USDT", timeframe="1h", df_1h=df,
+        ttm_embedding=emb, chart_features={"rsi": 55.0},
+    )
+    tp._persist_world_model_state(
+        pair="BTC/USDT", timeframe="1h", df_1h=df,
+        ttm_embedding=emb, chart_features={"rsi": 55.0},
+    )
+
+    count_conn = sqlite3.connect(db_path)
+    count = count_conn.execute(
+        "SELECT COUNT(*) FROM world_model_states WHERE pair = 'BTC/USDT'"
+    ).fetchone()[0]
+    count_conn.close()
+    assert count == 1, f"expected idempotent single row, got {count}"
+
+
+def test_persist_world_model_state_skips_when_pair_none(tmp_path, monkeypatch):
+    """perceive() without pair → _persist_world_model_state never runs
+    (guarded in perceive before the call site)."""
+    import pandas as pd
+    import numpy as np
+    from triple_perception import TriplePerception
+
+    db_path = str(tmp_path / "wms.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE world_model_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            timeframe TEXT DEFAULT '1h',
+            timestamp TEXT NOT NULL,
+            ttm_embedding BLOB,
+            chart_features_json TEXT,
+            regime TEXT,
+            fng INTEGER,
+            hormones_json TEXT,
+            UNIQUE(pair, timeframe, timestamp)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    _patch_triple_perception_db(monkeypatch, db_path)
+
+    tp = TriplePerception.__new__(TriplePerception)
+    tp._initialized = True
+    tp._catboost_available = False
+    tp._catboost_model = None
+    tp._kronos_available = False
+
+    # Stub out CatBoost reload (perceive calls _reload_catboost_if_updated).
+    tp._reload_catboost_if_updated = lambda: None
+    tp._get_or_create = lambda name, cls, *a, **k: None
+
+    idx = pd.date_range("2026-04-20 11:00", periods=5, freq="h", tz="UTC")
+    df = pd.DataFrame({
+        "close": np.linspace(100.0, 105.0, 5),
+        "open":  np.linspace(100.0, 104.0, 5),
+        "high":  np.linspace(101.0, 106.0, 5),
+        "low":   np.linspace( 99.0, 103.0, 5),
+        "volume": np.full(5, 1000.0),
+    }, index=idx)
+
+    tp.perceive(df_1h=df)
+
+    rows = sqlite3.connect(db_path).execute(
+        "SELECT COUNT(*) FROM world_model_states"
+    ).fetchone()[0]
+    assert rows == 0, f"persist should be skipped when pair is None, got {rows} rows"
