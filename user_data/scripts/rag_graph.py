@@ -3,6 +3,7 @@ import logging
 import json
 import re
 import sys
+import threading
 
 from concurrent.futures import TimeoutError as _FuturesTimeout
 from typing import List, Dict, Any, Literal, Optional
@@ -35,6 +36,25 @@ logger = logging.getLogger(__name__)
 
 # Phase 18: Signal health tracking (in-memory counters, lightweight)
 _signal_stats = {"ai": 0, "fallback": 0, "voting": 0, "timeout": 0, "total": 0}
+
+# Memory-pressure revision (2026-04-21): AgentPool pulls in a DB connection,
+# the agent registry, and the graph store on every instantiation — roughly
+# 30-40 MB per call. Before this, `_agent_pool_path` created a fresh one for
+# every signal, compounding the OOM-kill cadence. Module-level singleton keeps
+# one live instance guarded by a lock so the first caller in a process wins
+# the initialisation cost and every subsequent call reuses it.
+_agent_pool_singleton = None
+_agent_pool_lock = threading.Lock()
+
+
+def _get_agent_pool(llm):
+    """Lazy, thread-safe AgentPool singleton bound to the caller's LLM router."""
+    global _agent_pool_singleton
+    with _agent_pool_lock:
+        if _agent_pool_singleton is None:
+            from agent_pool import AgentPool
+            _agent_pool_singleton = AgentPool(llm_router=llm)
+    return _agent_pool_singleton
 
 # =============================================================================
 # Phase 23: JINA API HEALTH CHECK (replaces model server BGE/ColBERT)
@@ -165,11 +185,15 @@ except Exception as e:
     _regime_classifier = None
 
 # --- Graph State Definition ---
-class GraphState(TypedDict):
+class GraphState(TypedDict, total=False):
     """
     State dictionary for the LangGraph Multi-Agent RAG Brain.
     Phase 5.2: Extended with bull/bear researcher outputs for MADAM debate.
     Phase 17: Extended with technical_data (real OHLCV + indicators from strategy).
+    Signal Quality Tur-2 (2026-04-21): `source` is now a first-class field so
+    LangGraph's state merge preserves the coordinator's tier tag (ENSEMBLE /
+    COORDINATOR / AGENT_POOL / EVIDENCE_ENGINE) instead of stripping it and
+    letting `final_output.get("source", "AI")` default to 'AI' for every row.
     """
     pair: str
     documents: List[str]
@@ -182,6 +206,7 @@ class GraphState(TypedDict):
     signal: str
     confidence: float
     reasoning: str
+    source: str
 
 # --- Phase 17: Technical Data Formatters ---
 
@@ -1795,8 +1820,7 @@ RULES:
 
     def _agent_pool_path() -> Optional[Dict[str, Any]]:
         try:
-            from agent_pool import AgentPool
-            _pool = AgentPool(llm_router=llm)
+            _pool = _get_agent_pool(llm)
             _pool_factsheet = ""
             if _ee_cached_result:
                 try:
