@@ -386,11 +386,13 @@ class PipelineScheduler:
         # Sprint 2 (8B): Reptile meta-learning — weekly Sunday 01:00 UTC (before IQL)
         self.scheduler.add_job(self._reptile_meta_update, 'cron', day_of_week='sun', hour=1,
             id='reptile_meta', name='Reptile Weekly Meta-Update', max_instances=1, replace_existing=True)
-        # Sprint 2 (8C+8D): World model train + Dream session — daily 01:30 UTC
-        # (was Sunday-only; Signal Quality sprint 2026-04-20 moved to daily so
-        # dream_scenarios accumulates faster and world_model stays warm.)
-        self.scheduler.add_job(self._world_model_and_dream, 'cron', hour=1, minute=30,
-            id='world_model_dream', name='World Model + Dream Session (Daily)', max_instances=1, replace_existing=True)
+        # Sprint 2 (8C+8D): World model train + Dream session — weekly Sunday 01:30 UTC.
+        # Reverted from daily to weekly on 2026-04-21: the daily cadence did not
+        # give PyTorch's heap enough time to reclaim between runs and drove the
+        # 25-30 min OOM-kill cycle in production.
+        self.scheduler.add_job(self._world_model_and_dream, 'cron', day_of_week='sun', hour=1, minute=30,
+            id='world_model_dream', name='World Model + Dream Session',
+            max_instances=1, replace_existing=True)
         # Sprint 2 (9A): Self-model introspection — weekly Saturday 03:00 UTC
         self.scheduler.add_job(self._self_model_introspect, 'cron', day_of_week='sat', hour=3,
             id='self_model', name='Self-Model Weekly Introspection', max_instances=1, replace_existing=True)

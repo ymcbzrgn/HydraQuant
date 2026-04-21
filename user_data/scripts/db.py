@@ -45,10 +45,14 @@ class _ConnectionPool:
             return
         self._pool: list[sqlite3.Connection] = []
         self._pool_lock = threading.Lock()
-        self._max_size = 8
+        # Memory-pressure revision (2026-04-21): the old max=8 × 8MB page cache
+        # pinned >64 MB of SQLite private cache alone. Halved the pool and
+        # page cache to shave both RSS and WAL-pinning pressure.
+        self._max_size = 4
         self._busy_timeout_ms = 30000
         self._active_count = 0
         self._total_created = 0
+        self._release_count = 0
         self._initialized = True
         logger.info(f"[DB] Connection pool initialized (max={self._max_size}, timeout={self._busy_timeout_ms}ms)")
 
@@ -58,7 +62,8 @@ class _ConnectionPool:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=-8000")
+        conn.execute("PRAGMA cache_size=-2000")
+        conn.execute("PRAGMA mmap_size=0")
         self._total_created += 1
         # Wrap so conn.close() returns to pool instead of destroying
         return _PooledConnection(conn, self)
@@ -76,6 +81,18 @@ class _ConnectionPool:
     def release(self, conn):
         with self._pool_lock:
             self._active_count -= 1
+            self._release_count += 1
+            should_truncate = self._release_count % 50 == 0
+            # Checkpoint BEFORE returning to pool so no sibling thread grabs
+            # this connection mid-pragma. WAL grew to 166 MB uncheckpointed in
+            # production before this; TRUNCATE bounds it without hot-path lock
+            # contention (one call every 50 releases).
+            if should_truncate:
+                try:
+                    raw = conn._conn if isinstance(conn, _PooledConnection) else conn
+                    raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
             if len(self._pool) < self._max_size:
                 self._pool.append(conn)
             else:
