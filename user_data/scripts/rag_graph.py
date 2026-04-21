@@ -1875,10 +1875,10 @@ RULES:
             coord_result = None
 
         try:
-            pool_debate_result = _pool_future.result(timeout=25)
+            pool_debate_result = _pool_future.result(timeout=40)
         except _FuturesTimeout:
             logger.warning(
-                f"[Ensemble] {pair} pool debate timed out after 25s — treating as None"
+                f"[Ensemble] {pair} pool debate timed out after 40s — treating as None"
             )
             pool_debate_result = None
         except Exception as _e:
