@@ -36,6 +36,7 @@ import math
 import os
 import sys
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
@@ -62,11 +63,32 @@ _PRIOR_ALPHA = 2.0  # Jeffreys-leaning informative prior (matches db.py default)
 _PRIOR_BETA = 2.0
 
 
-class BayesianKelly:
-    """Per-pair Beta posterior. DB is source of truth (no in-memory drift)."""
+REAL_KELLY_TABLE = "bayesian_kelly_per_pair"
+SHADOW_KELLY_TABLE = "bayesian_kelly_shadow_per_pair"
+# Revize Tur-2 (H7): whitelist for the table_name kwarg. `BayesianKelly`
+# builds SQL via f-strings so any caller-supplied table name would turn
+# into a direct SQL injection if we ever accepted arbitrary input.
+ALLOWED_KELLY_TABLES = frozenset({REAL_KELLY_TABLE, SHADOW_KELLY_TABLE})
 
-    def __init__(self, db_path: str = DB_PATH):
+
+class BayesianKelly:
+    """Per-pair Beta posterior. DB is source of truth (no in-memory drift).
+
+    EK Sprint 2026-04-23: the table name is now parameterised so the shadow
+    ledger (populated by `_forgone_learn_feedback`) can live in its own
+    table and never contaminate live sizing. Use `get_real_kelly()` for
+    production sizing and `get_shadow_kelly()` for analytics / parallel
+    evaluation.
+    """
+
+    def __init__(self, db_path: str = DB_PATH, table_name: str = REAL_KELLY_TABLE):
+        if table_name not in ALLOWED_KELLY_TABLES:
+            raise ValueError(
+                f"BayesianKelly: table_name={table_name!r} is not whitelisted "
+                f"(allowed={sorted(ALLOWED_KELLY_TABLES)})"
+            )
         self.db_path = db_path
+        self.table_name = table_name
         # Primary schema owner is db.py (init_db at line ~479). We used to also
         # CREATE TABLE here with a DIFFERENT schema (CHECK(id=1)) which is what
         # caused the global-Kelly bug. The block below intentionally mirrors
@@ -80,12 +102,14 @@ class BayesianKelly:
         return get_db_connection(self.db_path)
 
     def _ensure_schema(self, conn) -> None:
-        """Idempotent with db.py — mirrors bayesian_kelly_per_pair schema."""
+        """Idempotent with db.py — mirrors the per-pair Beta posterior schema.
+        Used for both the real and shadow ledgers; the table name is chosen
+        by the constructor."""
         if self._table_ready:
             return
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bayesian_kelly_per_pair (
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 pair TEXT NOT NULL,
                 regime TEXT NOT NULL DEFAULT '_global',
@@ -102,9 +126,10 @@ class BayesianKelly:
             )
             """
         )
+        idx_name = f"idx_bk_{self.table_name}"
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_bk_per_pair "
-            "ON bayesian_kelly_per_pair(pair, regime)"
+            f"CREATE INDEX IF NOT EXISTS {idx_name} "
+            f"ON {self.table_name}(pair, regime)"
         )
         conn.commit()
         self._table_ready = True
@@ -128,9 +153,9 @@ class BayesianKelly:
         with self._conn() as conn:
             self._ensure_schema(conn)
             row = conn.execute(
-                "SELECT alpha, beta_param, avg_win, avg_loss, n_trades, "
-                "annual_volatility, vol_of_vol, last_sharpe "
-                "FROM bayesian_kelly_per_pair WHERE pair = ? AND regime = ?",
+                f"SELECT alpha, beta_param, avg_win, avg_loss, n_trades, "
+                f"annual_volatility, vol_of_vol, last_sharpe "
+                f"FROM {self.table_name} WHERE pair = ? AND regime = ?",
                 (pair, regime),
             ).fetchone()
         if row is None:
@@ -157,6 +182,18 @@ class BayesianKelly:
         avg_loss = float(stats["avg_loss"] or 0.0)
         n_trades = int(stats["n_trades"] or 0)
 
+        # Mega Sprint 2026-04-23 (B.1.3): if β has run away (β/α > 20 after
+        # 100+ trades) the slot has mathematically converged to p_win < 5%
+        # — the sampler cannot recover on its own because every new loss
+        # inflates β further. Snapping back to the Jeffreys-leaning prior
+        # (2/2) gives the slot a chance to re-learn.
+        if beta_p > 20 * alpha and n_trades > 100:
+            logger.warning(
+                f"[BayesianKelly:{pair}/{regime}] β/α>20 after {n_trades} trades "
+                f"(α={alpha:.2f}, β={beta_p:.2f}) — auto-reset to Jeffreys prior"
+            )
+            alpha, beta_p = _PRIOR_ALPHA, _PRIOR_BETA
+
         if won:
             alpha += 1.0
             if pnl_pct > 0:
@@ -172,8 +209,8 @@ class BayesianKelly:
         with self._conn() as conn:
             self._ensure_schema(conn)
             conn.execute(
-                """
-                INSERT INTO bayesian_kelly_per_pair
+                f"""
+                INSERT INTO {self.table_name}
                     (pair, regime, alpha, beta_param, avg_win, avg_loss,
                      n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -193,6 +230,30 @@ class BayesianKelly:
             )
             conn.commit()
 
+    def hard_reset_all(self, reason: str = "sprint_cleanup") -> int:
+        """Reset every `bayesian_kelly_per_pair` row back to the Jeffreys
+        prior (α=β=2, n=0). Used after structural bugs (e.g. the 2026-04-23
+        shadow label corruption) to evict the poisoned posterior in one
+        shot rather than waiting for the decay to bleed it out naturally.
+        Returns the number of rows reset.
+        """
+        with self._conn() as conn:
+            self._ensure_schema(conn)
+            cur = conn.execute(
+                f"UPDATE {self.table_name} "
+                "SET alpha = ?, beta_param = ?, n_trades = 0, "
+                "    avg_win = 0.0, avg_loss = 0.0, "
+                "    updated_at = ?",
+                (_PRIOR_ALPHA, _PRIOR_BETA,
+                 datetime.now(tz=timezone.utc).isoformat()),
+            )
+            conn.commit()
+            n = cur.rowcount
+        logger.warning(
+            f"[BayesianKelly:{self.table_name}:hard_reset] {n} rows reset reason={reason}"
+        )
+        return n
+
     def set_pair_stats(self, pair: str, regime: str = "_global",
                        alpha: float = _PRIOR_ALPHA, beta_param: float = _PRIOR_BETA,
                        avg_win: float = 0.0, avg_loss: float = 0.0,
@@ -208,8 +269,8 @@ class BayesianKelly:
         with self._conn() as conn:
             self._ensure_schema(conn)
             conn.execute(
-                """
-                INSERT INTO bayesian_kelly_per_pair
+                f"""
+                INSERT INTO {self.table_name}
                     (pair, regime, alpha, beta_param, avg_win, avg_loss,
                      n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -397,8 +458,13 @@ class PositionSizer:
     def _effective_max_risk(self, pair: str, regime: str = "_global") -> float:
         kelly_autonomy = self.autonomy.get_kelly_fraction()
         kelly_bayesian = self.bayesian_kelly.kelly_fraction(pair, regime)
-        # Trade-First: minimum 0.5% so confidence modulates SIZE, never PERMISSION.
-        return min(self.max_risk, kelly_autonomy, max(kelly_bayesian, 0.005))
+        # Mega Sprint 2026-04-23 (B.2): Kelly floor lifted from 0.5% → 1.5%.
+        # The old floor produced stakes so small that exchange min_stake
+        # promoted them back into real $5+ orders every time, which then
+        # got canceled by the shadow/MinStakeGuard fallback. 1.5% keeps the
+        # organism in the game while confidence/CAAT still scale above it.
+        floor = float(_p("sizing.kelly_floor_fraction", 0.015))
+        return min(self.max_risk, kelly_autonomy, max(kelly_bayesian, floor))
 
     def calculate_stake_fraction(self, confidence: float,
                                  pair: Optional[str] = None,
@@ -443,6 +509,45 @@ class PositionSizer:
             conf = i / 10.0
             stake = self.calculate_stake_fraction(conf, pair=pair)
             logger.info(f"   {conf:.1f}     |  {stake*100:.2f}%")
+
+
+_real_kelly_instance: Optional[BayesianKelly] = None
+_shadow_kelly_instance: Optional[BayesianKelly] = None
+# Revize Tur-2 (H8): serialise singleton construction so the first caller
+# in a multi-threaded scheduler job does not race with the second and
+# build two separate BayesianKelly objects pointing at the same DB.
+_kelly_factory_lock = threading.Lock()
+
+
+def get_real_kelly(db_path: str = DB_PATH) -> BayesianKelly:
+    """Module-level singleton for the production per-pair Kelly ledger.
+    This is the posterior that drives live sizing via PositionSizer."""
+    global _real_kelly_instance
+    if _real_kelly_instance is None or _real_kelly_instance.db_path != db_path:
+        with _kelly_factory_lock:
+            if _real_kelly_instance is None or _real_kelly_instance.db_path != db_path:
+                _real_kelly_instance = BayesianKelly(
+                    db_path=db_path, table_name=REAL_KELLY_TABLE
+                )
+    return _real_kelly_instance
+
+
+def get_shadow_kelly(db_path: str = DB_PATH) -> BayesianKelly:
+    """Module-level singleton for the shadow-only Kelly ledger.
+
+    EK Sprint 2026-04-23: the shadow ledger is fed by `_forgone_learn_feedback`
+    so we can compare the organism's theoretical p_win against the real one
+    without the shadow stream poisoning live sizing. Sizing consumers MUST
+    use `get_real_kelly()`; analytics / what-if views use this one.
+    """
+    global _shadow_kelly_instance
+    if _shadow_kelly_instance is None or _shadow_kelly_instance.db_path != db_path:
+        with _kelly_factory_lock:
+            if _shadow_kelly_instance is None or _shadow_kelly_instance.db_path != db_path:
+                _shadow_kelly_instance = BayesianKelly(
+                    db_path=db_path, table_name=SHADOW_KELLY_TABLE
+                )
+    return _shadow_kelly_instance
 
 
 if __name__ == "__main__":

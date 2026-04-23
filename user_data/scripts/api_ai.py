@@ -287,7 +287,7 @@ def get_signal_for_pair(pair: str):
     """Proxy to RAG Signal Service — for dashboard display."""
     try:
         import requests
-        resp = requests.get(f"http://127.0.0.1:8891/signal/{pair}", timeout=60)
+        resp = requests.get(f"http://127.0.0.1:8891/signal/{pair}", timeout=30)
         if resp.status_code == 200:
             return resp.json()
         return {"signal": "NEUTRAL", "confidence": 0.0, "reasoning": f"RAG service returned {resp.status_code}"}
@@ -305,6 +305,54 @@ def get_metrics(hours: int = 24):
     """Dashboard metrics for the last N hours."""
     monitor = SystemMonitor(db_path=AI_DB_PATH)
     return monitor.get_dashboard_data(hours=hours)
+
+
+@app.get("/api/ai/llm_routing_insights")
+def llm_routing_insights(hours: int = 24):
+    """EK.2.13: per (task, provider) routing stats for the last `hours`.
+
+    Surfaces what LinUCB has settled on for each pipeline stage so a human
+    can cross-check whether the bandit's picks look sensible (e.g. Gemini
+    dominating coordinator_debate, Groq dominating agent_pool_r1) and
+    whether any provider is stuck at 0% success after cold-start.
+    """
+    from db import get_db_connection
+
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(agent_name, ''), 'unknown') AS task,
+                   COALESCE(NULLIF(trading_pair, ''), 'unknown') AS pair,
+                   provider,
+                   COUNT(*)           AS n_calls,
+                   AVG(latency_ms)    AS avg_latency_ms,
+                   SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) * 1.0 / COUNT(*)
+                                      AS success_rate
+            FROM llm_calls
+            WHERE datetime(timestamp) >= datetime('now', ? )
+            GROUP BY task, provider
+            ORDER BY task, n_calls DESC
+            """,
+            (f"-{int(hours)} hours",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return {
+        "hours": hours,
+        "routing": [
+            {
+                "task": r["task"],
+                "pair": r["pair"],
+                "provider": r["provider"],
+                "n_calls": int(r["n_calls"] or 0),
+                "avg_latency_ms": round(float(r["avg_latency_ms"] or 0.0), 1),
+                "success_rate": round(float(r["success_rate"] or 0.0), 3),
+            }
+            for r in rows
+        ],
+    }
 
 @app.get("/api/ai/confidence-history")
 def get_confidence_history(pair: str = None, days: int = 7):
@@ -395,12 +443,17 @@ def get_ai_settings():
         daily_var_pct = 0.01
         daily_budget = 100.0
 
+    try:
+        from neural_organism import _p as _np
+        conf_exp = float(_np("sizing.confidence_exponent", 1.0))
+    except Exception:
+        conf_exp = 1.0
     return {
         "autonomy_level": autonomy.current_level,
         "daily_var_pct": daily_var_pct,
         "daily_budget": daily_budget,
         "semantic_cache_ttl": 300,
-        "confidence_exponent": 2.0,
+        "confidence_exponent": conf_exp,
         "rag_chunk_overlap": 100,
     }
 

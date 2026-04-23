@@ -30,6 +30,18 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _canonical_signal(raw: Optional[str]) -> str:
+    """Revize Tur-2 (H12): single source of truth for the BULLISH/BEARISH
+    → BULL/BEAR mapping used by every forgone / shadow write. Extracting
+    it means the unit test can call the real prod helper instead of
+    re-implementing the branch logic."""
+    if raw == "BULLISH":
+        return "BULL"
+    if raw == "BEARISH":
+        return "BEAR"
+    return raw or "NEUTRAL"
+
 class AIFreqtradeSizer(IStrategy):
     """
     AI-powered strategy focusing on the "Sizing not Blocking" motto.
@@ -70,7 +82,7 @@ class AIFreqtradeSizer(IStrategy):
     # ── Hyperopt Parameters (Phase 22) ──────────────────────────────────
     # These make ALL key thresholds tunable via: freqtrade hyperopt --spaces entry exit stake protection
     confidence_threshold = DecimalParameter(0.30, 0.80, decimals=2, default=0.50, space='buy', optimize=True, load=True)
-    atr_stoploss_mult = DecimalParameter(1.5, 5.0, decimals=1, default=2.5, space='protection', optimize=True, load=True)
+    atr_stoploss_mult = DecimalParameter(1.0, 3.5, decimals=1, default=1.5, space='protection', optimize=True, load=True)
     fg_extreme_threshold = IntParameter(15, 30, default=20, space='buy', optimize=True, load=True)
     stale_trade_hours = IntParameter(4, 24, default=8, space='sell', optimize=True, load=True)
     leverage_max = DecimalParameter(1.0, 5.0, decimals=1, default=3.0, space='buy', optimize=True, load=True)
@@ -1272,11 +1284,11 @@ class AIFreqtradeSizer(IStrategy):
         confidence = ai.get('confidence', 0.0)
 
         if confidence >= _np("strategy.chandelier_high_conf", 0.80):
-            mult = _np("strategy.chandelier_atr_high", 3.0)
+            mult = _np("strategy.chandelier_atr_high", 1.5)
         elif confidence >= _np("strategy.chandelier_med_conf", 0.60):
-            mult = _np("strategy.chandelier_atr_med", 2.5)
+            mult = _np("strategy.chandelier_atr_med", 1.35)
         else:
-            mult = _np("strategy.chandelier_atr_low", 2.0)
+            mult = _np("strategy.chandelier_atr_low", 1.2)
 
         # ═══ Phase 27 Task 14: Fractal trailing + cortisol modulation ═══
         # Hurst > 0.55 → trend persistent → widen to 3.5x (ride the trend).
@@ -1322,9 +1334,9 @@ class AIFreqtradeSizer(IStrategy):
         if effective_pnl >= _np("strategy.trailing_pnl_high", 0.15):
             mult = min(mult, _np("strategy.trailing_atr_high", 1.0))
         elif effective_pnl >= _np("strategy.trailing_pnl_med", 0.08):
-            mult = min(mult, _np("strategy.trailing_atr_med", 1.5))
+            mult = min(mult, _np("strategy.trailing_atr_med", 1.3))
         elif effective_pnl >= _np("strategy.trailing_pnl_low", 0.04):
-            mult = min(mult, _np("strategy.trailing_atr_low", 2.0))
+            mult = min(mult, _np("strategy.trailing_atr_low", 1.6))
 
         # ═══ CHANDELIER EXIT CALCULATION ═══
         if trade.is_short:
@@ -1724,9 +1736,13 @@ class AIFreqtradeSizer(IStrategy):
         if final_stake < SHADOW_THRESHOLD_USD:
             try:
                 ai_dec = ai_decision if 'ai_decision' in locals() else {}
+                # Mega Sprint 2026-04-23 (B.1.1) + Tur-2 (H12): canonical label
+                # mapping lives in `_canonical_signal` so shadow writes and the
+                # unit test share the same source of truth.
+                canonical_signal = _canonical_signal(ai_dec.get("signal"))
                 self.forgone_engine.log_forgone_signal(
                     pair=pair,
-                    signal_type=ai_dec.get("signal", "NEUTRAL"),
+                    signal_type=canonical_signal,
                     confidence=float(ai_dec.get("confidence", 0.0) or 0.0),
                     entry_price=float(current_rate),
                     was_executed=False,
@@ -1748,12 +1764,18 @@ class AIFreqtradeSizer(IStrategy):
         # beyond that, route to SHADOW so the pair sits out until Kelly grows.
         if final_stake < min_stake:
             forced_ratio = min_stake / (final_stake + 1e-8)
-            if forced_ratio > 3.0:
+            # Mega Sprint 2026-04-23 (B.2): BTC min_stake ≈ $160 was tripping
+            # this gate on every BTC signal (1498 SKIPs in 42h). A 6x
+            # tolerance lets a healthy Kelly still take the stake while the
+            # autonomy/constitution caps keep the absolute size bounded.
+            tolerance = float(_np("sizing.min_stake_lift_tolerance", 6.0))
+            if forced_ratio > tolerance:
                 try:
                     ai_dec = ai_decision if 'ai_decision' in locals() else {}
+                    canonical_signal = _canonical_signal(ai_dec.get("signal"))
                     self.forgone_engine.log_forgone_signal(
                         pair=pair,
-                        signal_type=ai_dec.get("signal", "NEUTRAL"),
+                        signal_type=canonical_signal,
                         confidence=float(ai_dec.get("confidence", 0.0) or 0.0),
                         entry_price=float(current_rate),
                         was_executed=False,
@@ -1764,12 +1786,12 @@ class AIFreqtradeSizer(IStrategy):
                 logger.info(
                     f"[Phase27:MinStakeGuard] {pair} SKIP — exchange min "
                     f"${min_stake:.2f} vs desired ${final_stake:.2f} "
-                    f"(forced {forced_ratio:.1f}x — max tolerated 3x) → SHADOW"
+                    f"(forced {forced_ratio:.1f}x — max tolerated {tolerance:.1f}x) → SHADOW"
                 )
                 return 0.0
             logger.info(
                 f"[Phase27:MinStakeGuard] {pair} lift ${final_stake:.2f} → "
-                f"${min_stake:.2f} (forced {forced_ratio:.1f}x ≤ 3x tolerance)"
+                f"${min_stake:.2f} (forced {forced_ratio:.1f}x ≤ {tolerance:.1f}x tolerance)"
             )
             final_stake = min_stake
 
@@ -1937,6 +1959,65 @@ class AIFreqtradeSizer(IStrategy):
                 conn.close()
         except Exception as e:
             logger.debug(f"[Sprint2:Court] Investigation skipped: {e}")
+
+        # ═══ EK Sprint 2026-04-23 (EK.2.9): retroactive LinUCB feedback ═══
+        # Every LLM call that fired against this pair during the trade's
+        # lifetime gets a small posterior nudge: +0.1 on a winning trade,
+        # -0.05 on a losing one. The nudge is tiny on purpose — outcome_pnl
+        # is noisy, so we only want to bias the bandit, not let it drown
+        # out the direct quality/latency reward signal.
+        try:
+            from ai_config import get_flag
+            if get_flag("llm_contextual_bandit_retroactive_reward", True):
+                from llm_router import get_router
+                from llm_features import extract_features
+                from db import get_db_connection
+
+                conn = get_db_connection()
+                try:
+                    llm_calls = conn.execute(
+                        """
+                        SELECT provider, model, agent_name, timestamp
+                        FROM llm_calls
+                        WHERE trading_pair = ?
+                          AND datetime(timestamp) >= datetime(?)
+                          AND datetime(timestamp) <= datetime(?)
+                        """,
+                        (pair, trade.open_date_utc.isoformat(), current_time.isoformat()),
+                    ).fetchall()
+                finally:
+                    conn.close()
+
+                router = get_router()
+                slots_by_key = {(s.provider, s.model_name): s for s in router.slots}
+                nudge = 0.1 if pnl_pct > 0 else (-0.05 if pnl_pct < 0 else 0.0)
+                retro = 0
+                for call in llm_calls:
+                    slot = slots_by_key.get((call["provider"], call["model"]))
+                    if slot is None or slot.linucb_n_updates == 0:
+                        continue
+                    try:
+                        ts_hour = datetime.fromisoformat(
+                            str(call["timestamp"]).replace(" ", "T")
+                        ).hour
+                    except Exception:
+                        ts_hour = current_time.hour
+                    x_approx = extract_features({
+                        "task": call["agent_name"] or "default",
+                        "prompt_len": 2000,
+                        "needs_json": True,
+                        "regime_vol": 0.5,
+                        "hour_utc": ts_hour,
+                    })
+                    slot.linucb_update(x_approx, nudge)
+                    retro += 1
+                if retro:
+                    logger.info(
+                        f"[LinUCB:Retro] {pair} pnl={pnl_pct:+.2%} "
+                        f"nudged {retro} LLM calls by {nudge:+.2f}"
+                    )
+        except Exception as e:
+            logger.debug(f"[LinUCB:Retro] skipped: {e}")
 
         # ═══ SPRINT 2: Track consecutive losses for constitution ═══
         try:
@@ -2224,11 +2305,14 @@ class AIFreqtradeSizer(IStrategy):
                     regime_max = min(1.5, self.leverage_max.value)  # bear/volatile → cap 1.5x
 
                 # ATR-based leverage cap: keep max equity loss <= 15%
-                # Chandelier Exit uses 2.5x ATR. leverage * chandelier_distance <= 15%
+                # Chandelier Exit multiplier is sourced from PARAM_REGISTRY so
+                # tuning stays in one place (Revize Tur-2 H9). leverage *
+                # chandelier_distance <= 15%.
                 # This lets Chandelier work freely — we limit leverage, not stoploss.
                 atr = float(last.get('atr', 0))
                 if atr > 0 and price > 0:
-                    chandelier_distance = 2.5 * (atr / price)
+                    chandelier_mult = _np("strategy.chandelier_atr_med", 1.35)
+                    chandelier_distance = chandelier_mult * (atr / price)
                     atr_safe_max = 0.15 / max(chandelier_distance, 0.005)
                     if atr_safe_max < regime_max:
                         logger.info(f"[SmartLeverage] {pair} ATR cap: {atr_safe_max:.1f}x "
@@ -2498,7 +2582,7 @@ class AIFreqtradeSizer(IStrategy):
         partial_1_done = trade.get_custom_data("partial_lock_1", False)
         partial_2_done = trade.get_custom_data("partial_lock_2", False)
 
-        if not partial_1_done and effective_pnl >= _np("strategy.dca_lock1_pnl", 0.06):
+        if not partial_1_done and effective_pnl >= _np("strategy.dca_lock1_pnl", 0.02):
             close_amount = trade.stake_amount * _np("strategy.dca_lock_pct", 0.25)
             if min_stake and close_amount >= min_stake:
                 trade.set_custom_data("partial_lock_1", True)
@@ -2510,7 +2594,7 @@ class AIFreqtradeSizer(IStrategy):
                 logger.info(f"[PartialLock] {trade.pair} LOCK1: +{effective_pnl:.1%} → close 25%")
                 return -close_amount
 
-        if partial_1_done and not partial_2_done and effective_pnl >= _np("strategy.dca_lock2_pnl", 0.12):
+        if partial_1_done and not partial_2_done and effective_pnl >= _np("strategy.dca_lock2_pnl", 0.06):
             close_amount = trade.stake_amount * _np("strategy.dca_lock_pct", 0.25)
             if min_stake and close_amount >= min_stake:
                 trade.set_custom_data("partial_lock_2", True)

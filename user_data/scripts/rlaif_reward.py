@@ -56,9 +56,20 @@ RUBRIC = {
 
 
 def _rubric_prompt(verdict: Dict[str, Any], context: Dict[str, Any]) -> str:
-    """Fixed-format prompt forces JSON reply (Goodhart mitigation #5)."""
+    """Fixed-format prompt forces JSON reply (Goodhart mitigation #5).
+
+    Mega Sprint 2026-04-23 (A.4): outcome / pnl / n_recent_losses removed
+    from the judge context. They leaked the answer into the prompt, which
+    biased composite to cluster near +1 on wins and -1 on losses and made
+    the rubric redundant with env_reward. Judges now evaluate the ENTRY
+    STATE only; composite measures process quality, env_reward measures
+    PnL.
+    """
+    from ai_config import get_flag
+    hindsight_removed = get_flag("rlaif_hindsight_removed", True)
+
     lines = [
-        "You are an RLAIF judge scoring a completed trade.",
+        "You are an RLAIF judge scoring a trading decision AT ENTRY TIME.",
         "Score STRICTLY in [0, 1] for each dimension. Output ONLY valid JSON.",
         "",
         "=== RUBRIC ===",
@@ -72,13 +83,22 @@ def _rubric_prompt(verdict: Dict[str, Any], context: Dict[str, Any]) -> str:
         f"signal:     {verdict.get('signal')}",
         f"confidence: {verdict.get('confidence')}",
         f"regime:     {verdict.get('regime')}",
-        f"outcome:    {verdict.get('outcome')}",
-        f"pnl:        {verdict.get('pnl')}",
         f"duration:   {verdict.get('duration')}",
+    ]
+    if not hindsight_removed:
+        # Legacy behaviour kept behind the feature flag for rollback/A-B.
+        lines += [
+            f"outcome:    {verdict.get('outcome')}",
+            f"pnl:        {verdict.get('pnl')}",
+        ]
+    lines += [
         "",
         "=== CONTEXT ===",
         f"actual_regime_verified: {context.get('verified_regime')}",
-        f"n_recent_losses: {context.get('n_recent_losses', 0)}",
+    ]
+    if not hindsight_removed:
+        lines.append(f"n_recent_losses: {context.get('n_recent_losses', 0)}")
+    lines += [
         "",
         "Return JSON: {\"signal_quality\": float, \"sizing_quality\": float, "
         "\"timing_quality\": float, \"risk_management\": float, "
@@ -160,9 +180,25 @@ class RLAIFRewardGenerator:
             HumanMessage(content=_rubric_prompt(verdict, context)),
         ]
 
+        # EK Sprint 2026-04-23 (EK.2.8): feed LinUCB a rlaif_judge context so
+        # the bandit can learn which providers score rubrics more reliably.
+        import datetime as _dt
+        rlaif_ctx = {
+            "task": "rlaif_judge",
+            "prompt_len": sum(
+                len(str(getattr(m, "content", "") or "")) for m in messages
+            ),
+            "needs_json": True,
+            "regime_vol": 0.5,
+            "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
+        }
+
         try:
-            ens = await router.ensemble_invoke(messages, n_judges=3,
-                                                temperature=0.2)
+            ens = await router.ensemble_invoke(
+                messages, n_judges=3, temperature=0.2,
+                task_context=rlaif_ctx,
+                pair=str(verdict.get("pair") or ""),
+            )
         except Exception as e:
             logger.debug(f"[RLAIF] ensemble_invoke failed: {e}")
             return {"per_dim_wco": None, "provider_scores": {},
@@ -179,10 +215,12 @@ class RLAIFRewardGenerator:
             return {"per_dim_wco": None, "provider_scores": {},
                     "error": "no parseable rubric replies"}
 
-        # Worst-Case Optimisation: take MIN across providers per dimension.
-        wco: Dict[str, float] = {}
-        for dim in RUBRIC:
-            wco[dim] = min(scores[dim] for scores in per_provider.values())
+        # Mega Sprint 2026-04-23 (A.4) + Tur-2 (H12): median aggregation
+        # lives in `_median_aggregate` so the unit test exercises the same
+        # code path production uses. Single-judge rubrics are skipped
+        # because a "median" of one value is just the one value — which
+        # reintroduces the WCO-min fragility the switch was meant to fix.
+        wco = self._median_aggregate(per_provider)
 
         return {"per_dim_wco": wco,
                 "provider_scores": per_provider,
@@ -190,11 +228,38 @@ class RLAIFRewardGenerator:
                 "error": None}
 
     @staticmethod
+    def _median_aggregate(per_provider: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+        """Median fuse per-dimension scores across providers.
+
+        Revize Tur-2 (M4): require ≥2 judges per dimension. With one judge
+        the "median" collapses back to that single value and the aggregation
+        stops being robust to outliers — exactly the failure mode that
+        motivated moving away from WCO-min in the first place.
+        """
+        import statistics
+        out: Dict[str, float] = {}
+        for dim in RUBRIC:
+            dim_scores = [
+                scores[dim] for scores in per_provider.values() if dim in scores
+            ]
+            if len(dim_scores) < 2:
+                continue
+            out[dim] = statistics.median(dim_scores)
+        return out
+
+    @staticmethod
     def _composite(per_dim: Dict[str, float]) -> float:
-        """Weighted sum of 5 dimensions, remapped to [-1, +1] (0.5 = neutral)."""
-        total_weight = sum(meta["weight"] for meta in RUBRIC.values())
-        raw = sum(per_dim[dim] * RUBRIC[dim]["weight"] for dim in RUBRIC)
-        composite_01 = raw / max(total_weight, 1e-8)
+        """Weighted sum of 5 dimensions, remapped to [-1, +1] (0.5 = neutral).
+
+        Missing dimensions (e.g. when every judge skipped one) are dropped
+        and the remaining weights are renormalised — previously a KeyError
+        would bubble up and crash the reward path.
+        """
+        total_weight = sum(meta["weight"] for dim, meta in RUBRIC.items() if dim in per_dim)
+        if total_weight <= 0:
+            return 0.0
+        raw = sum(per_dim[dim] * RUBRIC[dim]["weight"] for dim in RUBRIC if dim in per_dim)
+        composite_01 = raw / total_weight
         return 2.0 * composite_01 - 1.0  # [0,1] → [-1,+1]
 
     def _persist(self, record: Dict[str, Any]) -> None:
@@ -270,7 +335,7 @@ class RLAIFRewardGenerator:
             "trade_id": verdict.get("trade_id"),
             "pair": verdict.get("pair"),
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            **{dim: wco[dim] for dim in RUBRIC},
+            **{dim: wco.get(dim) for dim in RUBRIC},
             "composite": round(float(composite), 4),
             "provider_scores": judged.get("provider_scores", {}),
             "env_reward": round(float(env_reward), 4),

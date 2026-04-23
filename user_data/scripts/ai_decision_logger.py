@@ -64,7 +64,12 @@ class AIDecisionLogger:
                 c.execute('ALTER TABLE ai_decisions ADD COLUMN outcome_duration REAL')
             if '_status_cache' not in columns:
                 c.execute('ALTER TABLE ai_decisions ADD COLUMN _status_cache TEXT')
-                
+            # Tur-2 (C1): agent_votes_json snapshot column. Added via ALTER so
+            # installs that predate the sprint still get the column on first
+            # import instead of needing the migration to run first.
+            if 'agent_votes_json' not in columns:
+                c.execute('ALTER TABLE ai_decisions ADD COLUMN agent_votes_json TEXT')
+
             conn.commit()
         
     def _get_db_connection(self):
@@ -82,7 +87,8 @@ class AIDecisionLogger:
         position_size: Optional[float] = None,
         entry_price: Optional[float] = None,
         regime: str = "neutral",
-        trust_score_at_decision: float = 0.5
+        trust_score_at_decision: float = 0.5,
+        agent_votes_json: Optional[str] = None,
     ) -> Optional[int]:
         """
         Records an AI decision into the database.
@@ -112,14 +118,14 @@ class AIDecisionLogger:
                 
                 c.execute('''
                     INSERT INTO ai_decisions (
-                        pair, signal_type, confidence, position_size, entry_price, 
-                        model_used, rag_context_ids, reasoning_summary, regime, 
-                        trust_score_at_decision
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        pair, signal_type, confidence, position_size, entry_price,
+                        model_used, rag_context_ids, reasoning_summary, regime,
+                        trust_score_at_decision, agent_votes_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     pair, signal_type, confidence, position_size, entry_price,
                     model_used, context_str, reasoning_summary, regime,
-                    trust_score_at_decision
+                    trust_score_at_decision, agent_votes_json,
                 ))
                 
                 # We used to reject confidence < 0.35, but now we let the position_sizer math 

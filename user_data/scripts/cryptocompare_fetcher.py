@@ -26,7 +26,7 @@ def fetch_cryptocompare_news():
         logger.warning("CRYPTOCOMPARE_API_KEY is not set. Using rate-limited anonymous access.")
         
     try:
-        response = requests.get(URL, headers=headers)
+        response = requests.get(URL, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
         

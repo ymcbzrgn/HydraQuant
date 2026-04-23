@@ -96,7 +96,18 @@ class PipelineScheduler:
             logger.info("[Scheduler] Falling back to manual pipeline mode.")
             return False
 
-        self.scheduler = BackgroundScheduler(timezone="UTC")
+        # Mega Sprint 2026-04-23 (C.1): APScheduler was letting missed runs
+        # spawn stacked instances after a hang, which in turn fought for the
+        # SQLite WAL lock and deadlocked the RSS ingest job. 60s grace window
+        # lets APScheduler skip late executions entirely once coalesce kicks in.
+        self.scheduler = BackgroundScheduler(
+            timezone="UTC",
+            job_defaults={
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": 60,
+            },
+        )
 
         # Phase 28: Start Grafeo ZMQ broker (this process is the single writer)
         try:
@@ -386,12 +397,13 @@ class PipelineScheduler:
         # Sprint 2 (8B): Reptile meta-learning — weekly Sunday 01:00 UTC (before IQL)
         self.scheduler.add_job(self._reptile_meta_update, 'cron', day_of_week='sun', hour=1,
             id='reptile_meta', name='Reptile Weekly Meta-Update', max_instances=1, replace_existing=True)
-        # Sprint 2 (8C+8D): World model train + Dream session — weekly Sunday 01:30 UTC.
-        # Reverted from daily to weekly on 2026-04-21: the daily cadence did not
-        # give PyTorch's heap enough time to reclaim between runs and drove the
-        # 25-30 min OOM-kill cycle in production.
-        self.scheduler.add_job(self._world_model_and_dream, 'cron', day_of_week='sun', hour=1, minute=30,
-            id='world_model_dream', name='World Model + Dream Session',
+        # Sprint 2 (8C+8D): World model train + Dream session — daily 02:30 UTC.
+        # Revize Tur-2 (H4): shifted from 01:30 to 02:30 to clear Sunday's
+        # Reptile meta-learning slot at 01:00 with a 90-min buffer. Both
+        # jobs spawn PyTorch subprocesses; overlapping them on Sunday was
+        # the last remaining collision in the cron grid.
+        self.scheduler.add_job(self._world_model_and_dream, 'cron', hour=2, minute=30,
+            id='world_model_dream', name='World Model + Dream Session (Daily)',
             max_instances=1, replace_existing=True)
         # Sprint 2 (9A): Self-model introspection — weekly Saturday 03:00 UTC
         self.scheduler.add_job(self._self_model_introspect, 'cron', day_of_week='sat', hour=3,
@@ -1883,39 +1895,129 @@ class PipelineScheduler:
             logger.warning(f"[Sprint2:Reptile] Meta-update failed: {e}")
 
     def _world_model_and_dream(self):
-        """Weekly Sunday 01:30 UTC: Train world model + run dream session.
+        """Daily 01:30 UTC: train world model + run dream session.
 
-        Flow:
-          1. Train world model on accumulated replay buffer
-          2. Run dream session (100 imagined trajectories)
-          3. Filter dreams (3-layer anomaly detection)
-          4. Valid dreams → RL replay buffer (source='dream')
+        Mega Sprint 2026-04-23 (C.2): the training + dreaming cycle now
+        runs in an isolated subprocess (`dream_runner.py`) so PyTorch's
+        heap dies with the process and the long-lived scheduler RSS stays
+        flat. The feature flag `dream_daily_subprocess` lets us fall back
+        to the in-process path for A/B comparison.
         """
+        import subprocess
+        import time as _time
+        try:
+            from ai_config import get_flag, AI_DB_PATH
+        except Exception:
+            # Tur-2 (M2): fall back to the caller's declared default rather
+            # than forcing True so a disabled-by-default flag stays disabled
+            # when ai_config can't be imported.
+            get_flag = lambda key, default=False, **_kw: default
+            AI_DB_PATH = os.environ.get("AI_DB_PATH", "")
+
+        if not get_flag("dream_daily_subprocess", True):
+            self._world_model_and_dream_inline()
+            return
+
+        script = os.path.join(os.path.dirname(__file__), "dream_runner.py")
+        if not os.path.exists(script):
+            logger.warning(f"[Sprint2:Dream] runner missing at {script} — inline fallback")
+            self._world_model_and_dream_inline()
+            return
+
+        payload = json.dumps({
+            "config": {},
+            "db_path": AI_DB_PATH,
+            "pair_list": list(getattr(self, "pair_list", []) or []),
+        })
+
+        import os as _os
+        import select as _select
+        import signal as _signal
+
+        t0 = _time.time()
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", script, payload],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger.warning(f"[Sprint2:Dream] subprocess spawn failed ({e}); inline fallback")
+            self._world_model_and_dream_inline()
+            return
+
+        # Revize Tur-2 (H5 + H6): stream stdout line-by-line so long-running
+        # dream sessions emit progress in real time, and use os.killpg so
+        # every forked torch worker dies with the parent on timeout. The
+        # previous `proc.communicate()` blocked until exit and SIGTERM on
+        # the parent alone left child workers orphaned on Linux.
+        timed_out = False
+        try:
+            while proc.poll() is None:
+                if _time.time() - t0 > 1800:
+                    timed_out = True
+                    logger.warning("[Sprint2:Dream] 30-min timeout, killpg SIGTERM")
+                    try:
+                        _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+                        proc.wait(timeout=10)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        try:
+                            _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    break
+                rlist, _r, _x = _select.select([proc.stdout], [], [], 1.0)
+                if rlist:
+                    line = proc.stdout.readline()
+                    if line:
+                        logger.info(
+                            f"[Sprint2:Dream] {line.decode('utf-8', 'replace').rstrip()}"
+                        )
+            # Drain any remaining buffered output once the process exits.
+            if not timed_out:
+                remainder = proc.stdout.read() or b""
+                for line in remainder.splitlines():
+                    logger.info(
+                        f"[Sprint2:Dream] {line.decode('utf-8', 'replace').rstrip()}"
+                    )
+        except Exception as e:
+            logger.warning(f"[Sprint2:Dream] streaming failed: {e}")
+        logger.info(
+            f"[Sprint2:Dream] exit={proc.returncode} "
+            f"elapsed={_time.time() - t0:.0f}s"
+        )
+
+    def _world_model_and_dream_inline(self):
+        """Legacy in-process path for the dream cycle. Kept behind the
+        `dream_daily_subprocess` feature flag so we can quickly revert to
+        the pre-2026-04-23 behaviour if the subprocess path misbehaves."""
         try:
             from world_model import get_world_model
             from dream_engine import get_dream_engine
 
-            # 1. Train world model
             wm = get_world_model()
             train_result = wm.train_from_buffer(n_epochs=30, batch_size=64)
             if "error" in train_result:
                 logger.info(f"[Sprint2:WorldModel] {train_result['error']}")
             else:
-                logger.info(f"[Sprint2:WorldModel] Trained: "
-                           f"pred_loss={train_result.get('pred_loss', 'N/A'):.4f}")
+                logger.info(
+                    f"[Sprint2:WorldModel] Trained: "
+                    f"pred_loss={train_result.get('pred_loss', 'N/A'):.4f}"
+                )
 
-            # 2. Run dream session
             dream_engine = get_dream_engine()
             dream_result = dream_engine.dream_session(n_dreams=100, horizon=5)
-
             if "error" in dream_result:
                 logger.info(f"[Sprint2:Dream] {dream_result['error']}")
             else:
-                logger.info(f"[Sprint2:Dream] Session: "
-                           f"{dream_result['valid_dreams']}/{dream_result['total_dreams']} valid, "
-                           f"pass_rate={dream_result['pass_rate']:.1%}, "
-                           f"stored={dream_result['stored_in_buffer']}")
-
+                logger.info(
+                    f"[Sprint2:Dream] Session: "
+                    f"{dream_result['valid_dreams']}/{dream_result['total_dreams']} valid, "
+                    f"pass_rate={dream_result['pass_rate']:.1%}, "
+                    f"stored={dream_result['stored_in_buffer']}"
+                )
         except ImportError:
             logger.info("[Sprint2:WorldModel] world_model/dream_engine not available")
         except Exception as e:
@@ -2255,8 +2357,9 @@ class PipelineScheduler:
             return
         try:
             from db import get_db_connection
-            from position_sizer import BayesianKelly
-            bk = BayesianKelly()
+            # Revize Tur-2 (H3): `bk` was unused dead code after B.1.2 cut
+            # the real-Kelly update path. Shadow updates use `get_shadow_kelly()`
+            # below — no need to import BayesianKelly here.
             conn = get_db_connection()
             placeholders = ",".join("?" * len(resolved_ids))
             rows = conn.execute(
@@ -2286,6 +2389,21 @@ class PipelineScheduler:
                 pool = None
             arg_updates = 0
 
+            # EK Sprint 2026-04-23 (EK.1): shadow outcomes go into the
+            # SEPARATE shadow ledger. Live sizing still reads the real
+            # ledger only (get_real_kelly()), so the B.1.1 label bug can
+            # never again contaminate production sizing. Feature flag
+            # `shadow_kelly_separate_ledger_enabled` can disable the
+            # update entirely for A/B comparison.
+            shadow_kelly = None
+            try:
+                from ai_config import get_flag
+                if get_flag("shadow_kelly_separate_ledger_enabled", True):
+                    from position_sizer import get_shadow_kelly
+                    shadow_kelly = get_shadow_kelly()
+            except Exception as _sk_err:
+                logger.debug(f"[Phase27:ShadowLearn] shadow ledger unavailable: {_sk_err}")
+
             for r in rows:
                 try:
                     pair = r["pair"]
@@ -2294,9 +2412,24 @@ class PipelineScheduler:
                     regime = r["regime"] or "_global"
                     pnl_pct = float(r["forgone_pnl"] or 0.0)
                     won = pnl_pct > 0
-                    bk.update(won=won, pnl_pct=pnl_pct,
-                               pair=pair, regime=regime)
-                    kelly_updates += 1
+                    if shadow_kelly is not None:
+                        try:
+                            shadow_kelly.update(won=won, pnl_pct=pnl_pct,
+                                                 pair=pair, regime=regime)
+                            kelly_updates += 1
+                        except Exception as _upd_err:
+                            logger.debug(
+                                f"[Phase27:ShadowLearn] shadow update failed "
+                                f"{pair}/{regime}: {_upd_err}"
+                            )
+                    else:
+                        # Tur-2 (M6): flag off → state it LOUDLY in the logs,
+                        # not just silently swallow the update.
+                        logger.warning(
+                            "[Phase27:ShadowLearn] "
+                            "shadow_kelly_separate_ledger_enabled=False — "
+                            "no shadow updates; check config_ai.json"
+                        )
 
                     # Argument quality feedback — grade every agent that
                     # debated this pair in the last 6 hours against the

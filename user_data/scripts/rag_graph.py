@@ -207,6 +207,7 @@ class GraphState(TypedDict, total=False):
     confidence: float
     reasoning: str
     source: str
+    agent_votes: Dict[str, float]
 
 # --- Phase 17: Technical Data Formatters ---
 
@@ -1781,9 +1782,25 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
     # the Coordinator path never short-circuits AgentPool, so we get ENSEMBLE
     # rows in signal_health instead of AI≫AGENT_POOL 100:1.
     def _coordinator_path() -> Optional[Dict[str, Any]]:
+        # EK Sprint 2026-04-23 (EK.2.8): propagate task_context so LinUCB
+        # learns coordinator_debate rewards structured-output-capable
+        # providers (Gemini, Mistral-large) over fast pool models.
+        import datetime as _dt
+        coord_ctx = {
+            "task": "coordinator_debate",
+            "prompt_len": sum(
+                len(str(getattr(m, "content", "") or "")) for m in coordinator_msgs
+            ),
+            "needs_json": True,
+            "regime_vol": 0.5,
+            "hour_utc": _dt.datetime.utcnow().hour,
+        }
+
         parsed_local = None
         try:
-            response = llm.invoke(coordinator_msgs, temperature=0.7, priority="critical")
+            response = llm.invoke(coordinator_msgs, temperature=0.7,
+                                  priority="critical", task_context=coord_ctx,
+                                  pair=pair)
             parsed_local = _parse_coordinator_response(response.content)
         except Exception as e:
             logger.error(
@@ -1801,7 +1818,9 @@ RULES:
 4. Signal must be exactly one of: "BULLISH", "BEARISH", "NEUTRAL"."""),
                     HumanMessage(content=prompt + "\n\nRESPOND WITH ONLY THE JSON OBJECT. Example format:\n{\"signal\":\"NEUTRAL\",\"confidence\":0.52,\"reasoning\":\"Mixed signals across agents.\"}"),
                 ]
-                response = llm.invoke(strict_msgs, temperature=0.3, priority="critical")
+                response = llm.invoke(strict_msgs, temperature=0.3,
+                                      priority="critical", task_context=coord_ctx,
+                                      pair=pair)
                 parsed_local = _parse_coordinator_response(response.content)
             except Exception as e:
                 logger.error(
@@ -1850,6 +1869,9 @@ RULES:
                 "confidence": float(pool_local.get("confidence", 0.0)),
                 "reasoning": pool_local.get("reasoning", ""),
                 "source": "AGENT_POOL",
+                # Revize Tur-2 (C1): propagate the per-agent vote snapshot
+                # up the graph so log_decision can freeze it into ai_decisions.
+                "agent_votes": pool_local.get("agent_votes") or {},
             }
         except Exception as e:
             logger.warning(f"[Ensemble:Pool] {pair} debate failed: {e}")
@@ -2057,7 +2079,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
     # Phase 24: EvidenceFirst threshold is now adaptive via Neural Organism
     try:
         from neural_organism import _p as _np
-        _ee_threshold = _np("rag.evidence_first_threshold", 0.40)
+        _ee_threshold = _np("rag.evidence_first_threshold", 0.70)
     except Exception:
         _ee_threshold = 0.40
 
@@ -2250,12 +2272,24 @@ def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
     # onto a single bucket and made per-regime causal discovery impossible —
     # with the freshest `regime_layers.layer3_adx_regime` for this pair.
     resolved_regime = _resolve_pair_regime(pair)
+    # Revize Tur-2 (C1): snapshot the agent consensus so post_trade_court
+    # can run opposite-consensus detection at autopsy time without racing
+    # against agent_memory's sliding window.
+    agent_votes_payload = None
+    try:
+        votes = final_output.get("agent_votes") if final_output else None
+        if votes:
+            agent_votes_payload = json.dumps(votes)
+    except Exception:
+        agent_votes_payload = None
+
     decision_logger.log_decision(
         pair=pair,
         signal_type=signal,
         confidence=confidence,
         reasoning_summary=reasoning,
         regime=resolved_regime,
+        agent_votes_json=agent_votes_payload,
     )
 
     result_dict = {

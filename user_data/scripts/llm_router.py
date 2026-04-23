@@ -7,7 +7,9 @@ Models that produce quality responses rise; models that fail sink — automatica
 
 Philosophy: Quality > Speed. A fast but dumb model is a FAILURE.
 """
+import math
 import os
+import pickle
 import re
 import time
 import random
@@ -17,6 +19,8 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -172,6 +176,31 @@ class DailyQuota:
         return max(0, self.rpd_limit - self._calls_today)
 
 
+def compute_llm_reward(quality_ok: bool, latency_ms: float,
+                        outcome_pnl: Optional[float] = None) -> float:
+    """Collapse (quality, latency, trade outcome) into a scalar LinUCB reward.
+
+    * quality_ok → 1.0 when the response parsed and was usable, 0 otherwise.
+      A failed call is ZERO reward by definition; we never want LinUCB to
+      push traffic toward a slot that is generating garbage.
+    * latency → exponential decay with a 2 s characteristic time. 500 ms
+      calls retain ~78% of quality_ok; 5 s calls ~8%; 10 s calls ~0.6%.
+    * outcome_pnl → small retroactive nudge (1.2 if the trade that used
+      this call made money, 0.8 if it lost, 1.0 if unknown/None).
+    """
+    r_quality = 1.0 if quality_ok else 0.0
+    r_latency = math.exp(-max(0.0, float(latency_ms)) / 2000.0)
+    if outcome_pnl is None:
+        r_outcome = 1.0
+    elif outcome_pnl > 0:
+        r_outcome = 1.2
+    elif outcome_pnl < 0:
+        r_outcome = 0.8
+    else:
+        r_outcome = 1.0
+    return r_quality * r_latency * r_outcome
+
+
 # ─── ModelSlot ───────────────────────────────────────────────────────
 @dataclass
 class ModelSlot:
@@ -195,10 +224,65 @@ class ModelSlot:
     # Phase 27 Task 18 additions
     rpd_limit: int = 500
     daily_quota: Optional[DailyQuota] = None
+    # Mega Sprint 2026-04-23: latency-aware selection + circuit breaker
+    avg_latency_ms: float = 500.0
+    p95_latency_ms: float = 5000.0
+    consecutive_failures: int = 0
+    blacklisted_until: float = 0.0
+    # Tur-2 (L2): rolling latency sample ring for percentile computation.
+    # default_factory=None so pickled/restored slots still get a buffer.
+    _latency_samples: Optional[deque] = None
+
+    # EK Sprint 2026-04-23 (EK.2.2): LinUCB contextual-bandit state. The
+    # 5×5 covariance A and 5-dim reward vector b are initialised to the
+    # ridge-regression identity prior so new slots start with an uninformed
+    # but well-conditioned posterior.
+    linucb_A: np.ndarray = field(default_factory=lambda: np.eye(5, dtype=np.float64))
+    linucb_b: np.ndarray = field(default_factory=lambda: np.zeros(5, dtype=np.float64))
+    linucb_n_updates: int = 0
 
     def __post_init__(self):
         if self.daily_quota is None:
             self.daily_quota = DailyQuota(rpd_limit=self.rpd_limit)
+        if not isinstance(self.linucb_A, np.ndarray):
+            self.linucb_A = np.eye(5, dtype=np.float64)
+        if not isinstance(self.linucb_b, np.ndarray):
+            self.linucb_b = np.zeros(5, dtype=np.float64)
+
+    def linucb_score(self, x: np.ndarray, alpha: float = 1.5) -> float:
+        """Upper-confidence-bound score: mean + alpha·sqrt(uncertainty)."""
+        try:
+            A_inv = np.linalg.inv(self.linucb_A)
+        except np.linalg.LinAlgError:
+            return 0.5
+        theta = A_inv @ self.linucb_b
+        mean = float(theta @ x)
+        try:
+            bonus = float(alpha * np.sqrt(max(float(x @ A_inv @ x), 0.0)))
+        except Exception:
+            bonus = 0.0
+        return mean + bonus
+
+    def linucb_update(self, x: np.ndarray, reward: float) -> None:
+        """Apply a (feature, reward) observation to the posterior."""
+        self.linucb_A += np.outer(x, x)
+        self.linucb_b += float(reward) * x
+        self.linucb_n_updates += 1
+
+    def record_latency(self, ms: float) -> None:
+        # Tur-2 (L2): EMA for the mean, rolling 100-sample window for p95.
+        # The old decay-based p95 (0.98 * prev) drifted slowly and never
+        # saw the actual distribution — it just chased the most recent
+        # outlier. A deque is O(1) append and lets numpy compute the true
+        # percentile once we have ≥20 samples.
+        self.avg_latency_ms = 0.9 * self.avg_latency_ms + 0.1 * ms
+        if self._latency_samples is None:
+            self._latency_samples = deque(maxlen=100)
+        self._latency_samples.append(float(ms))
+        if len(self._latency_samples) >= 20:
+            self.p95_latency_ms = float(
+                np.percentile(list(self._latency_samples), 95)
+            )
 
     def sample(self, exploit: bool = False) -> float:
         """Thompson Sampling draw. exploit=True returns mean (no randomness)."""
@@ -211,6 +295,8 @@ class ModelSlot:
             return False
         if now < self.penalty_until:
             return False
+        if now < self.blacklisted_until:
+            return False
         # Phase 27 Task 18: enforce daily budget with 20% reserve headroom
         if not self.daily_quota.is_within_budget(reserve_pct=0.2):
             return False
@@ -222,7 +308,9 @@ class ModelSlot:
         recent = sum(1 for ts in self.rpm_window if ts > cutoff)
         return recent < self.rpm_limit * 0.8
 
-    def record_success(self, quality: bool = True):
+    def record_success(self, quality: bool = True, latency_ms: Optional[float] = None,
+                       task_context: Optional[Dict[str, Any]] = None,
+                       outcome_pnl: Optional[float] = None):
         # Phase 27 Task 18 (G5, Sutton-Barto style): discounted Thompson Sampling.
         # Phase 26 used hourly batch `alpha *= 0.99` which made recent calls
         # invisible once total_calls grew large. Per-call discount `alpha =
@@ -233,22 +321,55 @@ class ModelSlot:
         self.alpha = gamma * self.alpha + reward
         self.alpha = max(self.alpha, 0.01)
         self.consecutive_fails = 0
+        self.consecutive_failures = 0  # mega-sprint circuit reset
         self.backoff_level = 0
         self.total_calls += 1
         self.success_count += 1
         if quality:
             self.quality_pass_count += 1
+        if latency_ms is not None:
+            self.record_latency(float(latency_ms))
         now_ts = time.time()
         self.rpm_window.append(now_ts)
         self.daily_quota.stamp()
 
-    def record_failure(self, error_type: str):
+        # EK Sprint 2026-04-23 (EK.2.6): LinUCB update with the reward from
+        # this call. Only runs when the caller passed a task_context so we
+        # stay backwards-compatible with every existing call site.
+        if task_context is not None:
+            try:
+                from llm_features import extract_features
+                x = extract_features(task_context)
+                reward = compute_llm_reward(
+                    quality_ok=bool(quality),
+                    latency_ms=float(latency_ms or self.avg_latency_ms),
+                    outcome_pnl=outcome_pnl,
+                )
+                self.linucb_update(x, reward)
+            except Exception:
+                pass
+
+    def record_failure(self, error_type: str,
+                        task_context: Optional[Dict[str, Any]] = None,
+                        latency_ms: Optional[float] = None):
         # Phase 27 Task 18: same discounted update for the failure arm.
         gamma = 0.997
         self.beta_param = gamma * self.beta_param + 1.0
         self.beta_param = max(self.beta_param, 0.01)
         self.total_calls += 1
         self.consecutive_fails += 1
+        self.consecutive_failures += 1  # mega-sprint circuit counter
+        # Mega Sprint 2026-04-23: open circuit after 5 consecutive failures.
+        # Cooldown doubles per subsequent failure (15s → 30s → 60s → 120s →
+        # 300s cap) so a struggling provider cannot hold the entire failover
+        # chain hostage.
+        if self.consecutive_failures >= 5:
+            cooldown = min(300, 15 * (2 ** (self.consecutive_failures - 5)))
+            self.blacklisted_until = time.time() + cooldown
+            logger.warning(
+                f"[CB] {self.provider}/{self.model_name} blacklisted "
+                f"{cooldown}s ({error_type}, n_fails={self.consecutive_failures})"
+            )
         self.rpm_window.append(time.time())
         # Phase 27 audit fix: DO NOT stamp the daily quota on rate-limit errors.
         # A 429 means the provider REJECTED the request — the call never
@@ -279,6 +400,18 @@ class ModelSlot:
         if penalty >= 60:
             logger.warning(f"[Penalize] {self.model_name} penalized {penalty:.0f}s "
                            f"(type={error_type}, backoff_level={self.backoff_level})")
+
+        # EK Sprint 2026-04-23 (EK.2.6): failures feed LinUCB with reward=0
+        # so the bandit learns to avoid slots/contexts where this model fails.
+        if task_context is not None:
+            try:
+                from llm_features import extract_features
+                x = extract_features(task_context)
+                if latency_ms is not None:
+                    self.record_latency(float(latency_ms))
+                self.linucb_update(x, 0.0)
+            except Exception:
+                pass
 
     @property
     def slot_id(self) -> str:
@@ -360,13 +493,59 @@ class SlotPersistence:
             conn = get_db_connection(self.db_path)
             for s in slots:
                 conn.execute("""INSERT OR REPLACE INTO model_slot_stats
-                    (slot_id, alpha, beta_param, total_calls, success_count, quality_pass_count, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
-                    (s.slot_id, s.alpha, s.beta_param, s.total_calls, s.success_count, s.quality_pass_count))
+                    (slot_id, alpha, beta_param, total_calls, success_count,
+                     quality_pass_count, avg_latency_ms, p95_latency_ms, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                    (s.slot_id, s.alpha, s.beta_param, s.total_calls, s.success_count,
+                     s.quality_pass_count, s.avg_latency_ms, s.p95_latency_ms))
             conn.commit()
             conn.close()
         except Exception as e:
             logger.debug(f"[SlotPersistence] Save failed: {e}")
+
+    def save_linucb_batch(self, slots: List[ModelSlot]) -> int:
+        """EK.2.10: persist LinUCB posterior for each slot as pickled numpy
+        arrays. Returns the number of rows written."""
+        written = 0
+        try:
+            conn = get_db_connection(self.db_path)
+            for s in slots:
+                try:
+                    a_blob = pickle.dumps(np.asarray(s.linucb_A, dtype=np.float64))
+                    b_blob = pickle.dumps(np.asarray(s.linucb_b, dtype=np.float64))
+                except Exception:
+                    continue
+                conn.execute("""INSERT OR REPLACE INTO linucb_state
+                    (slot_id, a_blob, b_blob, n_updates, last_updated)
+                    VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                    (s.slot_id, a_blob, b_blob, int(s.linucb_n_updates)))
+                written += 1
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[SlotPersistence] LinUCB save failed: {e}")
+        return written
+
+    def load_linucb_all(self) -> Dict[str, Dict[str, Any]]:
+        try:
+            conn = get_db_connection(self.db_path)
+            rows = conn.execute(
+                "SELECT slot_id, a_blob, b_blob, n_updates FROM linucb_state"
+            ).fetchall()
+            conn.close()
+        except Exception:
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            try:
+                out[row["slot_id"]] = {
+                    "A": pickle.loads(row["a_blob"]) if row["a_blob"] else None,
+                    "b": pickle.loads(row["b_blob"]) if row["b_blob"] else None,
+                    "n_updates": int(row["n_updates"] or 0),
+                }
+            except Exception:
+                continue
+        return out
 
 
 # ─── Informative Priors (Cold Start) ─────────────────────────────────
@@ -560,6 +739,14 @@ class LLMRouter:
         if restored:
             logger.info(f"[Thompson] Restored learning state for {restored}/{len(self.slots)} slots from SQLite")
 
+        # EK Sprint 2026-04-23 (EK.2.10): restore LinUCB posterior on startup
+        # so contextual-bandit learning survives `systemctl restart`. Silent
+        # no-op when the table is empty or pickle bytes are malformed.
+        try:
+            self.load_linucb_state()
+        except Exception as e:
+            logger.debug(f"[LinUCB:Persist] startup restore failed: {e}")
+
     # ── Model Discovery (unchanged from Phase 5.3) ────────────────────
 
     @staticmethod
@@ -666,11 +853,32 @@ class LLMRouter:
             logger.warning(f"OpenRouter discovery failed: {e}. Using fallback.")
             return FALLBACK
 
-    # ── Thompson Sampling Selection ───────────────────────────────────
+    # ── Selection (Thompson + LinUCB) ─────────────────────────────────
+
+    def _adaptive_alpha(self) -> float:
+        """Exploration bonus that shrinks as the bandit accumulates samples.
+
+        0-499 updates → 3.0  (pure exploration while every slot is cold)
+        500-1999      → linear 3.0 → 1.0 as coverage builds
+        2000+         → 0.5  (stable exploit once the posterior is dense)
+        """
+        total_calls = sum(s.linucb_n_updates for s in self.slots)
+        if total_calls < 500:
+            return 3.0
+        if total_calls < 2000:
+            return 3.0 - (2.0 * (total_calls - 500) / 1500.0)
+        return 0.5
 
     def _select_slots(self, priority: Optional[str] = None,
-                      estimated_tokens: int = 0) -> List[ModelSlot]:
-        """Build ranked candidate list using Thompson Sampling."""
+                      estimated_tokens: int = 0,
+                      task_context: Optional[Dict[str, Any]] = None) -> List[ModelSlot]:
+        """Build ranked candidate list.
+
+        EK Sprint 2026-04-23 (EK.2.5): when contextual-bandit routing is
+        enabled we score slots by LinUCB on the caller's task features,
+        fall back to Thompson for cold-start slots (n_updates < 20), and
+        finally apply the mega-sprint latency penalty as a safety belt.
+        """
         now = time.time()
 
         # Idle-slot decay: per-call discounted TS (record_success/failure) already
@@ -706,17 +914,44 @@ class LLMRouter:
                          f"circuit={'OPEN' if circuit_open else 'closed'})")
             raise ValueError("All providers exhausted (all slots penalized or rate-limited).")
 
-        # Score each slot via Thompson Sampling
+        from ai_config import get_flag
+        lat_enabled = get_flag("llm_router_latency_weight_enabled", True)
+        bandit_enabled = get_flag("llm_contextual_bandit_enabled", True)
+        LAT_CAP_MS = 5000.0
+
+        if bandit_enabled and task_context is not None:
+            from llm_features import extract_features
+            x = extract_features(task_context)
+            alpha = self._adaptive_alpha()
+            scored = []
+            for s in eligible:
+                ucb = s.linucb_score(x, alpha=alpha)
+                if s.linucb_n_updates < 20:
+                    # Cold-start hybrid: blend with Thompson so a never-called
+                    # slot still gets a sane score before its posterior builds.
+                    thompson_prior = s.sample(exploit=False)
+                    ucb = 0.5 * ucb + 0.5 * thompson_prior
+                lat_factor = max(0.1, 1.0 - s.avg_latency_ms / 10000.0)
+                scored.append((ucb * lat_factor, s))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            return [s for _, s in scored]
+
+        # Thompson Sampling (legacy path / fallback when flag disabled).
         scored = []
         for s in eligible:
             if priority == "critical":
-                score = s.sample(exploit=True)   # Best known quality
+                quality = s.sample(exploit=True)
             elif priority == "low":
-                score = s.sample(exploit=False)   # Pure exploration
+                quality = s.sample(exploit=False)
             else:
                 mean = s.alpha / (s.alpha + s.beta_param)
-                samp = s.sample(exploit=False)
-                score = 0.3 * mean + 0.7 * samp  # Balanced
+                quality = 0.3 * mean + 0.7 * s.sample(exploit=False)
+
+            if lat_enabled:
+                lat_factor = max(0.1, 1.0 - s.avg_latency_ms / LAT_CAP_MS)
+                score = quality * (lat_factor ** 2)
+            else:
+                score = quality
             scored.append((score, s))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -725,9 +960,23 @@ class LLMRouter:
     # ── Core Model Call ───────────────────────────────────────────────
 
     def _try_model(self, slot: ModelSlot, messages: List[Any],
-                   temperature: Optional[float], **kwargs) -> Tuple[Optional[Any], Optional[str]]:
-        """Try a single model. Returns (response, None) on success or (None, error_type) on failure."""
+                   temperature: Optional[float],
+                   agent_name: str = "",
+                   pair: str = "",
+                   **kwargs) -> Tuple[Optional[Any], Optional[str], float]:
+        """Try a single model.
+
+        Returns (response, None, latency_ms) on success or (None, error_type,
+        latency_ms) on failure. Latency is surfaced so invoke() can update the
+        slot's latency EMA — previously it was computed and thrown away.
+
+        Revize Tur-2 (C2, M7): `agent_name`/`pair` populate llm_calls for
+        the retroactive LinUCB feedback path, and the duplicate `start`
+        timer from the pre-sprint code is collapsed into a single top-of-
+        function start so latency is measured end-to-end.
+        """
         model = slot.model_obj
+        start = time.time()
         try:
             if temperature is not None:
                 if isinstance(model, ChatGoogleGenerativeAI):
@@ -737,14 +986,13 @@ class LLMRouter:
             else:
                 target = model
 
-            start = time.time()
             response = target.invoke(messages, **kwargs)
             latency_ms = (time.time() - start) * 1000
 
             # Validate non-empty content
             content = getattr(response, 'content', None)
             if content is None or (isinstance(content, str) and not content.strip()):
-                return None, "empty"
+                return None, "empty", latency_ms
 
             # Normalize Gemini list content → string
             if isinstance(content, list):
@@ -770,29 +1018,67 @@ class LLMRouter:
                 out_tok = response.usage_metadata.get('output_tokens', 0)
             provider = self._provider_map.get(id(model), "unknown")
             cost = self.cost_tracker.calculate_cost(slot.model_name, in_tok, out_tok, provider)
-            self.cost_tracker.log_call(slot.model_name, provider, in_tok, out_tok, cost, latency_ms)
+            self.cost_tracker.log_call(
+                slot.model_name, provider, in_tok, out_tok, cost, latency_ms,
+                agent_name=agent_name or "",
+                pair=pair or "",
+                status="success",
+            )
 
-            return response, None
+            return response, None, latency_ms
 
         except _HARD_CRASH as e:
             logger.error(f"Code bug in LLM pipeline: {type(e).__name__}: {e}")
             raise
         except Exception as e:
+            latency_ms = (time.time() - start) * 1000
             error_type = classify_error(e)
             tag = "[RateLimit]" if error_type == "rate_limit" else "[Failover]"
             if error_type == "rate_limit":
                 logger.info(f"{tag} {slot.model_name} quota exhausted. Other models on same key still OK.")
             elif error_type != "timeout":  # Don't spam logs for timeouts
                 logger.warning(f"{tag} {slot.model_name} → {type(e).__name__}: {str(e)[:120]}. Next model...")
-            return None, error_type
+            try:
+                provider = self._provider_map.get(id(model), "unknown")
+                self.cost_tracker.log_call(
+                    slot.model_name, provider, 0, 0, 0.0, latency_ms,
+                    agent_name=agent_name or "",
+                    pair=pair or "",
+                    status="error",
+                )
+            except Exception:
+                pass
+            return None, error_type, latency_ms
 
     # ── Main Invoke ───────────────────────────────────────────────────
 
     def invoke(self, messages: List[Any], temperature: Optional[float] = None,
-               max_wall_time: float = 90.0, priority: Optional[str] = None, **kwargs):
-        """Route LLM request using Thompson Sampling. Drop-in compatible."""
+               max_wall_time: float = 90.0, priority: Optional[str] = None,
+               task_context: Optional[Dict[str, Any]] = None,
+               pair: Optional[str] = None, **kwargs):
+        """Route LLM request using Thompson + LinUCB. Drop-in compatible.
+
+        Revize Tur-2 (C2): ``pair`` now writes llm_calls.trading_pair, so
+        confirm_trade_exit's retroactive LinUCB feedback can find the rows
+        that actually belong to this trade. Without this the llm_calls
+        table held NULL trading_pair for every row and the retro feedback
+        was dead code.
+        """
+        if task_context is None:
+            import datetime as _dt
+            task_context = {
+                "task": "default",
+                "prompt_len": sum(
+                    len(str(getattr(m, "content", "") or "")) for m in messages
+                ),
+                "needs_json": False,
+                "regime_vol": 0.5,
+                "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
+            }
+
         estimated_tokens = sum(len(str(getattr(m, "content", ""))) for m in messages) // 3
-        candidates = self._select_slots(priority, estimated_tokens)
+        candidates = self._select_slots(priority, estimated_tokens,
+                                        task_context=task_context)
 
         wall_start = time.time()
         last_exception = None
@@ -807,14 +1093,21 @@ class LLMRouter:
             if not slot.is_available(time.time()):
                 continue
 
-            response, error_type = self._try_model(slot, messages, temperature, **kwargs)
+            _task_name = (task_context or {}).get("task", "") if isinstance(task_context, dict) else ""
+            response, error_type, latency_ms = self._try_model(
+                slot, messages, temperature,
+                agent_name=_task_name or "",
+                pair=pair or "",
+                **kwargs,
+            )
 
             if response is not None:
                 # Phase 25: Quality check — empty/tiny responses are NOT quality passes
                 content = str(getattr(response, "content", ""))
                 is_quality = len(content.strip()) > 20  # Real content, not just "OK" or empty
                 with self._state_lock:
-                    slot.record_success(quality=is_quality)
+                    slot.record_success(quality=is_quality, latency_ms=latency_ms,
+                                         task_context=task_context)
                 if slot.provider == "gemini":
                     self.gemini_circuit.record_success()
                 self._maybe_persist()
@@ -822,7 +1115,8 @@ class LLMRouter:
 
             # Failure path
             with self._state_lock:
-                slot.record_failure(error_type)
+                slot.record_failure(error_type, task_context=task_context,
+                                     latency_ms=latency_ms)
             if slot.provider == "gemini":
                 self.gemini_circuit.record_failure()
             last_exception = ValueError(f"{slot.model_name}: {error_type}")
@@ -868,6 +1162,8 @@ class LLMRouter:
     async def ensemble_invoke(self, messages: List[Any],
                               n_judges: int = 3,
                               temperature: Optional[float] = None,
+                              task_context: Optional[Dict[str, Any]] = None,
+                              pair: Optional[str] = None,
                               **kwargs) -> Dict[str, Any]:
         """Invoke `n_judges` DISTINCT providers in parallel for disagreement-
         aware fusion. Useful for RLAIF / judge-style consumers who want a
@@ -904,25 +1200,42 @@ class LLMRouter:
 
         loop = _asyncio.get_event_loop()
 
+        _ens_task_name = (task_context or {}).get("task", "") if isinstance(task_context, dict) else ""
+
         async def _one(slot: ModelSlot) -> Dict[str, Any]:
             try:
                 response = await loop.run_in_executor(
                     None,
-                    lambda: self._try_model(slot, messages, temperature, **kwargs),
+                    lambda: self._try_model(
+                        slot, messages, temperature,
+                        agent_name=_ens_task_name or "",
+                        pair=pair or "",
+                        **kwargs,
+                    ),
                 )
-                resp_obj, error_type = response if isinstance(response, tuple) else (response, None)
+                if isinstance(response, tuple):
+                    if len(response) == 3:
+                        resp_obj, error_type, latency_ms = response
+                    else:
+                        resp_obj, error_type = response
+                        latency_ms = None
+                else:
+                    resp_obj, error_type, latency_ms = response, None, None
                 if resp_obj is None:
                     with self._state_lock:
-                        slot.record_failure(error_type or "other")
+                        slot.record_failure(error_type or "other",
+                                             task_context=task_context,
+                                             latency_ms=latency_ms)
                     return {"slot": slot, "content": None, "error": error_type}
                 content = str(getattr(resp_obj, "content", ""))
                 is_quality = len(content.strip()) > 20
                 with self._state_lock:
-                    slot.record_success(quality=is_quality)
+                    slot.record_success(quality=is_quality, latency_ms=latency_ms,
+                                         task_context=task_context)
                 return {"slot": slot, "content": content, "error": None}
             except Exception as e:
                 with self._state_lock:
-                    slot.record_failure("other")
+                    slot.record_failure("other", task_context=task_context)
                 return {"slot": slot, "content": None, "error": str(e)}
 
         results = await _asyncio.gather(*[_one(s) for s in selected])
@@ -995,8 +1308,52 @@ class LLMRouter:
         now = time.time()
         if self._call_counter >= 100 or (now - self._last_persist) >= 300:
             self._persistence.save_batch(self.slots)
+            # EK.2.10: piggyback on the existing persistence tick so LinUCB
+            # state is checkpointed with the same cadence as Thompson stats.
+            try:
+                self._persistence.save_linucb_batch(self.slots)
+            except Exception as e:
+                logger.debug(f"[LinUCB:Persist] save failed: {e}")
             self._call_counter = 0
             self._last_persist = now
+
+    def save_linucb_state(self) -> int:
+        """Force an immediate persistence of LinUCB posteriors. Useful for
+        tests and scheduled checkpoint jobs."""
+        try:
+            return self._persistence.save_linucb_batch(self.slots)
+        except Exception as e:
+            logger.debug(f"[LinUCB:Persist] save failed: {e}")
+            return 0
+
+    def load_linucb_state(self) -> int:
+        """Restore LinUCB posteriors into this router's slots. Returns the
+        number of slots that received non-trivial state."""
+        restored = 0
+        try:
+            saved = self._persistence.load_linucb_all()
+        except Exception as e:
+            logger.debug(f"[LinUCB:Persist] load failed: {e}")
+            return 0
+        by_id = {s.slot_id: s for s in self.slots}
+        for slot_id, entry in saved.items():
+            slot = by_id.get(slot_id)
+            if slot is None:
+                continue
+            A = entry.get("A")
+            b = entry.get("b")
+            if A is None or b is None:
+                continue
+            try:
+                slot.linucb_A = np.asarray(A, dtype=np.float64)
+                slot.linucb_b = np.asarray(b, dtype=np.float64)
+                slot.linucb_n_updates = int(entry.get("n_updates") or 0)
+                restored += 1
+            except Exception:
+                continue
+        if restored:
+            logger.info(f"[LinUCB:Persist] restored {restored} slot posteriors")
+        return restored
 
     def get_slot_stats(self) -> List[dict]:
         """Return stats for all slots (for monitoring/debugging)."""
@@ -1005,6 +1362,21 @@ class LLMRouter:
                  "calls": s.total_calls, "ok": s.success_count, "quality": s.quality_pass_count,
                  "disabled": s.disabled, "available": s.is_available(time.time())}
                 for s in self.slots]
+
+
+_router_singleton: Optional["LLMRouter"] = None
+_router_lock = threading.Lock()
+
+
+def get_router(**kwargs) -> "LLMRouter":
+    """Process-level singleton LLMRouter. Used by retroactive feedback and
+    monitoring endpoints so they don't instantiate a fresh router (which
+    would load every slot stats row from SQLite again)."""
+    global _router_singleton
+    with _router_lock:
+        if _router_singleton is None:
+            _router_singleton = LLMRouter(**kwargs)
+    return _router_singleton
 
 
 # ── Self-test ─────────────────────────────────────────────────────────
