@@ -40,6 +40,24 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _make_task_ctx(task_name: str, prompt: str,
+                    regime_vol: float = 0.5,
+                    needs_json: bool = True) -> Dict[str, Any]:
+    """Tur-3 (C2 completion): LinUCB feature-dict builder. Duplicated in
+    `rag_graph._make_task_ctx` on purpose — agent_pool must not import
+    rag_graph (rag_graph imports agent_pool). The two copies must stay
+    behaviourally identical; any change here gets the matching edit in
+    rag_graph.py."""
+    import datetime as _dt
+    return {
+        "task": task_name,
+        "prompt_len": len(prompt or ""),
+        "needs_json": bool(needs_json),
+        "regime_vol": float(regime_vol),
+        "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 # AGENT REGISTRY — 7 specialized agent types
 # ═══════════════════════════════════════════════════════════════
@@ -686,7 +704,9 @@ class AgentPool:
                 response = llm_to_use.invoke(
                     [SystemMessage(content=AGENT_REGISTRY[agent_name]["system_prompt"]),
                      HumanMessage(content=prompt_r2)],
-                    temperature=0.3, priority="medium"
+                    temperature=0.3, priority="medium",
+                    pair=pair,
+                    task_context=_make_task_ctx("agent_pool_r2", prompt_r2),
                 )
 
                 r2_parsed = self._parse_round2_response(response.content)
@@ -721,6 +741,8 @@ class AgentPool:
                     [SystemMessage(content=AGENT_REGISTRY["ExploiterAgent"]["system_prompt"]),
                      HumanMessage(content=exploit_prompt)],
                     temperature=0.4, priority="medium",
+                    pair=pair,
+                    task_context=_make_task_ctx("agent_pool_r2b_exploiter", exploit_prompt),
                 )
                 exploit_parsed = self._parse_exploit_response(exploit_response.content)
                 defender_prompt = (
@@ -735,6 +757,8 @@ class AgentPool:
                     [SystemMessage(content=AGENT_REGISTRY["DefenderAgent"]["system_prompt"]),
                      HumanMessage(content=defender_prompt)],
                     temperature=0.3, priority="medium",
+                    pair=pair,
+                    task_context=_make_task_ctx("agent_pool_r2b_defender", defender_prompt),
                 )
                 defender_parsed = self._parse_defender_response(defender_response.content)
 
@@ -784,7 +808,9 @@ class AgentPool:
                 response = llm_to_use.invoke(
                     [SystemMessage(content=AGENT_REGISTRY["ReflectionAgent"]["system_prompt"]),
                      HumanMessage(content=prompt_r3)],
-                    temperature=0.2, priority="medium"
+                    temperature=0.2, priority="medium",
+                    pair=pair,
+                    task_context=_make_task_ctx("agent_pool_r3_reflection", prompt_r3),
                 )
                 r3_parsed = self._parse_round2_response(response.content)
                 positions["ReflectionAgent"]["round3"] = r3_parsed
@@ -1080,17 +1106,12 @@ class AgentPool:
             f'"key_risk": "biggest risk to your position"}}'
         )
 
-        # EK Sprint 2026-04-23 (EK.2.8): task_context='agent_pool_r1' so
-        # LinUCB can learn that R1 rewards fast, reliably-parseable slots
-        # (Groq / Cerebras) over slower flagship models.
-        import datetime as _dt
-        r1_ctx = {
-            "task": "agent_pool_r1",
-            "prompt_len": len(prompt) + len(AGENT_REGISTRY[agent_name]["system_prompt"]),
-            "needs_json": True,
-            "regime_vol": 0.5,
-            "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
-        }
+        # Tur-3: route through the shared helper so every LinUCB feature
+        # vector in this module is built identically.
+        r1_ctx = _make_task_ctx(
+            "agent_pool_r1",
+            prompt + AGENT_REGISTRY[agent_name]["system_prompt"],
+        )
         response = llm_to_use.invoke(
             [SystemMessage(content=AGENT_REGISTRY[agent_name]["system_prompt"]),
              HumanMessage(content=prompt)],

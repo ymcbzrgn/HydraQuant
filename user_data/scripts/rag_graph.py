@@ -445,6 +445,27 @@ def _format_tech_for_coordinator(td: dict) -> str:
 
 # --- Phase 18: Fallback Functions (when LLM is exhausted) ---
 
+def _make_task_ctx(task_name: str, prompt: str,
+                    regime_vol: float = 0.5,
+                    needs_json: bool = True) -> Dict[str, Any]:
+    """Tur-3 (C2 completion): single builder for the LinUCB feature dict.
+
+    Every `llm.invoke()` caller should wrap its prompt with this so
+    LinUCB sees a real task tag (coordinator_debate, tech_analyst,
+    bull_research, …) instead of the "default" auto-derived fallback.
+    Keeping it here means rag_graph / agent_pool / rlaif_reward can all
+    share the same contract — no drift on `needs_json` or `hour_utc`.
+    """
+    import datetime as _dt
+    return {
+        "task": task_name,
+        "prompt_len": len(prompt or ""),
+        "needs_json": bool(needs_json),
+        "regime_vol": float(regime_vol),
+        "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
+    }
+
+
 def _abstain_signal(pair: str, reason: str, source: str = "ABSTAIN") -> dict:
     """Canonical 'no usable signal' payload.
 
@@ -951,7 +972,12 @@ End with: TECHNICAL LEAN: BULLISH / BEARISH / NEUTRAL.
 NEVER provide a final trading signal. ONLY your technical perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content=TECH_SYSTEM), HumanMessage(content=prompt)], priority="high")
+        response = llm.invoke(
+            [SystemMessage(content=TECH_SYSTEM), HumanMessage(content=prompt)],
+            priority="high",
+            pair=pair,
+            task_context=_make_task_ctx("tech_analyst", prompt, needs_json=False),
+        )
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1070,7 +1096,12 @@ End with: SENTIMENT LEAN: BULLISH / BEARISH / NEUTRAL
 NEVER provide a final trading signal. ONLY your sentiment perspective."""
 
     try:
-        response = llm.invoke([SystemMessage(content=SENT_SYSTEM), HumanMessage(content=prompt)], temperature=0.4, priority="medium")
+        response = llm.invoke(
+            [SystemMessage(content=SENT_SYSTEM), HumanMessage(content=prompt)],
+            temperature=0.4, priority="medium",
+            pair=pair,
+            task_context=_make_task_ctx("sentiment_analyst", prompt, needs_json=False),
+        )
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1164,7 +1195,12 @@ End with: FUNDAMENTAL LEAN: BULLISH / BEARISH / NEUTRAL
 Focus only on news impact. NEVER provide a final trading signal."""
 
     try:
-        response = llm.invoke([SystemMessage(content=NEWS_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="medium")
+        response = llm.invoke(
+            [SystemMessage(content=NEWS_SYSTEM), HumanMessage(content=prompt)],
+            temperature=0.3, priority="medium",
+            pair=pair,
+            task_context=_make_task_ctx("news_analyst", prompt, needs_json=False),
+        )
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1272,7 +1308,12 @@ SECTION D — ANTI-CONFIRMATION CHECK:
 - INVALIDATION: Specific price or event that kills the bull case"""
 
     try:
-        response = llm.invoke([SystemMessage(content=BULL_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="high")
+        response = llm.invoke(
+            [SystemMessage(content=BULL_SYSTEM), HumanMessage(content=prompt)],
+            temperature=0.3, priority="high",
+            pair=pair,
+            task_context=_make_task_ctx("bull_research", prompt, needs_json=False),
+        )
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1380,7 +1421,12 @@ SECTION D — TAIL RISK CHECK:
 - INVALIDATION: Specific price or event that kills the bear case"""
 
     try:
-        response = llm.invoke([SystemMessage(content=BEAR_SYSTEM), HumanMessage(content=prompt)], temperature=0.3, priority="high")
+        response = llm.invoke(
+            [SystemMessage(content=BEAR_SYSTEM), HumanMessage(content=prompt)],
+            temperature=0.3, priority="high",
+            pair=pair,
+            task_context=_make_task_ctx("bear_research", prompt, needs_json=False),
+        )
         content_raw = response.content
         if isinstance(content_raw, list):
             content_raw = " ".join([b.get("text", "") for b in content_raw if "text" in b])
@@ -1782,19 +1828,12 @@ YOU DO: synthesize evidence, detect contradictions, apply calibration, penalize 
     # the Coordinator path never short-circuits AgentPool, so we get ENSEMBLE
     # rows in signal_health instead of AI≫AGENT_POOL 100:1.
     def _coordinator_path() -> Optional[Dict[str, Any]]:
-        # EK Sprint 2026-04-23 (EK.2.8): propagate task_context so LinUCB
-        # learns coordinator_debate rewards structured-output-capable
-        # providers (Gemini, Mistral-large) over fast pool models.
-        import datetime as _dt
-        coord_ctx = {
-            "task": "coordinator_debate",
-            "prompt_len": sum(
-                len(str(getattr(m, "content", "") or "")) for m in coordinator_msgs
-            ),
-            "needs_json": True,
-            "regime_vol": 0.5,
-            "hour_utc": _dt.datetime.utcnow().hour,
-        }
+        # Tur-3: route through the shared `_make_task_ctx` helper so every
+        # LinUCB feature vector in the codebase is built identically.
+        combined_prompt = "".join(
+            str(getattr(m, "content", "") or "") for m in coordinator_msgs
+        )
+        coord_ctx = _make_task_ctx("coordinator_debate", combined_prompt)
 
         parsed_local = None
         try:
