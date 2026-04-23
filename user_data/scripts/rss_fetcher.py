@@ -1,5 +1,6 @@
 import feedparser
 import logging
+import socket
 import sqlite3
 import hashlib
 import re
@@ -13,6 +14,11 @@ sys.path.append(os.path.dirname(__file__))
 from db import get_db_connection
 
 logger = logging.getLogger(__name__)
+
+# Revize Tur-2 (H10): setdefaulttimeout is a process-global, so the
+# mega-sprint module-level call was silently forcing a 30s timeout on
+# every unrelated SQLite / HTTP call the process made for the rest of
+# its lifetime. Scoped to fetch_rss_feeds() via context manager below.
 
 # TIER 1 and TIER 2 RSS feeds explicitly defined from ROADMAP.md
 # Expanded to include Macro and Secondary Crypto sites for maximum Brain data
@@ -70,6 +76,15 @@ def title_hash(title: str) -> str:
 
 def fetch_rss_feeds():
     """Fetches articles from RSS feeds and stores them if they don't exist."""
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(30)
+    try:
+        return _fetch_rss_feeds_inner()
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
+
+
+def _fetch_rss_feeds_inner():
     conn = get_db_connection()
     c = conn.cursor()
     new_articles = 0

@@ -296,8 +296,25 @@ class EvidenceEngine:
                 "backtest": patterns.stats is not None and not patterns.stats.get("insufficient_data"),
                 "ensemble": patterns.ensemble is not None and patterns.ensemble.get("total_strategies", 0) >= 2,
             }
+            # Revize Tur-2 (C1): granular fields for post_trade_court root cause.
+            # atr_ratio proxy = ATR / 20-bar ATR mean when available, else None.
+            # volume_z = current volume z-score, funding_rate from derivatives.
+            atr_ratio_at_entry = None
+            volume_z = None
+            funding_rate = None
+            try:
+                atr_ratio_at_entry = tech_data.get("atr_ratio") if tech_data else None
+                volume_z = tech_data.get("volume_z") if tech_data else None
+                if gather and gather.derivatives:
+                    funding_rate = gather.derivatives.get("funding_rate")
+            except Exception:
+                pass
+
             self._audit_log(pair, result["signal"], result["confidence"], scores,
-                           contradictions, regime, evidence_sources, result.get("_max_cap", 0.35))
+                           contradictions, regime, evidence_sources, result.get("_max_cap", 0.35),
+                           atr_ratio_at_entry=atr_ratio_at_entry,
+                           volume_z=volume_z,
+                           funding_rate=funding_rate)
 
             return result
 
@@ -1190,12 +1207,22 @@ class EvidenceEngine:
 
     def _audit_log(self, pair: str, signal: str, confidence: float,
                    scores: Dict, contradictions: List, regime: str,
-                   evidence_sources: Dict, max_cap: float):
-        """Persist structured audit log to SQLite. MiroFish JSONL pattern."""
+                   evidence_sources: Dict, max_cap: float,
+                   atr_ratio_at_entry: Optional[float] = None,
+                   volume_z: Optional[float] = None,
+                   funding_rate: Optional[float] = None):
+        """Persist structured audit log to SQLite. MiroFish JSONL pattern.
+
+        Revize Tur-2 (C1): the three new numeric columns power the granular
+        root-cause classifier in post_trade_court._assign_blame — without
+        them the new branches were dead code (Critical finding C1).
+        """
         try:
             conn = get_db_connection(self.db_path)
 
-            # Ensure table exists (idempotent)
+            # Ensure table exists (idempotent). New numeric columns are
+            # additive; deploys use migrations/rev2_audit_fields.sql for
+            # live DBs that pre-date this sprint.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS evidence_audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1207,6 +1234,9 @@ class EvidenceEngine:
                     evidence_sources_json TEXT,
                     regime TEXT,
                     max_confidence_cap REAL,
+                    atr_ratio_at_entry REAL,
+                    volume_z REAL,
+                    funding_rate REAL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -1216,13 +1246,15 @@ class EvidenceEngine:
             conn.execute("""
                 INSERT INTO evidence_audit_log
                 (pair, signal, confidence, sub_scores_json, contradictions_json,
-                 evidence_sources_json, regime, max_confidence_cap)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 evidence_sources_json, regime, max_confidence_cap,
+                 atr_ratio_at_entry, volume_z, funding_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (pair, signal, confidence,
                   json.dumps(scores),
                   json.dumps(contradictions),
                   json.dumps(evidence_sources),
-                  regime, max_cap))
+                  regime, max_cap,
+                  atr_ratio_at_entry, volume_z, funding_rate))
             conn.commit()
             conn.close()
             logger.debug(f"[EvidenceEngine:Audit] {pair} logged: {signal} {confidence:.2f}")

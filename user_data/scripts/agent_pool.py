@@ -413,7 +413,13 @@ class AgentPool:
                 prev_avg = row["avg_pnl_when_used"] or 0.0
                 avg_pnl = (prev_avg * (used - 1) + float(outcome_pnl)) / used
 
-            quality_score = (correct / used) if used > 0 else 0.5
+            # Mega Sprint 2026-04-23 (B.4.1): Laplace smoothing. The old
+            # "correct/used" formula collapsed a pattern's score to 0.0 after
+            # a single losing observation, which killed evidence before
+            # enough trials had accumulated. (correct+1)/(used+2) is the
+            # posterior mean of a Beta(1,1) prior — starts at 0.5 and
+            # regresses toward the true rate as n grows.
+            quality_score = (correct + 1) / (used + 2)
             from datetime import datetime as _dt, timezone as _tz
             now = _dt.now(tz=_tz.utc).isoformat()
 
@@ -460,31 +466,52 @@ class AgentPool:
     # AGENT SELECTION
     # ═══════════════════════════════════════════════════════════
 
-    def select_agents(self, regime: str, n_variable: int = 3) -> List[str]:
-        """Select agents: 2 fixed (DevilsAdvocate, EvidenceValidator) + n_variable by regime+performance.
-        With 10 agents, we select 5 total (2 fixed + 3 variable)."""
-        selected = ["DevilsAdvocate", "EvidenceValidator"]
+    # Mega Sprint 2026-04-23 (A.2): fixed 4-agent regime-adaptive roster.
+    # The 5-agent performance-weighted picker had two problems: (a) freshly-
+    # registered agents (DefenderAgent, ExploitAgent, MacroCorrelator) never
+    # won the regression ranking, so live debates stayed stuck on a small
+    # subset; (b) an extra agent meant another full LLM call per round. A
+    # 4-agent regime map keeps the rubric within a 12-15s budget while
+    # guaranteeing DevilsAdvocate + EvidenceValidator are always present.
+    REGIME_AGENT_MAP = {
+        "trending_bull": ["DevilsAdvocate", "EvidenceValidator", "MacroCorrelator", "TrendFollower"],
+        "trending_bear": ["DevilsAdvocate", "EvidenceValidator", "MacroCorrelator", "TrendFollower"],
+        "ranging":       ["DevilsAdvocate", "EvidenceValidator", "MacroCorrelator", "MeanReverter"],
+        "high_volatility": ["DevilsAdvocate", "EvidenceValidator", "RiskMinimizer", "FundingContrarian"],
+        "transitional":  ["DevilsAdvocate", "EvidenceValidator", "MacroCorrelator", "TrendFollower"],
+    }
 
-        candidates = []
-        for name, config in AGENT_REGISTRY.items():
-            if name in selected:
-                continue
-            regimes = config["best_regimes"]
-            if "*" in regimes or regime in regimes:
-                # Score = regime match bonus + historical performance
-                perf = self._get_agent_performance(name, regime)
-                win_rate = perf.get("win_rate", 0.50)
-                n_signals = perf.get("n_signals", 0)
-                # Performance score: favors proven agents but gives newcomers a chance
-                perf_score = (win_rate * _p("agent.perf_wr_weight", 0.60) +
-                             min(n_signals / _p("agent.perf_exp_normalizer", 50), 1.0) * _p("agent.perf_exp_weight", 0.40))
-                candidates.append((name, perf_score))
+    def select_agents(self, regime: str, n_variable: int = 2) -> List[str]:
+        """Regime-adaptive 4-agent roster + dynamic meta-agent opt-ins.
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        selected.extend([c[0] for c in candidates[:n_variable]])
+        Revize Tur-2 (C5): the mega-sprint roster hardcoded exactly four
+        agents, which left ReflectionAgent / Exploiter / Defender
+        permanently off-roster even when their neural-organism flags were
+        enabled. Meta-agents now JOIN the regime roster when their flag is
+        truthy, giving us 4 baseline / 5 with R3 / 7 with R2b + R3.
 
-        logger.info(f"[AgentPool:Select] Regime={regime} → agents: {selected}")
-        return selected
+        `n_variable` remains for signature compatibility but is ignored —
+        the baseline roster is always the four regime-specific slots.
+        """
+        roster = list(self.REGIME_AGENT_MAP.get(regime, self.REGIME_AGENT_MAP["transitional"]))
+        missing = [name for name in roster if name not in AGENT_REGISTRY]
+        if missing:
+            logger.warning(
+                f"[AgentPool:Select] regime={regime} roster has unregistered agents "
+                f"{missing} — skipping them"
+            )
+            roster = [name for name in roster if name in AGENT_REGISTRY]
+
+        if _p("agent.enable_r3_reflection", 1.0) > 0.5 and "ReflectionAgent" in AGENT_REGISTRY:
+            if "ReflectionAgent" not in roster:
+                roster.append("ReflectionAgent")
+        if _p("agent.enable_r2b_adversarial", 0.0) > 0.5:
+            for extra in ("ExploiterAgent", "DefenderAgent"):
+                if extra in AGENT_REGISTRY and extra not in roster:
+                    roster.append(extra)
+
+        logger.info(f"[AgentPool:Select] Regime={regime} → agents: {roster}")
+        return roster
 
     def _get_agent_performance(self, agent_type: str, regime: str = None) -> Dict:
         """Get historical performance stats for an agent."""
@@ -541,80 +568,109 @@ class AgentPool:
         agents = self.select_agents(regime)
         positions = {}
 
-        # ── Round 1: Each agent states position ──
-        for agent_name in agents:
-            try:
-                perf = self._get_agent_performance(agent_name, regime)
-                perf_context = (
-                    f"\nYour track record in {regime} regime: "
-                    f"{perf['n_signals']} signals, {perf['win_rate']:.0%} win rate, "
-                    f"avg P&L {perf['avg_pnl']:+.2f}%. "
-                    f"{'Adjust your conviction based on where you historically perform well.' if perf['n_signals'] > 10 else 'No significant history yet — be humble in your conviction.'}"
+        # ── Round 1: each agent states position (parallel) ──
+        # Mega Sprint 2026-04-23 (A.2): serial R1 dominated the AgentPool
+        # budget (4 × 2.5-5s = 10-20s). With the 4-agent roster we can fan
+        # all of them out at once; per-agent 10s timeout protects the whole
+        # debate from a single hung provider.
+        from ai_config import get_flag
+        parallel = get_flag("agentpool_parallel_r1", True)
+        if parallel:
+            # Revize Tur-2 (H1): switched from as_completed() to wait(...,
+            # ALL_COMPLETED). The old as_completed raised TimeoutError and
+            # left hung futures running; wait() lets us explicitly cancel
+            # stragglers and read the completed set without iteration races.
+            from concurrent.futures import (
+                ThreadPoolExecutor, wait, ALL_COMPLETED,
+                TimeoutError as _FutT,
+            )
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"r1-{pair}") as ex:
+                futures = {
+                    ex.submit(
+                        self._run_r1_agent,
+                        agent_name, pair, evidence_factsheet, regime, llm_to_use,
+                    ): agent_name
+                    for agent_name in agents
+                }
+                done_set, not_done = wait(
+                    list(futures.keys()), timeout=12, return_when=ALL_COMPLETED
                 )
-
-                # Phase 27 Fix 2C: inject argument-quality feedback so the agent
-                # biases toward reasoning patterns that have actually worked.
-                arg_feedback = self._get_argument_quality(agent_name, regime)
-                arg_block = f"\n\nYOUR ARGUMENT QUALITY HISTORY:\n{arg_feedback}\n" if arg_feedback else ""
-
-                # Agentic RAG: agent can request retrieval by including [RETRIEVE: type]
-                retrieval_hint = (
-                    "\n\nYou can request evidence by including these tags in your response:\n"
-                    "[RETRIEVE: news] — recent crypto news about this pair\n"
-                    "[RETRIEVE: events] — similar historical events\n"
-                    "[RETRIEVE: patterns] — statistical pattern matching from backtests\n"
-                    "Include the tag where you need evidence. It will be resolved before Round 2.\n"
-                )
-
-                prompt = (
-                    f"Analyze {pair} for a trading decision.\n\n"
-                    f"EVIDENCE ENGINE FACTSHEET (verified data — you MUST reference this):\n"
-                    f"{evidence_factsheet}\n\n"
-                    f"Current regime: {regime}\n"
-                    f"{perf_context}"
-                    f"{arg_block}"
-                    f"{retrieval_hint}\n\n"
-                    f"Respond in this EXACT JSON format (no other text):\n"
-                    f'{{"direction": "BULLISH" or "BEARISH" or "NEUTRAL", '
-                    f'"strength": 0.0 to 1.0, '
-                    f'"key_argument": "your strongest point with data citation", '
-                    f'"key_risk": "biggest risk to your position"}}'
-                )
-
-                response = llm_to_use.invoke(
-                    [SystemMessage(content=AGENT_REGISTRY[agent_name]["system_prompt"]),
-                     HumanMessage(content=prompt)],
-                    temperature=0.4, priority="high"
-                )
-
-                # Agentic RAG: process any retrieval requests in response.
-                # Phase 27 Fix 2B: agent_name drives agent-specific RAG keywords.
-                raw_content = response.content
-                raw_content = self._process_retrieval_requests(raw_content, pair, agent_name)
-
-                parsed = self._parse_agent_response(raw_content)
-                if parsed is None:
+                for fut in not_done:
+                    fut.cancel()
                     logger.warning(
-                        f"[AgentPool:R1] {agent_name} parse returned None — "
-                        f"skipping (no NEUTRAL pollution)"
+                        f"[AgentPool:R1] {futures[fut]} timed out 12s — cancelled"
+                    )
+                for fut in done_set:
+                    agent_name = futures[fut]
+                    try:
+                        parsed = fut.result(timeout=0.1)
+                    except (_FutT, Exception) as e:
+                        logger.warning(
+                            f"[AgentPool:R1] {agent_name} failed "
+                            f"({type(e).__name__}): {e}"
+                        )
+                        continue
+                    if parsed is None:
+                        continue
+                    positions[agent_name] = parsed
+                    logger.info(
+                        f"[AgentPool:R1] {agent_name} → {parsed['direction']} "
+                        f"str={parsed['strength']:.2f}"
+                    )
+        else:
+            for agent_name in agents:
+                try:
+                    parsed = self._run_r1_agent(
+                        agent_name, pair, evidence_factsheet, regime, llm_to_use,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[AgentPool:R1] {agent_name} failed ({type(e).__name__}): {e} — skip"
                     )
                     continue
+                if parsed is None:
+                    continue
                 positions[agent_name] = parsed
-                logger.info(f"[AgentPool:R1] {agent_name} → {parsed['direction']} "
-                           f"str={parsed['strength']:.2f}")
-
-            except Exception as e:
-                logger.warning(
-                    f"[AgentPool:R1] {agent_name} failed "
-                    f"({type(e).__name__}): {e} — skipping (no NEUTRAL pollution)"
+                logger.info(
+                    f"[AgentPool:R1] {agent_name} → {parsed['direction']} "
+                    f"str={parsed['strength']:.2f}"
                 )
-                continue
 
         # ── Round 2: Devil's Advocate cross-examination ──
-        majority_dir = self._compute_majority(positions)
-        da_challenge = positions.get("DevilsAdvocate", {}).get("key_argument", "No challenge")
+        # Mega Sprint 2026-04-23 (A.2): skip R2 entirely when R1 already
+        # agreed by ≥60% (3/4 in the 4-agent roster) — cross-examining a
+        # near-unanimous panel just burned 4-8s of LLM time for zero
+        # information gain. Conditional flag lets us fall back to the old
+        # unconditional behaviour for A/B comparison.
+        r2_conditional = get_flag("agentpool_r2_conditional", True)
+        r2_skipped = False
+        if r2_conditional and positions:
+            bull = sum(1 for p in positions.values() if p.get("direction") == "BULLISH")
+            bear = sum(1 for p in positions.values() if p.get("direction") == "BEARISH")
+            total = max(len(positions), 1)
+            max_consensus = max(bull, bear) / total
+            R2_CONSENSUS_THRESHOLD = 0.60
+            if max_consensus >= R2_CONSENSUS_THRESHOLD:
+                logger.info(
+                    f"[AgentPool:R2] skip — R1 consensus "
+                    f"{max(bull, bear)}/{total} >= {R2_CONSENSUS_THRESHOLD:.0%}"
+                )
+                r2_skipped = True
+
+        # Tur-2 (L5): only pay the majority/challenge compute when R2 will
+        # actually run. Saves a dict pass + one attribute read per debate.
+        if not r2_skipped:
+            majority_dir = self._compute_majority(positions)
+            da_challenge = positions.get("DevilsAdvocate", {}).get(
+                "key_argument", "No challenge"
+            )
+        else:
+            majority_dir = "NEUTRAL"
+            da_challenge = ""
 
         for agent_name in agents:
+            if r2_skipped:
+                break
             if agent_name in ("DevilsAdvocate", "EvidenceValidator"):
                 continue  # They already did their job in R1
             try:
@@ -646,7 +702,10 @@ class AgentPool:
         # responds with the safeguard that neutralises it. Both responses
         # are persisted to `exploit_archive` so the nightly regression job
         # can re-probe the strategy against every historical exploit.
-        if "ExploiterAgent" in agents and "DefenderAgent" in agents:
+        # Mega Sprint 2026-04-23: neural-organism-gated feature flag so the
+        # adversarial round can be toggled off when it's eating budget.
+        enable_r2b = _p("agent.enable_r2b_adversarial", 0.0) > 0.5
+        if enable_r2b and "ExploiterAgent" in agents and "DefenderAgent" in agents:
             try:
                 majority = self._compute_majority(positions)
                 exploit_prompt = (
@@ -694,8 +753,11 @@ class AgentPool:
                 logger.debug(f"[AgentPool:R2b] adversarial round skipped: {e}")
 
         # ── Round 3: ReflectionAgent meta-analysis + final positions ──
-        # ReflectionAgent synthesizes what happened in R1+R2 and provides meta-guidance
-        if "ReflectionAgent" in agents:
+        # ReflectionAgent synthesizes what happened in R1+R2 and provides meta-guidance.
+        # Default ON (cheap single call) but available as an organ parameter
+        # if the aggregator later decides the meta-insight isn't worth it.
+        enable_r3 = _p("agent.enable_r3_reflection", 1.0) > 0.5
+        if enable_r3 and "ReflectionAgent" in agents:
             try:
                 r1_summary = "; ".join(f"{n}: {p.get('direction', '?')}({p.get('strength', 0):.0%})"
                                        for n, p in positions.items() if n not in ("ReflectionAgent",))
@@ -748,6 +810,29 @@ class AgentPool:
 
         # ── Phase 27 Fix 2E: pheromone deposit for downstream modules ──
         self._deposit_debate_pheromones(pair, regime, positions, result)
+
+        # Revize Tur-2 (C1): snapshot each agent's vote so log_decision can
+        # freeze the consensus into ai_decisions.agent_votes_json. Keys are
+        # agent names, values are signed strengths (+ for BULLISH, - for
+        # BEARISH, 0 for NEUTRAL) so the post-trade court can compute the
+        # consensus direction cheaply.
+        votes: Dict[str, float] = {}
+        for name, pos in positions.items():
+            direction = pos.get("direction")
+            strength = pos.get("strength")
+            if not direction or strength is None:
+                continue
+            try:
+                s = float(strength)
+            except (TypeError, ValueError):
+                continue
+            if direction == "BULLISH":
+                votes[name] = round(s, 3)
+            elif direction == "BEARISH":
+                votes[name] = round(-s, 3)
+            else:
+                votes[name] = 0.0
+        result["agent_votes"] = votes
 
         return result
 
@@ -950,6 +1035,71 @@ class AgentPool:
             "agent_votes": agent_votes,
             "source": "AGENT_POOL",
         }
+
+    # ═══════════════════════════════════════════════════════════
+    # ROUND 1 — single-agent prompt + LLM + parse
+    # ═══════════════════════════════════════════════════════════
+
+    def _run_r1_agent(self, agent_name: str, pair: str, evidence_factsheet: str,
+                     regime: str, llm_to_use: Any) -> Optional[Dict]:
+        """Run one R1 agent end-to-end. Extracted from the debate loop so
+        the four agents can fan out in parallel via ThreadPoolExecutor."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        perf = self._get_agent_performance(agent_name, regime)
+        perf_context = (
+            f"\nYour track record in {regime} regime: "
+            f"{perf['n_signals']} signals, {perf['win_rate']:.0%} win rate, "
+            f"avg P&L {perf['avg_pnl']:+.2f}%. "
+            f"{'Adjust your conviction based on where you historically perform well.' if perf['n_signals'] > 10 else 'No significant history yet — be humble in your conviction.'}"
+        )
+
+        arg_feedback = self._get_argument_quality(agent_name, regime)
+        arg_block = f"\n\nYOUR ARGUMENT QUALITY HISTORY:\n{arg_feedback}\n" if arg_feedback else ""
+
+        retrieval_hint = (
+            "\n\nYou can request evidence by including these tags in your response:\n"
+            "[RETRIEVE: news] — recent crypto news about this pair\n"
+            "[RETRIEVE: events] — similar historical events\n"
+            "[RETRIEVE: patterns] — statistical pattern matching from backtests\n"
+            "Include the tag where you need evidence. It will be resolved before Round 2.\n"
+        )
+
+        prompt = (
+            f"Analyze {pair} for a trading decision.\n\n"
+            f"EVIDENCE ENGINE FACTSHEET (verified data — you MUST reference this):\n"
+            f"{evidence_factsheet}\n\n"
+            f"Current regime: {regime}\n"
+            f"{perf_context}"
+            f"{arg_block}"
+            f"{retrieval_hint}\n\n"
+            f"Respond in this EXACT JSON format (no other text):\n"
+            f'{{"direction": "BULLISH" or "BEARISH" or "NEUTRAL", '
+            f'"strength": 0.0 to 1.0, '
+            f'"key_argument": "your strongest point with data citation", '
+            f'"key_risk": "biggest risk to your position"}}'
+        )
+
+        # EK Sprint 2026-04-23 (EK.2.8): task_context='agent_pool_r1' so
+        # LinUCB can learn that R1 rewards fast, reliably-parseable slots
+        # (Groq / Cerebras) over slower flagship models.
+        import datetime as _dt
+        r1_ctx = {
+            "task": "agent_pool_r1",
+            "prompt_len": len(prompt) + len(AGENT_REGISTRY[agent_name]["system_prompt"]),
+            "needs_json": True,
+            "regime_vol": 0.5,
+            "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
+        }
+        response = llm_to_use.invoke(
+            [SystemMessage(content=AGENT_REGISTRY[agent_name]["system_prompt"]),
+             HumanMessage(content=prompt)],
+            temperature=0.4, priority="high", task_context=r1_ctx,
+            pair=pair,
+        )
+        raw_content = response.content
+        raw_content = self._process_retrieval_requests(raw_content, pair, agent_name)
+        return self._parse_agent_response(raw_content)
 
     # ═══════════════════════════════════════════════════════════
     # RESPONSE PARSING
@@ -1317,12 +1467,22 @@ class AgentPool:
             updated = 0
             for row in rows:
                 agent_signal = row["signal"]
-                if signal:
-                    was_correct = (agent_signal == signal and outcome_pnl > 0) or \
-                                  (agent_signal != signal and agent_signal == "NEUTRAL" and outcome_pnl < 0)
+                # Mega Sprint 2026-04-23 (B.4): was_correct is now evaluated
+                # against the AGENT's own position, not the aggregated trade
+                # signal. A bearish agent that correctly called a losing
+                # long was previously marked "wrong" because the trade signal
+                # was BULLISH — this made contrarian agents look permanently
+                # broken to the reflection loop.
+                if agent_signal == "BULLISH":
+                    was_correct = outcome_pnl > 0
+                elif agent_signal == "BEARISH":
+                    was_correct = outcome_pnl < 0
+                elif agent_signal == "NEUTRAL":
+                    # Tur-2 (M5): flat-zone band is tunable via neural_organism.
+                    band = float(_p("agent.neutral_correct_band_pct", 0.5))
+                    was_correct = abs(outcome_pnl) < band
                 else:
-                    was_correct = (outcome_pnl > 0 and agent_signal in ("BULLISH", "BEARISH")) or \
-                                  (outcome_pnl < 0 and agent_signal == "NEUTRAL")
+                    was_correct = False
 
                 conn.execute("""
                     INSERT INTO agent_performance

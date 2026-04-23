@@ -58,7 +58,7 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 CAUSAL_REPORT_PATH = os.path.join(MODEL_DIR, "causal_graph_latest.json")
 
 # Minimum observations needed for reliable causal discovery
-MIN_OBSERVATIONS = 50
+MIN_OBSERVATIONS = 30  # Tur-2 (M3): PCMCI+ literature minimum (Runge 2020); 20 was below that bound
 
 # PCMCI+ significance threshold
 ALPHA_LEVEL = 0.05

@@ -15,7 +15,7 @@ URL = "https://api.alternative.me/fng/?limit=1"
 def fetch_fng():
     """Fetches the Fear and Greed index and stores it in the DB."""
     try:
-        response = requests.get(URL)
+        response = requests.get(URL, timeout=30)
         response.raise_for_status()
         data = response.json()
         

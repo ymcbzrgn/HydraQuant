@@ -80,3 +80,52 @@ def get_lance_store():
     """Phase 28: Thread-safe singleton LanceDB store. Preferred over get_chroma_client()."""
     from lance_store import get_lance_store as _get
     return _get()
+
+
+# ── Runtime feature flags (Mega Sprint 2026-04-23) ──────────────────
+# A hot-reloadable dict of boolean toggles. File path resolution order:
+#   1. AI_CONFIG_PATH env var (explicit override used in production)
+#   2. <BASE_DIR>/config_ai.json (repo default)
+# Reader reparses only when mtime changes → near-zero hot path cost plus
+# SIGHUP-free rollback: flip a flag in config_ai.json and the next call
+# picks it up within a few seconds.
+_RUNTIME_FLAGS_CACHE: dict = {}
+_FLAGS_MTIME: float = 0.0
+_FLAGS_LOCK = threading.Lock()
+
+
+def _runtime_flags_path() -> str:
+    explicit = os.environ.get("AI_CONFIG_PATH")
+    if explicit:
+        return explicit
+    # BASE_DIR is `<repo>/user_data`; the trading config lives at repo root.
+    repo_root = os.path.dirname(BASE_DIR)
+    return os.path.join(repo_root, "config_ai.json")
+
+
+def get_flag(key: str, default: bool = False) -> bool:
+    """Return the current boolean value of a runtime flag.
+
+    Missing file, missing key, or parse errors collapse to `default` —
+    the contract for callers is "don't rely on flag truth to protect
+    against accidentally broken config".
+    """
+    global _FLAGS_MTIME, _RUNTIME_FLAGS_CACHE
+    path = _runtime_flags_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return default
+
+    if mtime != _FLAGS_MTIME:
+        import json
+        with _FLAGS_LOCK:
+            if mtime != _FLAGS_MTIME:
+                try:
+                    with open(path) as fh:
+                        cfg = json.load(fh)
+                    _RUNTIME_FLAGS_CACHE = cfg.get("runtime_flags", {}) or {}
+                    _FLAGS_MTIME = mtime
+                except Exception:
+                    return default
+    return bool(_RUNTIME_FLAGS_CACHE.get(key, default))

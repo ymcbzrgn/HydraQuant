@@ -202,6 +202,54 @@ class PostTradeCourt:
         if not blame["root_cause"] or blame["root_cause"] == "none":
             blame["root_cause"] = "market_noise"
 
+        # Mega Sprint 2026-04-23 (B.5): replace the generic "market_noise"
+        # bucket with a concrete root cause when evidence supports one. The
+        # observability improvement lets the nightly autopsy job cluster
+        # losses by actual failure mode instead of collapsing them all
+        # under one label.
+        if blame["root_cause"] == "market_noise":
+            try:
+                atr_ratio = float(evidence.get("atr_ratio_at_entry", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                atr_ratio = 1.0
+            try:
+                funding = float(evidence.get("funding_rate", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                funding = 0.0
+            try:
+                vol_z = float(evidence.get("volume_z", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                vol_z = 0.0
+            duration_s = trade.get("outcome_duration", 0) or 0
+
+            if atr_ratio > 1.8:
+                blame["root_cause"] = "volatility_burst"
+            elif abs(funding) > 0.0005:
+                blame["root_cause"] = "funding_flip"
+            elif vol_z < -1.5:
+                blame["root_cause"] = "thin_liquidity"
+            elif duration_s and duration_s < 900 and pnl < -0.5:
+                blame["root_cause"] = "stop_hunt"
+
+        # Opposite-consensus detection: the aggregator chose LONG but the
+        # debate clearly leaned bearish → blame the aggregator, not the
+        # agents that dissented correctly.
+        try:
+            consensus = json.loads(trade.get("agent_votes_json", "{}") or "{}")
+        except Exception:
+            consensus = {}
+        if consensus:
+            bears = sum(1 for v in consensus.values()
+                        if isinstance(v, (int, float)) and v < 0)
+            bulls = len(consensus) - bears
+            signal_label = (trade.get("signal_type") or "").upper()
+            if signal_label in ("LONG", "BULLISH") and bears > bulls * 1.5:
+                blame["root_cause"] = "ignored_bear_consensus"
+                blame["blamed_modules"].append("agent_pool_aggregator")
+            elif signal_label in ("SHORT", "BEARISH") and bulls > bears * 1.5:
+                blame["root_cause"] = "ignored_bull_consensus"
+                blame["blamed_modules"].append("agent_pool_aggregator")
+
         return blame
 
     def _extract_lessons(self, trade: Dict, evidence: Dict, blame: Dict) -> List[str]:

@@ -171,7 +171,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "evidence.contradiction.db_only_cap":  {"organ": "contradiction", "default": 0.35, "min": 0.25, "max": 0.50},
 
     # ─── ORGAN: evidence_first (3 params) — rag_graph.py:1721 ───
-    "rag.evidence_first_threshold": {"organ": "evidence_first", "default": 0.40, "min": 0.25, "max": 0.65},
+    "rag.evidence_first_threshold": {"organ": "evidence_first", "default": 0.70, "min": 0.60, "max": 0.85},
     "rag.bg_madam_timeout":         {"organ": "evidence_first", "default": 120,  "min": 30,   "max": 300},
     "rag.fg_madam_timeout":         {"organ": "evidence_first", "default": 30,   "min": 10,   "max": 60},
 
@@ -189,6 +189,8 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "sizing.min_fraction_mult":     {"organ": "sizing", "default": 0.01, "min": 0.001, "max": 0.05},
     "sizing.max_fraction_mult":     {"organ": "sizing", "default": 1.5,  "min": 1.0,  "max": 2.0},
     "sizing.equal_risk_pct":        {"organ": "sizing", "default": 0.005, "min": 0.001, "max": 0.02},
+    "sizing.min_stake_lift_tolerance": {"organ": "sizing", "default": 6.0, "min": 3.0, "max": 10.0},
+    "sizing.kelly_floor_fraction":  {"organ": "sizing", "default": 0.015, "min": 0.005, "max": 0.030},
 
     # ─── ORGAN: risk (8 params) — risk_budget.py:32-169 ───
     "risk.daily_var_pct":           {"organ": "risk", "default": 0.50, "min": 0.10, "max": 0.80},
@@ -204,9 +206,9 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.stoploss_floor":        {"organ": "strategy_stoploss", "default": -0.15, "min": -0.30, "max": -0.05},
     "strategy.chandelier_high_conf":  {"organ": "strategy_stoploss", "default": 0.80, "min": 0.65, "max": 0.90},
     "strategy.chandelier_med_conf":   {"organ": "strategy_stoploss", "default": 0.60, "min": 0.45, "max": 0.75},
-    "strategy.chandelier_atr_high":   {"organ": "strategy_stoploss", "default": 3.0,  "min": 2.0,  "max": 4.0},
-    "strategy.chandelier_atr_med":    {"organ": "strategy_stoploss", "default": 2.5,  "min": 1.5,  "max": 3.5},
-    "strategy.chandelier_atr_low":    {"organ": "strategy_stoploss", "default": 2.0,  "min": 1.0,  "max": 3.0},
+    "strategy.chandelier_atr_high":   {"organ": "strategy_stoploss", "default": 1.5,  "min": 1.0,  "max": 3.0},
+    "strategy.chandelier_atr_med":    {"organ": "strategy_stoploss", "default": 1.35, "min": 0.9,  "max": 2.5},
+    "strategy.chandelier_atr_low":    {"organ": "strategy_stoploss", "default": 1.2,  "min": 0.8,  "max": 2.5},
     "strategy.breakeven_long":        {"organ": "strategy_stoploss", "default": 0.998, "min": 0.990, "max": 1.000},
     "strategy.breakeven_short":       {"organ": "strategy_stoploss", "default": 1.002, "min": 1.000, "max": 1.010},
 
@@ -297,6 +299,9 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "agent.perf_exp_normalizer": {"organ": "agent_pool", "default": 50,   "min": 20,   "max": 100},
     "agent.vote_weight_base":    {"organ": "agent_pool", "default": 0.8,  "min": 0.5,  "max": 1.0},
     "agent.vote_weight_scale":   {"organ": "agent_pool", "default": 0.4,  "min": 0.1,  "max": 0.7},
+    "agent.enable_r2b_adversarial": {"organ": "agent_pool", "default": 0.0, "min": 0.0, "max": 1.0},
+    "agent.enable_r3_reflection":   {"organ": "agent_pool", "default": 1.0, "min": 0.0, "max": 1.0},
+    "agent.neutral_correct_band_pct": {"organ": "agent_pool", "default": 0.5, "min": 0.1, "max": 2.0},
 
     # ─── ORGAN: sentiment (3 params) — sentiment_analyzer.py:87-135 ───
     "sentiment.llm_temperature": {"organ": "sentiment", "default": 0.1,  "min": 0.0,  "max": 0.5},
@@ -361,18 +366,18 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "opp.funding.ls_skewed":          {"organ": "opp_funding", "default": 10, "min": 3,  "max": 18},
 
     # ─── ORGAN: strategy_trailing (~6 params) — AIFreqtradeSizer.py:912-918 ───
-    "strategy.trailing_pnl_high":     {"organ": "strategy_trailing", "default": 0.15, "min": 0.08, "max": 0.25},
-    "strategy.trailing_pnl_med":      {"organ": "strategy_trailing", "default": 0.08, "min": 0.04, "max": 0.15},
-    "strategy.trailing_pnl_low":      {"organ": "strategy_trailing", "default": 0.04, "min": 0.02, "max": 0.10},
+    "strategy.trailing_pnl_high":     {"organ": "strategy_trailing", "default": 0.06, "min": 0.04, "max": 0.15},
+    "strategy.trailing_pnl_med":      {"organ": "strategy_trailing", "default": 0.03, "min": 0.02, "max": 0.08},
+    "strategy.trailing_pnl_low":      {"organ": "strategy_trailing", "default": 0.01, "min": 0.005, "max": 0.04},
     "strategy.trailing_atr_high":     {"organ": "strategy_trailing", "default": 1.0, "min": 0.3, "max": 1.8},
-    "strategy.trailing_atr_med":      {"organ": "strategy_trailing", "default": 1.5, "min": 0.8, "max": 2.5},
-    "strategy.trailing_atr_low":      {"organ": "strategy_trailing", "default": 2.0, "min": 1.0, "max": 3.0},
+    "strategy.trailing_atr_med":      {"organ": "strategy_trailing", "default": 1.3, "min": 0.8, "max": 2.2},
+    "strategy.trailing_atr_low":      {"organ": "strategy_trailing", "default": 1.6, "min": 1.0, "max": 2.8},
 
     # ─── ORGAN: strategy_dca (~8 params) — AIFreqtradeSizer.py:1620-1685 ───
     "strategy.dca_max_entries":       {"organ": "strategy_dca", "default": 4, "min": 1, "max": 8},
     "strategy.dca_wait_hours":        {"organ": "strategy_dca", "default": 0.5, "min": 0.1, "max": 4.0},
-    "strategy.dca_lock1_pnl":         {"organ": "strategy_dca", "default": 0.06, "min": 0.03, "max": 0.15},
-    "strategy.dca_lock2_pnl":         {"organ": "strategy_dca", "default": 0.12, "min": 0.06, "max": 0.25},
+    "strategy.dca_lock1_pnl":         {"organ": "strategy_dca", "default": 0.02, "min": 0.01, "max": 0.10},
+    "strategy.dca_lock2_pnl":         {"organ": "strategy_dca", "default": 0.06, "min": 0.03, "max": 0.15},
     "strategy.dca_lock_pct":          {"organ": "strategy_dca", "default": 0.25, "min": 0.10, "max": 0.50},
     "strategy.pyramid_conf":          {"organ": "strategy_dca", "default": 0.80, "min": 0.60, "max": 0.95},
     "strategy.pyramid_fraction":      {"organ": "strategy_dca", "default": 0.30, "min": 0.10, "max": 0.50},

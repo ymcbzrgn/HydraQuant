@@ -299,7 +299,8 @@ def init_db():
             signal_type TEXT, confidence REAL, position_size REAL, entry_price REAL,
             model_used TEXT, rag_context_ids TEXT, reasoning_summary TEXT,
             regime TEXT, trust_score_at_decision REAL, outcome_pnl REAL,
-            outcome_duration INTEGER)''')
+            outcome_duration INTEGER,
+            agent_votes_json TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS forgone_profit (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
@@ -385,7 +386,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
             signal TEXT NOT NULL, confidence REAL NOT NULL, sub_scores_json TEXT,
             contradictions_json TEXT, evidence_sources_json TEXT, regime TEXT,
-            max_confidence_cap REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            max_confidence_cap REAL,
+            atr_ratio_at_entry REAL,
+            volume_z REAL,
+            funding_rate REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS cross_pair_cache (
             id INTEGER PRIMARY KEY CHECK (id = 1), data_json TEXT, timestamp TEXT)''')
@@ -525,6 +530,26 @@ def init_db():
             UNIQUE(pair, regime))''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_per_pair
             ON bayesian_kelly_per_pair(pair, regime)''')
+
+        # EK Sprint 2026-04-23: shadow ledger. Same schema as the real one
+        # but only updated by the forgone-feedback scheduler job. Live
+        # sizing never reads this — it's a parallel analytics ledger.
+        c.execute('''CREATE TABLE IF NOT EXISTS bayesian_kelly_shadow_per_pair (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            regime TEXT NOT NULL DEFAULT '_global',
+            alpha REAL DEFAULT 2.0,
+            beta_param REAL DEFAULT 2.0,
+            avg_win REAL DEFAULT 0.0,
+            avg_loss REAL DEFAULT 0.0,
+            n_trades INTEGER DEFAULT 0,
+            annual_volatility REAL,
+            vol_of_vol REAL,
+            last_sharpe REAL,
+            updated_at TEXT,
+            UNIQUE(pair, regime))''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_shadow_per_pair
+            ON bayesian_kelly_shadow_per_pair(pair, regime)''')
 
         # Phase 27 Fix 2C (J4 Ajani): Argument quality scoring — each agent's
         # argument patterns (regex-bucketed) get win-rate + avg PnL tracked so
@@ -757,10 +782,26 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS model_slot_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL,
-            slot TEXT, success_count INTEGER DEFAULT 0,
-            fail_count INTEGER DEFAULT 0, total_latency_ms REAL DEFAULT 0,
-            penalty_until TEXT, updated_at TEXT, UNIQUE(model, slot))''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_id TEXT UNIQUE,
+            alpha REAL DEFAULT 1.0,
+            beta_param REAL DEFAULT 1.0,
+            total_calls INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            quality_pass_count INTEGER DEFAULT 0,
+            avg_latency_ms REAL DEFAULT 500.0,
+            p95_latency_ms REAL DEFAULT 5000.0,
+            last_updated TEXT)''')
+
+        # EK Sprint 2026-04-23 (EK.2.10): LinUCB per-slot posterior. A and b
+        # are stored as pickled numpy arrays so the router can restart and
+        # resume learning without losing its contextual-bandit memory.
+        c.execute('''CREATE TABLE IF NOT EXISTS linucb_state (
+            slot_id TEXT PRIMARY KEY,
+            a_blob BLOB,
+            b_blob BLOB,
+            n_updates INTEGER DEFAULT 0,
+            last_updated TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS backtest_processed (
             id INTEGER PRIMARY KEY AUTOINCREMENT, file_hash TEXT UNIQUE,
