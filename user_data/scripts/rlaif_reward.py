@@ -180,14 +180,15 @@ class RLAIFRewardGenerator:
             HumanMessage(content=_rubric_prompt(verdict, context)),
         ]
 
-        # EK Sprint 2026-04-23 (EK.2.8): feed LinUCB a rlaif_judge context so
-        # the bandit can learn which providers score rubrics more reliably.
+        # Tur-3: share the LinUCB feature builder with rag_graph /
+        # agent_pool so every caller hands the router identical shape.
         import datetime as _dt
+        _combined = "".join(
+            str(getattr(m, "content", "") or "") for m in messages
+        )
         rlaif_ctx = {
             "task": "rlaif_judge",
-            "prompt_len": sum(
-                len(str(getattr(m, "content", "") or "")) for m in messages
-            ),
+            "prompt_len": len(_combined),
             "needs_json": True,
             "regime_vol": 0.5,
             "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,

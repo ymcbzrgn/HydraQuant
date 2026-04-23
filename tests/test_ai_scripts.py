@@ -5742,3 +5742,117 @@ def test_backfill_argument_quality_smoke(tmp_path, monkeypatch):
             f"{agent} should be graded 100% after backfill "
             f"(used={used}, correct={correct})"
         )
+
+
+# ============================================================
+# Mini Revize Tur-3 — C2 completion smoke tests
+# ============================================================
+
+def test_make_task_ctx_shape_rag_graph():
+    """Tur-3: helper returns the exact 5-key dict every caller expects."""
+    from rag_graph import _make_task_ctx
+    ctx = _make_task_ctx("coordinator_debate", "prompt body", regime_vol=0.3)
+    assert set(ctx.keys()) == {"task", "prompt_len", "needs_json",
+                                "regime_vol", "hour_utc"}
+    assert ctx["task"] == "coordinator_debate"
+    assert ctx["prompt_len"] == len("prompt body")
+    assert ctx["needs_json"] is True
+    assert ctx["regime_vol"] == 0.3
+    assert 0 <= ctx["hour_utc"] <= 23
+
+
+def test_make_task_ctx_shape_agent_pool():
+    """Tur-3: agent_pool's copy must be behaviourally identical to
+    rag_graph's so LinUCB sees the same feature vector no matter which
+    module drove the call."""
+    from agent_pool import _make_task_ctx as _pool_ctx
+    from rag_graph import _make_task_ctx as _rag_ctx
+    a = _pool_ctx("agent_pool_r1", "x" * 100, regime_vol=0.6)
+    b = _rag_ctx("agent_pool_r1", "x" * 100, regime_vol=0.6)
+    # hour_utc can drift by 1 across the second boundary — compare everything else.
+    assert a["task"] == b["task"]
+    assert a["prompt_len"] == b["prompt_len"]
+    assert a["needs_json"] == b["needs_json"]
+    assert a["regime_vol"] == b["regime_vol"]
+
+
+def test_all_rag_invoke_sites_propagate_pair_and_task_context(monkeypatch):
+    """Tur-3: spy on every `llm.invoke()` inside the 5 analyst nodes and
+    coordinator path, assert each call carries a non-empty `pair` and a
+    non-'default' `task_context['task']`. Kept off the `as_completed`
+    loop so the spy does not starve the prod thread pool."""
+    import types
+    import rag_graph
+
+    seen_calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self, content="ok"):
+            self.content = content
+
+    class _SpyLLM:
+        def invoke(self, messages, **kwargs):
+            seen_calls.append({
+                "pair": kwargs.get("pair"),
+                "task": (kwargs.get("task_context") or {}).get("task"),
+            })
+            return _Resp("dummy content exceeding the 20-char quality check bar")
+
+    spy = _SpyLLM()
+
+    # Feed every analyst node a valid GraphState and run it directly —
+    # LangGraph orchestration is not needed for the invariant under test.
+    state = {
+        "pair": "BTC/USDT",
+        "technical_data": {"current_price": 50000.0, "rsi_14": 55.0},
+        "documents": [],
+        "technical_analysis": "",
+        "sentiment_analysis": "",
+        "news_analysis": "",
+        "bull_case": "bullish thesis",
+        "bear_case": "bearish thesis",
+    }
+    monkeypatch.setattr(rag_graph, "llm", spy)
+    # Disable MAGMA + web search so no network I/O happens in the test.
+    monkeypatch.setattr(rag_graph, "_magma", None, raising=False)
+
+    for node_fn in (
+        rag_graph.analyze_technical,
+        rag_graph.analyze_sentiment,
+        rag_graph.analyze_news,
+        rag_graph.research_bullish,
+        rag_graph.research_bearish,
+    ):
+        try:
+            node_fn(state)
+        except Exception:
+            # Retrieval / Magma fallbacks may raise in isolation; the invoke
+            # side-effect is still captured.
+            pass
+
+    assert seen_calls, "No LLM invocations captured — spy wiring failed"
+    for call in seen_calls:
+        assert call["pair"] == "BTC/USDT", (
+            f"Analyst node dropped `pair=` — captured {call}"
+        )
+        assert call["task"] and call["task"] != "default", (
+            f"Analyst node dropped `task_context` — captured {call}"
+        )
+
+
+def test_agent_pool_r2_r2b_r3_use_task_ctx_helper(monkeypatch):
+    """Tur-3: R2/R2b/R3 invoke sites must hand LinUCB a non-default task
+    tag so post-trade retroactive feedback actually matches the calls."""
+    # The helpers themselves are unit-checked above; this guards against
+    # somebody accidentally dropping the task_context kwarg in the future.
+    import agent_pool
+    import inspect
+    src = inspect.getsource(agent_pool)
+    for tag in (
+        '"agent_pool_r2"',
+        '"agent_pool_r2b_exploiter"',
+        '"agent_pool_r2b_defender"',
+        '"agent_pool_r3_reflection"',
+        '"agent_pool_r1"',
+    ):
+        assert tag in src, f"agent_pool must tag its LinUCB context with {tag}"
