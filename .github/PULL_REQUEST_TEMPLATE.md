@@ -1,22 +1,28 @@
-<!-- Thank you for sending your pull request. But first, have you included
-unit tests, and is your code PEP8 conformant? [More details](https://github.com/freqtrade/freqtrade/blob/develop/CONTRIBUTING.md)
-
-Did you use AI to create your changes?
-If so, please state it clearly in the PR description (failing to do so may result in your PR being closed).
-
-Also, please do a self review of the changes made before submitting the PR to make sure only relevant changes are included.
--->
 ## Summary
 
-<!-- Explain in one sentence the goal of this PR -->
+<!-- One-line description of what this PR does and why. -->
 
-Solve the issue: #___
+## Changes
 
-## Quick changelog
+<!-- Bullet list of the concrete changes in this PR. -->
 
-- <change log 1>
-- <change log 1>
+-
+-
 
-## What's new?
+## Related issue
 
-<!-- Explain in details what this PR solve or improve. You can include visuals. -->
+<!-- Closes #XXX / Refs #XXX -->
+
+## Tests
+
+- [ ] Existing HydraQuant tests pass: `PYTHONPATH=user_data/scripts python -m pytest tests/test_ai_scripts.py`
+- [ ] New behavior is covered by a unit test
+- [ ] Contract tests pass (if adding a new RAG invocation site, scheduler job, or strategy callback)
+
+## Checklist
+
+- [ ] Code follows project conventions (`ruff check`, `ruff format`, `isort`)
+- [ ] No hardcoded paths — uses `ai_config` for database paths
+- [ ] No stubs, no `TODO` without a tracking issue
+- [ ] New dependencies added to the appropriate `requirements/*.txt`
+- [ ] Documentation updated (`docs/` or README) if user-facing

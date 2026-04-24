@@ -184,7 +184,7 @@ class RiskBudgetManager:
     def update_portfolio_value(self, real_balance: float):
         """
         Sync portfolio_value with real exchange balance.
-        Called from AIFreqtradeSizer on every trade to keep budget proportional to actual account.
+        Called from HydraSizer on every trade to keep budget proportional to actual account.
         """
         if real_balance <= 0:
             return

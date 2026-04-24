@@ -267,7 +267,7 @@ class ForgonePnLEngine:
         """
         Record a closed trade into the $100 hypothetical portfolio.
         Compounds the PnL onto the running balance.
-        Called from AIFreqtradeSizer.confirm_trade_exit().
+        Called from HydraSizer.confirm_trade_exit().
         """
         try:
             with self._get_db_connection() as conn:

@@ -14,7 +14,7 @@ Integration:
   - Reads from: ai_decisions (trade outcomes with timestamps)
   - Reads from: DuckDB hourly_performance() analytics
   - Writes to: pheromone_field ("cerebellum_timing")
-  - Consumed by: autonomous_lifecycle (circadian layer), AIFreqtradeSizer
+  - Consumed by: autonomous_lifecycle (circadian layer), HydraSizer
 """
 
 import os

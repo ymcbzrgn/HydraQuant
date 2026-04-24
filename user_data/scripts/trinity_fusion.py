@@ -17,7 +17,7 @@ Integration:
   - Reads from: rag_graph.py (RAG context), triple_perception.py (ML predictions),
                 sac_online.py (RL actions), evidence_engine.py (evidence scores)
   - Writes rl_relevance feedback to LanceDB (RAG learns from RL outcomes)
-  - Used by: AIFreqtradeSizer for final trade decisions
+  - Used by: HydraSizer for final trade decisions
 
 Reference: Neurosymbolic AI — neural (ML) + symbolic (LLM reasoning)
 """

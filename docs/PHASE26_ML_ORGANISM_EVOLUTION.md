@@ -22,7 +22,7 @@
 | 3A | ttm_perception.py | 298 satir | DONE | granite-timeseries-ttm-r2, 64-dim embedding |
 | 3B | chronos_perception.py | 225 satir | DONE | chronos-bolt-small, P10/P50/P90 |
 | 3C | triple_perception.py | 414 satir | DONE | TTM+Chronos+CatBoost fusion hub |
-| 3D | Triple Perception entegrasyon | — | DONE (Phase 28) | AIFreqtradeSizer (L811-839) + evidence_engine pheromone okuma + rag_graph flow |
+| 3D | Triple Perception entegrasyon | — | DONE (Phase 28) | HydraSizer (L811-839) + evidence_engine pheromone okuma + rag_graph flow |
 | 4A | ood_detector.py | 262 satir | DONE | MarketOODDetector, Mahalanobis |
 | 4B | conformal_calibrator.py | 252 satir | DONE | CQR+ACI, target_coverage=0.95 |
 | 4C | deep_ensemble.py | 284 satir | DONE | 5x SmallMLP(64→32→1) |

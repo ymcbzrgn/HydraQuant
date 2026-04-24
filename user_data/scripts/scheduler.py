@@ -1409,7 +1409,7 @@ class PipelineScheduler:
             # 5. Run backtest
             bt_cmd = [
                 freqtrade_bin, "backtesting",
-                "--strategy", "AIFreqtradeSizer",
+                "--strategy", "HydraSizer",
                 "--config", config_path,
                 "--config", override_path,
                 "--timerange", timerange,

@@ -413,7 +413,7 @@ class HRLMetaPolicy:
     def get_organ_weight(self, organ_name: str) -> float:
         """Read the meta-policy's current weight for a named organ.
 
-        Used by AIFreqtradeSizer.custom_stake_amount via the CAAT multiplier
+        Used by HydraSizer.custom_stake_amount via the CAAT multiplier
         so sizing can respect "is the IQL motor or SAC motor in charge right
         now?" decisions. Returns 1.0 (neutral) when the organ is unknown or
         the policy hasn't trained yet.

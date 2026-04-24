@@ -3,15 +3,14 @@ requires = ["setuptools >= 64.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "freqtrade"
-dynamic = ["version"]
+name = "hydraquant"
+version = "0.1.0-alpha"
 
 authors = [
-  {name = "Freqtrade Team"},
-  {name = "Freqtrade Team", email = "freqtrade@protonmail.com"},
+  {name = "Yamac Bezirgan"},
 ]
 
-description = "Freqtrade - Crypto Trading Bot"
+description = "HydraQuant — a cognitive trading organism for cryptocurrency markets"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "GPLv3"}
@@ -132,13 +131,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/freqtrade/freqtrade"
-Documentation = "https://freqtrade.io"
-"Bug Tracker" = "https://github.com/freqtrade/freqtrade/issues"
+Homepage = "https://github.com/ymcbzrgn/HydraQuant"
+Documentation = "https://github.com/ymcbzrgn/HydraQuant/tree/main/docs"
+"Bug Tracker" = "https://github.com/ymcbzrgn/HydraQuant/issues"
+Source = "https://github.com/ymcbzrgn/HydraQuant"
 
 
 [project.scripts]
-freqtrade = "freqtrade.main:main"
+hydraquant = "freqtrade.main:main"
+freqtrade = "freqtrade.main:main"  # alias — kept for CLI compatibility with the underlying execution framework
 
 [tool.setuptools]
 include-package-data = true
@@ -149,9 +150,6 @@ where = ["."]
 include = ["freqtrade*"]
 exclude = ["tests", "tests.*", "user_data", "user_data*"]
 namespaces = true
-
-[tool.setuptools.dynamic]
-version = {attr = "freqtrade.__version__"}
 
 [tool.black]
 line-length = 100

@@ -22,7 +22,7 @@ class BacktestComparison:
     def __init__(self, timerange: str, pairs: List[str]):
         self.timerange = timerange
         self.pairs = pairs
-        self.ai_strategy = "AIFreqtradeSizer"
+        self.ai_strategy = "HydraSizer"
         self.baseline_strategy = "BaselineTechnical"
         self.pairs_str = " ".join(self.pairs)
 

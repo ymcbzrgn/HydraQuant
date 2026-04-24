@@ -197,7 +197,8 @@ class SemanticCache:
                    (query_text, query_embedding, response, pair, ttl_seconds)
                    VALUES (?, ?, ?, ?, ?)""",
                 (query, query_emb.tobytes(), response, pair, ttl),
-                max_retries=5
+                max_retries=5,
+                db_path=self.db_path,
             )
             logger.info(f"Stored response in semantic cache for query: '{query[:30]}...' (TTL: {ttl}s)")
         except Exception as e:
@@ -207,9 +208,18 @@ class SemanticCache:
         """Invalidate cache entries for a specific pair, or all entries."""
         try:
             if pair:
-                execute_with_retry("DELETE FROM semantic_cache WHERE pair = ?", (pair,), max_retries=5)
+                execute_with_retry(
+                    "DELETE FROM semantic_cache WHERE pair = ?",
+                    (pair,),
+                    max_retries=5,
+                    db_path=self.db_path,
+                )
             else:
-                execute_with_retry("DELETE FROM semantic_cache", max_retries=5)
+                execute_with_retry(
+                    "DELETE FROM semantic_cache",
+                    max_retries=5,
+                    db_path=self.db_path,
+                )
             logger.info(f"Invalidated semantic cache (pair: {pair})")
         except Exception as e:
             logger.error(f"Error invalidating semantic cache: {e}")
@@ -220,7 +230,8 @@ class SemanticCache:
             cursor = execute_with_retry(
                 """DELETE FROM semantic_cache
                    WHERE (strftime('%s', 'now') - strftime('%s', created_at)) > ttl_seconds""",
-                max_retries=5
+                max_retries=5,
+                db_path=self.db_path,
             )
             if cursor and cursor.rowcount > 0:
                 logger.debug(f"Cleaned up {cursor.rowcount} expired semantic cache entries.")

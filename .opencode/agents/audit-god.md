@@ -134,7 +134,7 @@ If you find NO issues, say "No issues found" with confidence. Do NOT manufacture
 # PROJECT CONTEXT
 
 This is HydraQuant, a custom AI trading layer built around upstream `freqtrade`; most real logic lives outside the packaged `freqtrade` module.
-- Verify the main execution path through `freqtrade-strategies/user_data/strategies/AIFreqtradeSizer.py`, which fetches `/signal/{pair}` from `user_data/scripts/rag_graph.py` and combines it with `risk_budget.py`, `position_sizer.py`, `autonomy_manager.py`, `telegram_notifier.py`, and `forgone_pnl_engine.py`.
+- Verify the main execution path through `user_data/strategies/HydraSizer.py`, which fetches `/signal/{pair}` from `user_data/scripts/rag_graph.py` and combines it with `risk_budget.py`, `position_sizer.py`, `autonomy_manager.py`, `telegram_notifier.py`, and `forgone_pnl_engine.py`.
 - Treat `user_data/scripts/evidence_engine.py` as the primary signal engine and `user_data/scripts/rag_graph.py` as the orchestration/escalation layer, not the other way around.
 - `user_data/scripts/` currently contains 64 Python modules spanning retrieval, agents, market data, risk, monitoring, APIs, and services.
 - Runtime sidecars matter: `user_data/scripts/api_ai.py` exposes 26 dashboard endpoints, `user_data/scripts/rag_graph.py` serves `/signal` endpoints, `user_data/scripts/model_server.py` hosts local ColBERT/BGE/FlashRank models, and `user_data/scripts/scheduler.py` runs recurring pipeline jobs.
