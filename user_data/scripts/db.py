@@ -64,6 +64,13 @@ class _ConnectionPool:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-2000")
         conn.execute("PRAGMA mmap_size=0")
+        # Task 13: automatic passive WAL checkpoint every 1000 pages
+        # (~4 MB). Prior to this the WAL file had no upper bound between
+        # the 50-release TRUNCATE triggers — a quiet process could carry
+        # a multi-MB WAL indefinitely. PASSIVE lets other readers/writers
+        # continue; TRUNCATE happens later via the release-count path +
+        # the new size-based scheduler job.
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
         self._total_created += 1
         # Wrap so conn.close() returns to pool instead of destroying
         return _PooledConnection(conn, self)
@@ -83,6 +90,18 @@ class _ConnectionPool:
             self._active_count -= 1
             self._release_count += 1
             should_truncate = self._release_count % 50 == 0
+            # Task 12: rollback BEFORE returning to pool. Borrowers that
+            # crashed mid-transaction (neural_organism persist paths used
+            # `conn = get_db_connection(...); ...; conn.close()` without
+            # a finally/rollback) left an open txn sitting on the conn.
+            # The next borrower's BEGIN was then effectively part of the
+            # dead borrower's uncommitted write — the classic "pool
+            # transaction leak".
+            try:
+                raw = conn._conn if isinstance(conn, _PooledConnection) else conn
+                raw.rollback()
+            except Exception:
+                pass
             # Checkpoint BEFORE returning to pool so no sibling thread grabs
             # this connection mid-pragma. WAL grew to 166 MB uncheckpointed in
             # production before this; TRUNCATE bounds it without hot-path lock
@@ -127,6 +146,34 @@ class _ConnectionPool:
             }
 
 
+class _RetryingCursor:
+    """Proxy around `sqlite3.Cursor` that runs `execute` / `executemany`
+    through the same `_retry_on_locked` wrapper as the parent connection.
+    Prior to this, ~100 call sites in the codebase opened a raw cursor
+    (`c = conn.cursor(); c.execute(...)`) and silently bypassed the
+    retry logic — a single `database is locked` race on the raw cursor
+    crashed the caller even though the pooled conn would have retried."""
+
+    def __init__(self, cursor, retry_runner):
+        self._cursor = cursor
+        self._retry = retry_runner
+
+    def execute(self, *args, **kwargs):
+        return self._retry(self._cursor.execute, *args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        return self._retry(self._cursor.executemany, *args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        return self._retry(self._cursor.executescript, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+
 class _PooledConnection:
     """Wrapper: conn.close() returns connection to pool instead of destroying it.
     Includes automatic retry on 'database is locked' for commit/execute operations.
@@ -160,7 +207,13 @@ class _PooledConnection:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
-            self._conn.rollback()
+            # Best-effort rollback; a failed commit from the caller's
+            # finally-block inside __exit__ must not mask the original
+            # exception.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
         else:
             self._retry_on_locked(self._conn.commit)
 
@@ -175,7 +228,11 @@ class _PooledConnection:
         return self._retry_on_locked(self._conn.executemany, *args, **kwargs)
 
     def cursor(self):
-        return self._conn.cursor()
+        # Task 12: hand out a retrying cursor so raw `cursor.execute(...)`
+        # sites inherit the lock-retry contract automatically. The
+        # wrapper transparently forwards attribute access so the
+        # existing .fetchone()/.fetchall()/.lastrowid usage is unchanged.
+        return _RetryingCursor(self._conn.cursor(), self._retry_on_locked)
 
     def commit(self):
         return self._retry_on_locked(self._conn.commit)
@@ -244,13 +301,66 @@ def get_connection():
         _pool.release(conn)
 
 
-def execute_with_retry(sql: str, params=None, max_retries: int = 3, commit: bool = True, db_path: str = None):
+def _looks_like_write(sql: str) -> bool:
+    """Heuristic: does this statement mutate? Used to decide whether to
+    route through the SQLite write broker when it's available.
+    """
+    stripped = (sql or "").lstrip().upper()
+    return stripped.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
+
+
+def execute_with_retry(sql: str, params=None, max_retries: int = 3, commit: bool = True,
+                       db_path: str = None, bypass_broker: bool = False):
     """Execute SQL with retry on 'database is locked'.
 
     If db_path is provided, uses get_db_connection(db_path) (respects the caller's
     DB path — needed for tests that use tmp_path, and for any module that persists
     its own data to a scoped DB). Otherwise uses the default pooled connection.
+
+    Task 12: when the SQLite write broker is alive AND the caller targets
+    the canonical AI_DB_PATH AND the statement mutates, route through the
+    broker so writes from multiple processes serialise through a single
+    WAL-friendly writer. Reads and test-path (db_path != DB_PATH) writes
+    bypass the broker and use the local pool. Callers that MUST use the
+    pool (e.g. migrations inside init_db) can pass `bypass_broker=True`.
     """
+    # Fast-path: broker routing for writes to the canonical DB. Task 27:
+    # the earlier predicate required `db_path is None`, so every caller
+    # that explicitly passed AI_DB_PATH (llm_cost_tracker, semantic_cache,
+    # slippage_forecaster — the hot-path writers) silently bypassed the
+    # broker. Treating the explicit path as equivalent to the default
+    # makes routing reach the writers Task 11 was built to protect.
+    _canonical = (db_path is None) or (db_path == DB_PATH)
+    if (not bypass_broker) and _canonical and _looks_like_write(sql):
+        try:
+            from sqlite_broker import get_write_client
+            client = get_write_client()
+            if client.is_alive(cache_seconds=30.0):
+                resp = client.write(sql, params=list(params or []),
+                                     want_lastrowid=True)
+                if resp.get("ok"):
+                    # Callers treat the returned object like a cursor and
+                    # usually only read `lastrowid` / `rowcount`. Give the
+                    # shim no-op fetch methods too so any future caller
+                    # chaining `.fetchone()` / `.fetchall()` degrades
+                    # quietly instead of raising AttributeError.
+                    class _BrokerCursor:
+                        def __init__(self, lastrowid, rowcount):
+                            self.lastrowid = lastrowid
+                            self.rowcount = rowcount
+                            self.description = None
+                        def fetchone(self): return None
+                        def fetchall(self): return []
+                        def fetchmany(self, size=1): return []
+                        def close(self): pass
+                    return _BrokerCursor(
+                        resp.get("lastrowid"),
+                        int(resp.get("rowcount", -1)),
+                    )
+        except Exception:
+            # Any broker hiccup falls back to the in-process pool path.
+            pass
+
     import contextlib
     last_error = None
     for attempt in range(max_retries):
@@ -268,6 +378,30 @@ def execute_with_retry(sql: str, params=None, max_retries: int = 3, commit: bool
                 time.sleep(wait)
                 last_error = e
             else:
+                # Task 27: final fallback — spool the write for async
+                # replay when the broker returns. Only for writes to the
+                # canonical DB and only when the error was a stuck lock
+                # (not a constraint violation). Non-write SELECTs fall
+                # through and re-raise as before.
+                if _canonical and _looks_like_write(sql) and "database is locked" in str(e):
+                    try:
+                        from sqlite_broker import spool_write
+                        if spool_write(sql, params=list(params or []), priority=5):
+                            logger.warning(
+                                "[DB] pool exhausted + broker down — write spooled "
+                                "for async replay"
+                            )
+                            class _SpoolCursor:
+                                lastrowid = None
+                                rowcount = -1
+                                description = None
+                                def fetchone(self): return None
+                                def fetchall(self): return []
+                                def fetchmany(self, size=1): return []
+                                def close(self): pass
+                            return _SpoolCursor()
+                    except Exception:
+                        pass
                 raise
     raise last_error
 
@@ -306,8 +440,9 @@ def init_db():
             signal_type TEXT, confidence REAL, position_size REAL, entry_price REAL,
             model_used TEXT, rag_context_ids TEXT, reasoning_summary TEXT,
             regime TEXT, trust_score_at_decision REAL, outcome_pnl REAL,
-            outcome_duration INTEGER,
-            agent_votes_json TEXT)''')
+            outcome_duration REAL,
+            agent_votes_json TEXT,
+            _status_cache TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS forgone_profit (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
@@ -755,22 +890,77 @@ def init_db():
             text_hash TEXT PRIMARY KEY, binary_vec BLOB,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        # Canonical risk_budget schema (matches risk_budget.py RiskBudgetManager).
+        # Per-day ledger; UNIQUE(date) prevents duplicate-row race between
+        # scheduler._daily_reset and RiskBudgetManager._load_state firing in
+        # the same second (Apr 11 2026 produced two rows for a single date).
         c.execute('''CREATE TABLE IF NOT EXISTS risk_budget (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            daily_var_limit REAL DEFAULT 0.05, current_usage REAL DEFAULT 0.0,
-            max_portfolio_heat REAL DEFAULT 0.10, current_heat REAL DEFAULT 0.0,
-            updated_at TEXT)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            initial_budget REAL NOT NULL,
+            consumed REAL DEFAULT 0.0,
+            multiplier REAL DEFAULT 1.0,
+            updated_at TEXT,
+            UNIQUE(date))''')
+        # Self-healing migration for any install where the old single-row
+        # schema (daily_var_limit/current_usage/max_portfolio_heat/current_heat)
+        # was created first — add the canonical columns in-place. Existing
+        # pre-UNIQUE ledger rows are deduped before the UNIQUE INDEX is created.
+        for _col, _typ in [
+            ("date", "TEXT"),
+            ("initial_budget", "REAL"),
+            ("consumed", "REAL DEFAULT 0.0"),
+            ("multiplier", "REAL DEFAULT 1.0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE risk_budget ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
+        try:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_risk_budget_date ON risk_budget(date)")
+        except sqlite3.IntegrityError:
+            c.execute("DELETE FROM risk_budget WHERE id NOT IN (SELECT MAX(id) FROM risk_budget WHERE date IS NOT NULL GROUP BY date)")
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_risk_budget_date ON risk_budget(date)")
+            except sqlite3.IntegrityError:
+                logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
+        # api_ai.py reads level/promoted_at/sharpe_estimate/max_drawdown_pct/days_at_level;
+        # the old (current_level/trust_alpha/trust_beta/successful_trades) schema was
+        # never materialised and had no producers — kept here only as an ADD COLUMN
+        # safety net for installs where init_db ran before AutonomyManager.
         c.execute('''CREATE TABLE IF NOT EXISTS autonomy_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            current_level INTEGER DEFAULT 0, trust_alpha REAL DEFAULT 1.0,
-            trust_beta REAL DEFAULT 1.0, total_trades INTEGER DEFAULT 0,
-            successful_trades INTEGER DEFAULT 0, updated_at TEXT)''')
+            level INTEGER DEFAULT 0,
+            promoted_at TEXT,
+            total_trades INTEGER DEFAULT 0,
+            sharpe_estimate REAL DEFAULT 0.0,
+            max_drawdown_pct REAL DEFAULT 0.0,
+            days_at_level INTEGER DEFAULT 0,
+            updated_at TEXT)''')
+        for _col, _typ in [
+            ("level", "INTEGER DEFAULT 0"),
+            ("promoted_at", "TEXT"),
+            ("sharpe_estimate", "REAL DEFAULT 0.0"),
+            ("max_drawdown_pct", "REAL DEFAULT 0.0"),
+            ("days_at_level", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE autonomy_state ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
+        # If a legacy install has data in the retired `current_level` column,
+        # copy it into `level` so the autonomy ladder survives a rename.
+        try:
+            c.execute("UPDATE autonomy_state SET level = current_level WHERE (level IS NULL OR level = 0) AND current_level IS NOT NULL")
+        except sqlite3.OperationalError:
+            pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS pattern_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, timeframe TEXT,
@@ -929,7 +1119,19 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, cortisol REAL, dopamine REAL,
             serotonin REAL, adrenaline REAL, market_stress REAL,
             organism_health REAL, trigger_event TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            sizing_mult REAL, danger_level REAL)''')
+        # Retro-compat: older installs missed these columns. The lifecycle
+        # tick needs its sizing_mult / danger_level in dedicated slots so
+        # organism_health stops being overloaded with multiplier values.
+        for _col, _typ in [
+            ("sizing_mult", "REAL"),
+            ("danger_level", "REAL"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE hormone_history ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS self_model_profile (
             id INTEGER PRIMARY KEY AUTOINCREMENT, profile_type TEXT NOT NULL,

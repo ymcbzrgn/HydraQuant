@@ -269,7 +269,11 @@ class OrderFlowAnalyzer:
             try:
                 from lob_encoder import get_lob_encoder
                 lob = get_lob_encoder()
-                lob_feat = lob.encode(orderbook, pair=pair)
+                # Task 14: encode_and_publish deposits 'lob_state' to the
+                # pheromone field so regime_classifier can read spread_regime
+                # and HydraSizer's ILLIQUID detection works. The old
+                # `encode()` returned the features but never broadcasted.
+                lob_feat = lob.encode_and_publish(orderbook, pair=pair)
                 result["lob_imbalance"] = lob_feat.get("imbalance_score", 0.0)
                 result["lob_microprice_dev_bps"] = lob_feat.get("microprice_deviation_bps", 0.0)
                 result["lob_spread_regime"] = lob_feat.get("spread_regime", "unknown")

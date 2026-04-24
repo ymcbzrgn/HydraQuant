@@ -115,7 +115,8 @@ rag_fusion = RAGFusion(router=llm)
 decision_logger = AIDecisionLogger(llm_router=llm)
 
 # Phase 9: Semantic Cache + Self-RAG (were leaking per get_trading_signal call)
-_semantic_cache = SemanticCache()
+from semantic_cache import get_semantic_cache as _get_semantic_cache  # noqa: E402
+_semantic_cache = _get_semantic_cache()
 _self_rag = SelfRAG(router=llm)
 
 # Phase 15: MAGMA + KG — optional, graceful degradation if init fails
@@ -2141,12 +2142,14 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
                 acq = _signal_semaphore.acquire(timeout=120)  # Wait up to 2min for background enrichment
                 if acq:
                     try:
-                        # CRITICAL: Invalidate cache INSIDE semaphore so MADAM actually runs.
-                        # Without this, _get_trading_signal_inner reads back the EE result
-                        # we just cached (line 1727) and returns without running LLM pipeline.
-                        # This was causing 85% of signals to skip CoT-RAG, debate, ColBERT.
-                        _semantic_cache.invalidate(pair=p)
-                        result = _get_trading_signal_inner(p, td)
+                        # Task 10: run MADAM with bypass_cache=True instead
+                        # of invalidating. The EE entry we just stored keeps
+                        # its TTL and serves subsequent synchronous callers
+                        # while MADAM re-computes in parallel; when MADAM
+                        # finishes it overwrites the entry with the deeper
+                        # (LLM-enriched) result via put(). Net effect: cache
+                        # never gets wiped, hit rate finally rises above 0.
+                        result = _get_trading_signal_inner(p, td, bypass_cache=True)
                         if result:
                             logger.info(f"[Phase20:BackgroundMADAM] {p} LLM-enriched: "
                                        f"{result['signal']} conf={result['confidence']:.2f} "
@@ -2189,15 +2192,22 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         _signal_semaphore.release()
 
 
-def _get_trading_signal_inner(pair: str, technical_data: dict = None) -> dict:
-    """Inner implementation of trading signal generation (protected by semaphore)."""
+def _get_trading_signal_inner(pair: str, technical_data: dict = None,
+                                bypass_cache: bool = False) -> dict:
+    """Inner implementation of trading signal generation (protected by semaphore).
+
+    Task 10: when `bypass_cache=True` (background MADAM enrichment path)
+    the function runs the full LLM pipeline without consulting the cache
+    AND without invalidating it. Prior design wiped the cache to force a
+    re-run, destroying the entry's TTL and flat-lining hit rate.
+    """
     logger.info(f"Initiating Multi-Agent Analyst Team for {pair}{'  [with LIVE indicators]' if technical_data else ''}...")
 
     # Phase 9: Semantic Cache (module-level singleton)
     query_str = f"trading signal analysis for {pair}"
 
-    # a. Check Cache
-    cached_response_str = _semantic_cache.get(query=query_str, pair=pair)
+    # a. Check Cache (unless the caller explicitly bypasses)
+    cached_response_str = None if bypass_cache else _semantic_cache.get(query=query_str, pair=pair)
     if cached_response_str:
         try:
             logger.info("[Semantic Cache] Reusing cached decision for pair.")

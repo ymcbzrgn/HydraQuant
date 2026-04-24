@@ -278,100 +278,6 @@ class MultiModalEncoder:
         self._training_mode = False
         return total_loss / max(len(batches), 1)
 
-
-def weekly_training_cycle(min_samples: int = 50, n_epochs: int = 3) -> Dict:
-    """Phase 27 Item 3: scheduled MultiModal head training.
-
-    Pulls (ttm_embedding, outcome_pnl) pairs and uses outcome_pnl-conditioned
-    targets — the encoder learns to map fused multimodal state to a target
-    vector whose first dim encodes outcome direction. This is the missing
-    "actually train the projections" loop the audit flagged.
-    """
-    import os
-    try:
-        from ai_config import AI_DB_PATH
-        from db import get_db_connection
-    except Exception as e:
-        return {"status": "skipped", "reason": f"imports: {e}"}
-
-    try:
-        conn = get_db_connection(AI_DB_PATH)
-        rows = conn.execute("""
-            SELECT wms.ttm_embedding, dec.outcome_pnl, dec.confidence,
-                   dec.regime
-            FROM world_model_states wms
-            JOIN ai_decisions dec ON dec.pair = wms.pair
-            WHERE wms.ttm_embedding IS NOT NULL
-              AND dec.outcome_pnl IS NOT NULL
-              AND ABS(JULIANDAY(dec.timestamp) - JULIANDAY(wms.timestamp)) < 0.005
-            LIMIT 5000
-        """).fetchall()
-        conn.close()
-    except Exception as e:
-        return {"status": "skipped", "reason": f"db: {e}"}
-
-    if len(rows) < min_samples:
-        return {"status": "skipped", "reason": f"insufficient samples ({len(rows)})",
-                "min_samples": min_samples}
-
-    encoder = get_multimodal_encoder()
-    batches: List[Dict] = []
-    targets: List[np.ndarray] = []
-    for r in rows:
-        try:
-            ttm = np.frombuffer(r["ttm_embedding"], dtype=np.float32)[:TTM_DIM]
-            if ttm.size < TTM_DIM:
-                continue
-            sent = np.zeros(SENTIMENT_DIM, dtype=np.float32)
-            sent[0] = float(r["confidence"] or 0.5)
-            batches.append({
-                "time_embedding": ttm,
-                "sentiment_features": sent,
-            })
-            # Target: a 64-dim vector whose first slot mirrors outcome_pnl
-            # sign and magnitude — the rest is zero so the encoder learns to
-            # surface outcome-discriminative signal in dim 0.
-            tgt = np.zeros(FUSION_DIM, dtype=np.float32)
-            tgt[0] = float(np.tanh(r["outcome_pnl"] / 5.0))
-            targets.append(tgt)
-        except Exception:
-            continue
-
-    if len(batches) < min_samples:
-        return {"status": "skipped", "reason": f"after parse ({len(batches)})"}
-
-    epoch_losses = []
-    for epoch in range(n_epochs):
-        loss = encoder.train_step(batches, targets, lr=1e-3)
-        epoch_losses.append(round(float(loss), 6))
-
-    sidecar = os.path.join(
-        os.path.dirname(__file__), "..", "models", "multimodal_encoder.pt"
-    )
-    try:
-        import torch
-        os.makedirs(os.path.dirname(sidecar), exist_ok=True)
-        state: Dict = {}
-        for i, mod in enumerate(encoder._modules_list):
-            state[f"mod_{i}"] = mod.state_dict()
-        for i, tok in enumerate(encoder._learnable_tokens):
-            state[f"tok_{i}"] = tok.detach().clone()
-        torch.save(state, sidecar)
-    except Exception as e:
-        logger.warning(f"[MultiModal:Train] save failed: {e}")
-
-    logger.info(
-        f"[MultiModal:Train] cycle done: n_samples={len(batches)}, "
-        f"final_loss={epoch_losses[-1]}"
-    )
-    return {
-        "status": "trained",
-        "n_samples": len(batches),
-        "epochs": n_epochs,
-        "epoch_losses": epoch_losses,
-        "checkpoint": sidecar,
-    }
-
     def fuse_from_live_sources(self, pair: str = "") -> np.ndarray:
         """Fuse from live data sources (pheromone field + modules).
 
@@ -488,7 +394,12 @@ def weekly_training_cycle(min_samples: int = 50, n_epochs: int = 3) -> Dict:
             if ob:
                 from lob_encoder import get_lob_encoder
                 lob = get_lob_encoder()
-                lob_result = lob.encode(ob, pair=pair)
+                # Task 28.4: encode_and_publish instead of plain encode so
+                # the pheromone field also gets a fresh `lob_state` deposit
+                # (regime_classifier's ILLIQUID rule + api_ai dashboard
+                # both read this). The old `lob.encode()` call produced
+                # the feature vector but broadcasted nothing.
+                lob_result = lob.encode_and_publish(ob, pair=pair)
                 raw_lob = lob_result.get("lob_embedding")
                 if raw_lob is not None:
                     arr = np.asarray(raw_lob, dtype=np.float32)
@@ -525,6 +436,100 @@ def weekly_training_cycle(min_samples: int = 50, n_epochs: int = 3) -> Dict:
             "n_modalities": N_MODALITIES,
             "n_heads": N_HEADS,
         }
+
+
+def weekly_training_cycle(min_samples: int = 50, n_epochs: int = 3) -> Dict:
+    """Phase 27 Item 3: scheduled MultiModal head training.
+
+    Pulls (ttm_embedding, outcome_pnl) pairs and uses outcome_pnl-conditioned
+    targets — the encoder learns to map fused multimodal state to a target
+    vector whose first dim encodes outcome direction. This is the missing
+    "actually train the projections" loop the audit flagged.
+    """
+    import os
+    try:
+        from ai_config import AI_DB_PATH
+        from db import get_db_connection
+    except Exception as e:
+        return {"status": "skipped", "reason": f"imports: {e}"}
+
+    try:
+        conn = get_db_connection(AI_DB_PATH)
+        rows = conn.execute("""
+            SELECT wms.ttm_embedding, dec.outcome_pnl, dec.confidence,
+                   dec.regime
+            FROM world_model_states wms
+            JOIN ai_decisions dec ON dec.pair = wms.pair
+            WHERE wms.ttm_embedding IS NOT NULL
+              AND dec.outcome_pnl IS NOT NULL
+              AND ABS(JULIANDAY(dec.timestamp) - JULIANDAY(wms.timestamp)) < 0.005
+            LIMIT 5000
+        """).fetchall()
+        conn.close()
+    except Exception as e:
+        return {"status": "skipped", "reason": f"db: {e}"}
+
+    if len(rows) < min_samples:
+        return {"status": "skipped", "reason": f"insufficient samples ({len(rows)})",
+                "min_samples": min_samples}
+
+    encoder = get_multimodal_encoder()
+    batches: List[Dict] = []
+    targets: List[np.ndarray] = []
+    for r in rows:
+        try:
+            ttm = np.frombuffer(r["ttm_embedding"], dtype=np.float32)[:TTM_DIM]
+            if ttm.size < TTM_DIM:
+                continue
+            sent = np.zeros(SENTIMENT_DIM, dtype=np.float32)
+            sent[0] = float(r["confidence"] or 0.5)
+            batches.append({
+                "time_embedding": ttm,
+                "sentiment_features": sent,
+            })
+            # Target: a 64-dim vector whose first slot mirrors outcome_pnl
+            # sign and magnitude — the rest is zero so the encoder learns to
+            # surface outcome-discriminative signal in dim 0.
+            tgt = np.zeros(FUSION_DIM, dtype=np.float32)
+            tgt[0] = float(np.tanh(r["outcome_pnl"] / 5.0))
+            targets.append(tgt)
+        except Exception:
+            continue
+
+    if len(batches) < min_samples:
+        return {"status": "skipped", "reason": f"after parse ({len(batches)})"}
+
+    epoch_losses = []
+    for epoch in range(n_epochs):
+        loss = encoder.train_step(batches, targets, lr=1e-3)
+        epoch_losses.append(round(float(loss), 6))
+
+    sidecar = os.path.join(
+        os.path.dirname(__file__), "..", "models", "multimodal_encoder.pt"
+    )
+    try:
+        import torch
+        os.makedirs(os.path.dirname(sidecar), exist_ok=True)
+        state: Dict = {}
+        for i, mod in enumerate(encoder._modules_list):
+            state[f"mod_{i}"] = mod.state_dict()
+        for i, tok in enumerate(encoder._learnable_tokens):
+            state[f"tok_{i}"] = tok.detach().clone()
+        torch.save(state, sidecar)
+    except Exception as e:
+        logger.warning(f"[MultiModal:Train] save failed: {e}")
+
+    logger.info(
+        f"[MultiModal:Train] cycle done: n_samples={len(batches)}, "
+        f"final_loss={epoch_losses[-1]}"
+    )
+    return {
+        "status": "trained",
+        "n_samples": len(batches),
+        "epochs": n_epochs,
+        "epoch_losses": epoch_losses,
+        "checkpoint": sidecar,
+    }
 
 
 # Singleton

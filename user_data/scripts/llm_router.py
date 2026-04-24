@@ -113,6 +113,10 @@ def _get_penalty_config():
         "overloaded":        {"base": _p("llm.penalty.overloaded_base", 45.0), "exp": False, "max": _p("llm.penalty.overloaded_base", 45.0)},
         "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},
         "auth":              {"base": 0.0,  "exp": False, "max": 0.0},
+        # model_not_found: 7-day blackout (default) tunable downward if a
+        # provider is merely flapping. Weekly re-probe job unsets it.
+        "model_not_found":   {"base": _p("llm.penalty.model_not_found_base", 604800.0), "exp": False,
+                              "max": _p("llm.penalty.model_not_found_base", 604800.0)},
         "empty":             {"base": _p("llm.penalty.empty_base", 30.0),      "exp": False, "max": _p("llm.penalty.empty_base", 30.0)},
         "other":             {"base": _p("llm.penalty.empty_base", 30.0),      "exp": False, "max": 60.0},
     }
@@ -122,9 +126,48 @@ PENALTY_CONFIG = {
     "overloaded":        {"base": 45.0, "exp": False, "max": 45.0},
     "context_overflow":  {"base": 0.0,  "exp": False, "max": 0.0},
     "auth":              {"base": 0.0,  "exp": False, "max": 0.0},
+    # model_not_found: 7-day blackout. A re-probe job opens the slot again;
+    # if the model genuinely came back the slot resumes normally.
+    "model_not_found":   {"base": 604800.0, "exp": False, "max": 604800.0},
     "empty":             {"base": 30.0, "exp": False, "max": 30.0},
     "other":             {"base": 30.0, "exp": False, "max": 60.0},
 }  # static fallback
+
+
+def _persist_dead_model(provider: str, model_name: str, probe_after: float) -> None:
+    """Record a 404/does-not-exist event in `llm_dead_models` so the state
+    survives a scheduler restart. Re-probe job reads this to know when to
+    try the slot again — the in-memory `probe_after` is a hot cache of
+    the latest row here."""
+    try:
+        from db import execute_with_retry
+        execute_with_retry(
+            """CREATE TABLE IF NOT EXISTS llm_dead_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                probe_after REAL NOT NULL,
+                first_failure_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_failure_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                n_failures INTEGER DEFAULT 1,
+                UNIQUE(provider, model_name))""",
+            (),
+            max_retries=2,
+        )
+        # Upsert via INSERT OR REPLACE preserves the UNIQUE(provider, model)
+        # anchor while bumping probe_after and n_failures.
+        execute_with_retry(
+            """INSERT INTO llm_dead_models (provider, model_name, probe_after)
+               VALUES (?, ?, ?)
+               ON CONFLICT(provider, model_name) DO UPDATE SET
+                  probe_after = excluded.probe_after,
+                  last_failure_at = CURRENT_TIMESTAMP,
+                  n_failures = n_failures + 1""",
+            (str(provider), str(model_name), float(probe_after)),
+            max_retries=2,
+        )
+    except Exception:
+        pass
 
 def classify_error(e: Exception) -> str:
     """Classify exception into error taxonomy category."""
@@ -135,8 +178,22 @@ def classify_error(e: Exception) -> str:
         return "timeout"
     if "503" in err or "SERVICE_UNAVAILABLE" in err or "UNAVAILABLE" in err:
         return "overloaded"
+    # 413 Payload Too Large / Request Too Large — Groq/OpenAI-compat signal
+    # this on an over-size prompt. The message does not always contain
+    # "CONTEXT" / "LENGTH", so we key on the status code + phrasing too.
+    # Prior to this the 413s landed in `other` and the slot was retried
+    # forever even though the prompt itself was the defect — 162× against
+    # llama-3.1-8b-instant in 17h.
     if ("CONTEXT" in err and "LENGTH" in err) or ("TOKEN" in err and ("LIMIT" in err or "EXCEED" in err)):
         return "context_overflow"
+    if "413" in err or "REQUEST TOO LARGE" in err or "PAYLOAD TOO LARGE" in err:
+        return "context_overflow"
+    # 404 / "model does not exist" / "not available" — the provider has
+    # removed or renamed a model. Retrying serves nothing; the slot
+    # should be pruned until a re-probe confirms the model is back.
+    if "404" in err or "NOT FOUND" in err or "DOES NOT EXIST" in err \
+            or "NOT AVAILABLE" in err or "MODEL_NOT_FOUND" in err:
+        return "model_not_found"
     if "UNAUTHENTICATED" in err or "PERMISSION_DENIED" in err or "401" in err:
         return "auth"
     return "other"
@@ -221,6 +278,20 @@ class ModelSlot:
     quality_pass_count: int = 0
     disabled: bool = False
     max_context: int = 1_000_000
+    # 413-aware shrink (Task 9). Observed-max tracks the smallest prompt
+    # size that ever caused a context_overflow on this slot; is_available
+    # uses it to pre-reject oversized prompts so they never leave the
+    # process. Starts at max_context (i.e. unrestricted) and ratchets
+    # downward whenever a new 413 arrives.
+    max_context_observed: int = 1_000_000
+    last_context_overflow_tokens: int = 0
+    # Task 9: permanently-pruned model state (404 / does-not-exist).
+    # `disabled_reason` distinguishes auth (manual fix required) from
+    # model_not_found (re-probe can wake it up). `probe_after` is the
+    # wall-clock timestamp the weekly re-probe uses to decide when to
+    # test the slot again.
+    disabled_reason: str = ""
+    probe_after: float = 0.0
     # Phase 27 Task 18 additions
     rpd_limit: int = 500
     daily_quota: Optional[DailyQuota] = None
@@ -290,7 +361,20 @@ class ModelSlot:
             return self.alpha / (self.alpha + self.beta_param)
         return random.betavariate(max(self.alpha, 0.01), max(self.beta_param, 0.01))
 
-    def is_available(self, now: float) -> bool:
+    def is_available(self, now: float, estimated_tokens: int = 0) -> bool:
+        # Revive dead-model slots when the 7-day blackout has elapsed.
+        # Callers see the slot as "available" again; if the provider
+        # still returns 404 on the next probe, record_failure will
+        # re-disable it for another week.
+        if self.disabled and self.disabled_reason == "model_not_found":
+            if now >= self.probe_after > 0:
+                logger.info(
+                    f"[LLMSlot] {self.provider}/{self.model_name} re-probing "
+                    f"after dead-model blackout"
+                )
+                self.disabled = False
+                self.disabled_reason = ""
+                self.probe_after = 0.0
         if self.disabled:
             return False
         if now < self.penalty_until:
@@ -299,6 +383,12 @@ class ModelSlot:
             return False
         # Phase 27 Task 18: enforce daily budget with 20% reserve headroom
         if not self.daily_quota.is_within_budget(reserve_pct=0.2):
+            return False
+        # Task 9: 413-aware prefilter. If the caller's payload is already
+        # larger than the smallest prompt this slot has ever rejected,
+        # skip it — the provider would 413 anyway, so we save a round-
+        # trip and the bandit lands the refusal into a sibling slot.
+        if estimated_tokens and estimated_tokens > self.max_context_observed:
             return False
         return self._rpm_ok(now)
 
@@ -383,7 +473,39 @@ class ModelSlot:
 
         if error_type == "auth":
             self.disabled = True
+            self.disabled_reason = "auth"
             return
+
+        if error_type == "model_not_found":
+            # 7-day soft-disable; the re-probe job will flip `disabled`
+            # back when the provider confirms the model is reachable.
+            _pcfg = _get_penalty_config()
+            blackout = float(_pcfg.get("model_not_found", {}).get("base", 604800.0))
+            self.disabled = True
+            self.disabled_reason = "model_not_found"
+            self.probe_after = time.time() + blackout
+            logger.warning(
+                f"[LLMSlot] {self.provider}/{self.model_name} DEAD_MODEL — "
+                f"disabled for {blackout/3600:.1f}h (probe_after={int(self.probe_after)})"
+            )
+            try:
+                _persist_dead_model(self.provider, self.model_name, self.probe_after)
+            except Exception:
+                pass
+            return
+
+        if error_type == "context_overflow":
+            # Ratchet down the "this slot has accepted prompts at most
+            # this big" observation so future invocations with similar
+            # payloads can be pre-rejected before leaving the process.
+            # Use 0.85× the observed overflow token count as the new
+            # ceiling — the provider already rejected it at full size.
+            failed_tokens = int(self.last_context_overflow_tokens or 0)
+            if failed_tokens > 0:
+                self.max_context_observed = max(
+                    1024,
+                    min(self.max_context_observed, int(failed_tokens * 0.85)),
+                )
 
         _pcfg = _get_penalty_config()
         cfg = _pcfg.get(error_type, _pcfg["other"])
@@ -395,6 +517,21 @@ class ModelSlot:
             self.backoff_level += 1
         else:
             penalty = cfg["base"]
+
+        # Task 26: consume the ProactiveDispatcher's llm_router_cooldown_hint.
+        # When PredictiveInteroception fired a "Switch to fallback APIs,
+        # increase circuit breaker cooldowns" alert, the dispatcher deposits
+        # a multiplier pheromone — we honor it here so the alert actually
+        # slows down a degrading provider instead of just being logged.
+        try:
+            from pheromone_field import get_pheromone_field
+            hint = get_pheromone_field().read("llm_router_cooldown_hint")
+            if isinstance(hint, dict):
+                m = float(hint.get("multiplier", 1.0))
+                if m > 1.0:
+                    penalty = min(penalty * m, cfg["max"] * 2.0)
+        except Exception:
+            pass
 
         self.penalty_until = time.time() + penalty
         if penalty >= 60:
@@ -898,7 +1035,12 @@ class LLMRouter:
         circuit_open = self.gemini_circuit.is_open()
         eligible = []
         for s in self.slots:
-            if not s.is_available(now):
+            # Task 28.2: propagate estimated_tokens so the 413-aware
+            # prefilter on max_context_observed actually skips slots
+            # that already 413'd at similar payload sizes. Previously
+            # is_available was called without the kwarg → the shrink
+            # ratchet was dead code.
+            if not s.is_available(now, estimated_tokens=estimated_tokens):
                 continue
             if s.provider == "gemini" and circuit_open:
                 continue
@@ -1033,9 +1175,27 @@ class LLMRouter:
         except Exception as e:
             latency_ms = (time.time() - start) * 1000
             error_type = classify_error(e)
+            # Task 9: if the provider said the prompt was too big, stash the
+            # approximate token count on the slot so record_failure can
+            # ratchet max_context_observed downward.
+            if error_type == "context_overflow":
+                try:
+                    # Rough token estimate: character / 4. Messages list can
+                    # contain dict- or BaseMessage-shaped payloads.
+                    raw_chars = 0
+                    for m in messages:
+                        if isinstance(m, dict):
+                            raw_chars += len(str(m.get("content", "")))
+                        else:
+                            raw_chars += len(str(getattr(m, "content", m)))
+                    slot.last_context_overflow_tokens = max(1024, raw_chars // 4)
+                except Exception:
+                    pass
             tag = "[RateLimit]" if error_type == "rate_limit" else "[Failover]"
             if error_type == "rate_limit":
                 logger.info(f"{tag} {slot.model_name} quota exhausted. Other models on same key still OK.")
+            elif error_type == "model_not_found":
+                logger.warning(f"[DeadModel] {slot.model_name} → {type(e).__name__}: {str(e)[:120]}. Pruning for 7 days.")
             elif error_type != "timeout":  # Don't spam logs for timeouts
                 logger.warning(f"{tag} {slot.model_name} → {type(e).__name__}: {str(e)[:120]}. Next model...")
             try:
@@ -1049,6 +1209,85 @@ class LLMRouter:
             except Exception:
                 pass
             return None, error_type, latency_ms
+
+    # ── Retroactive feedback (Task 9.3) ─────────────────────────────────
+    #
+    # record_success accepts an `outcome_pnl` parameter that feeds a
+    # 1.2×/0.8× PnL multiplier into the reward function. Until now the
+    # only caller was the inline success path, so trades that closed
+    # long after the LLM call never influenced the slot's bandit
+    # posterior. confirm_trade_exit now calls record_pnl_feedback on
+    # close; we query llm_calls for rows whose trading_pair matches the
+    # trade and whose timestamp falls between trade_open and close,
+    # then nudge each (provider, model) slot's beta posterior toward
+    # the observed outcome.
+
+    def record_pnl_feedback(self, pair: str, outcome_pnl_pct: float,
+                            open_time: Any = None, close_time: Any = None) -> int:
+        """Attribute the realised PnL of a closed trade back to every
+        LLM call that fed into its decision.
+
+        Returns the number of slot updates applied.
+        """
+        if not pair or outcome_pnl_pct is None:
+            return 0
+        try:
+            from db import get_db_connection
+            where_parts = ["trading_pair = ?", "status = 'success'"]
+            args: List[Any] = [pair]
+            if open_time is not None:
+                where_parts.append("timestamp >= ?")
+                args.append(str(open_time))
+            if close_time is not None:
+                where_parts.append("timestamp <= ?")
+                args.append(str(close_time))
+            where_clause = " AND ".join(where_parts)
+            with get_db_connection() as conn:
+                rows = conn.execute(
+                    f"SELECT provider, model, COUNT(*) AS n "
+                    f"FROM llm_calls WHERE {where_clause} "
+                    f"GROUP BY provider, model",
+                    args,
+                ).fetchall()
+        except Exception as e:
+            logger.debug(f"[LLMRouter:PnLFeedback] lookup failed: {e}")
+            return 0
+
+        updates = 0
+        for row in rows:
+            try:
+                provider = str(row["provider"] or row[0])
+                model_name = str(row["model"] or row[1])
+                n_calls = int(row["n"] or row[2])
+            except Exception:
+                continue
+            if not provider or not model_name or n_calls <= 0:
+                continue
+            # Task 18: attribute is `self.slots` (LLMRouter.__init__ line 709).
+            # The earlier `self._slots` reference (copied from pair_circuit
+            # pattern) raised AttributeError on every call, which HydraSizer's
+            # confirm_trade_exit caught via try/except + debug log — making
+            # retroactive PnL feedback 100% dead for the whole session.
+            for slot in self.slots:
+                if slot.provider == provider and slot.model_name == model_name:
+                    try:
+                        gamma = 0.997 ** n_calls
+                        if outcome_pnl_pct > 0:
+                            slot.alpha = gamma * slot.alpha + 1.0
+                        else:
+                            slot.beta_param = gamma * slot.beta_param + 1.0
+                        slot.alpha = max(slot.alpha, 0.01)
+                        slot.beta_param = max(slot.beta_param, 0.01)
+                        updates += 1
+                    except Exception:
+                        continue
+                    break
+        if updates:
+            logger.info(
+                f"[LLMRouter:PnLFeedback] {pair} pnl={outcome_pnl_pct:+.2f}% → "
+                f"{updates} slot(s) nudged"
+            )
+        return updates
 
     # ── Main Invoke ───────────────────────────────────────────────────
 

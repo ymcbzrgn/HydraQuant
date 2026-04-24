@@ -703,21 +703,59 @@ class MetaController:
         return decisions
 
     def _persist_tick(self, decisions: Dict):
-        """Log lifecycle tick to hormone_history."""
+        """Log lifecycle tick to hormone_history using CANONICAL hormone
+        semantics (cortisol=1.0 calm, lower stressed — neural_organism.py:620-628)
+        and the real organism_health fraction [0..1].
+
+        The retired writer stored `danger_level` (0=calm, 1=panic) straight
+        into `cortisol` and dumped the `final_sizing_mult` (range ~0.5..1.3)
+        into `organism_health`. Two writers with opposing conventions on the
+        same log turned every downstream consumer into a lie. The canonical
+        inputs are owned by the NeuralOrganism singleton — we read them, and
+        park the lifecycle-specific telemetry in its own columns.
+        """
         try:
+            # Lazy import to dodge the circular: autonomous_lifecycle is imported
+            # by scheduler long before neural_organism's module-level state exists.
+            try:
+                from neural_organism import get_organism
+                org = get_organism()
+                h = org.hormones
+                org_health = org.get_organism_health()  # clamped [0..1]
+                cortisol = float(h.cortisol)
+                dopamine = float(h.dopamine)
+                serotonin = float(h.serotonin)
+                adrenaline = float(h.adrenaline)
+                market_stress = float(getattr(h, "_stress", 0.0))
+            except Exception:
+                # Organism not yet booted — record a neutral "I don't know"
+                # row under canonical convention (1.0 = calm).
+                cortisol = 1.0
+                dopamine = 1.0
+                serotonin = 1.0
+                adrenaline = 1.0
+                org_health = 0.5
+                market_stress = 0.0
+
+            danger_level = float(decisions.get("danger", {}).get("danger_level", 0.0))
+            sizing_mult = float(decisions.get("final_sizing_mult", 1.0))
+
             execute_with_retry(
                 """INSERT INTO hormone_history
                    (cortisol, dopamine, serotonin, adrenaline,
-                    market_stress, organism_health, trigger_event)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    market_stress, organism_health, trigger_event,
+                    sizing_mult, danger_level)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    decisions.get("danger", {}).get("danger_level", 0.5),
-                    1.0 - decisions.get("danger", {}).get("danger_level", 0.5),
-                    decisions.get("hormesis", {}).get("adaptation_rate", 1.0),
-                    1.0 if decisions.get("danger", {}).get("response") == "DEFENSIVE" else 0.3,
-                    decisions.get("danger", {}).get("danger_level", 0.5),
-                    decisions.get("final_sizing_mult", 1.0),
+                    cortisol,
+                    dopamine,
+                    serotonin,
+                    adrenaline,
+                    market_stress,
+                    org_health,
                     f"lifecycle_tick_{decisions.get('tick', 0)}",
+                    sizing_mult,
+                    danger_level,
                 ),
                 max_retries=3,
             )

@@ -462,12 +462,90 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "immune.consec_multiplier":  {"organ": "immune", "default": 1.5,  "min": 1.0,  "max": 3.0},
     "immune.max_hours":          {"organ": "immune", "default": 24,   "min": 4,    "max": 72},
     "immune.min_loss_to_ban":    {"organ": "immune", "default": -2.0, "min": -10.0, "max": -0.5},
+
+    # ─── ORGAN: interoception (5 params) — predictive_interoception.py:245-257 ───
+    # Defaults AND ranges are aligned with the caller-side literal
+    # fallbacks. The earlier range choices mistook `danger` thresholds
+    # (signal magnitude in [0..1]) for health levels and produced values
+    # well inside the organism's normal operating band — which would
+    # have latched the interoceptive alarm permanently on.
+    "interoception.winrate_danger":    {"organ": "interoception", "default": 0.35, "min": 0.20, "max": 0.50},
+    "interoception.latency_danger":    {"organ": "interoception", "default": 30000.0, "min": 5000.0, "max": 90000.0},
+    "interoception.error_rate_danger": {"organ": "interoception", "default": 0.30, "min": 0.10, "max": 0.60},
+    "interoception.health_danger":     {"organ": "interoception", "default": 0.30, "min": 0.15, "max": 0.50},
+    # Caller-fallback (predictive_interoception.py:257) is 0.5. Keep the
+    # registry default matching caller semantics so a booted organism
+    # doesn't trip on normal prediction-error variance.
+    "interoception.pred_error_danger": {"organ": "interoception", "default": 0.50, "min": 0.20, "max": 1.00},
+
+    # ─── ORGAN: perception (5 params) — triple_perception.py:673-687 + ensemble/ood ───
+    # Caller fallbacks: bull=0.55, bear=0.45 — a 0.1-wide dead zone
+    # around 0.5. Earlier registry choice (0.60/0.40) doubled the dead
+    # zone, starving signal production. Aligned to caller semantics.
+    "perception.bull_threshold":       {"organ": "perception", "default": 0.55, "min": 0.52, "max": 0.75},
+    "perception.bear_threshold":       {"organ": "perception", "default": 0.45, "min": 0.25, "max": 0.48},
+    "perception.disagreement_penalty": {"organ": "perception", "default": 0.30, "min": 0.05, "max": 0.60},
+    # ttm_threshold: tiny directional threshold (caller 0.1, NOT a ratio).
+    "perception.ttm_threshold":        {"organ": "perception", "default": 0.10, "min": 0.03, "max": 0.30},
+    # uncertainty_scale: scaling factor applied to chronos interval_width.
+    # triple_perception.py:311-312 →  sizing = 1 / (1 + scale × width).
+    # Caller fallback 5.0 is the intended magnitude; a registry default
+    # < 1 would turn the uncertainty dampener off.
+    "perception.uncertainty_scale":    {"organ": "perception", "default": 5.00, "min": 2.00, "max": 15.00},
+
+    # ─── ORGAN: calibrator (7 params) — dual_axis_calibrator.py:93-132 ───
+    "calibrator.default_width":  {"organ": "calibrator", "default": 0.10, "min": 0.02, "max": 0.30},
+    "calibrator.max_sizing":     {"organ": "calibrator", "default": 1.50, "min": 1.00, "max": 2.00},
+    # Caller floor is 0.10 (dual_axis_calibrator.py:130). A 0.25 floor
+    # silently forces every trade up to 25% of proposed stake.
+    "calibrator.min_sizing":     {"organ": "calibrator", "default": 0.10, "min": 0.05, "max": 0.50},
+    # Weights sum to 1.0 at their defaults. ORGAN_CONSTRAINTS entry
+    # (see below) re-normalises after evolutionary drift.
+    "calibrator.w_cqr":          {"organ": "calibrator", "default": 0.50, "min": 0.10, "max": 0.80},
+    "calibrator.w_ensemble":     {"organ": "calibrator", "default": 0.30, "min": 0.05, "max": 0.70},
+    "calibrator.w_ood":          {"organ": "calibrator", "default": 0.20, "min": 0.05, "max": 0.60},
+    # width_scale normalises CQR interval width to [0,1] via
+    #   uncertainty = clip(width × scale, 0, 1).
+    # Width is typically 0.05-0.15, so scale ≈ 10 is required to reach
+    # saturation. Registry default 1.0 would leave uncertainty at 0.05-
+    # 0.15 → dampening effectively OFF.
+    "calibrator.width_scale":    {"organ": "calibrator", "default": 10.00, "min": 3.00, "max": 25.00},
+
+    # ─── ORGAN: conformal (1 param) ───
+    "conformal.default_width":   {"organ": "conformal", "default": 0.10, "min": 0.02, "max": 0.30},
+
+    # ─── ORGAN: ensemble (1 param) ───
+    # deep_ensemble.py:235-236 →  sizing = 1 / (1 + scale × variance).
+    # Variance is typically 0.005-0.05, so scale 10 is the working value
+    # (caller fallback). A registry default of 1.0 would make the
+    # dampener a 1.01× identity — bug-compatible with the prior registry.
+    "ensemble.uncertainty_scale": {"organ": "ensemble", "default": 10.00, "min": 3.00, "max": 25.00},
+
+    # ─── ORGAN: ood (1 param) — ood_detector.py:257 ───
+    "ood.defensive_floor":       {"organ": "ood", "default": 0.10, "min": 0.05, "max": 0.50},
+
+    # ─── ORGAN: strategy trailing (3 params) — HydraSizer.py:1318-1338 ───
+    # These are ATR multipliers (1.0 ≈ 1 ATR of trailing distance), NOT
+    # fractional thresholds. Prior registry ranged 0.03-0.15 / 0.55-0.80
+    # which collapsed the trailing-stop width below the ATR itself —
+    # anti-persistent trades would have exited within a single candle.
+    # Caller fallbacks (3.5 / 1.5 / 1.5) define the working domain.
+    "strategy.trailing_hurst_high":   {"organ": "strategy_trailing", "default": 3.50, "min": 2.00, "max": 5.00},
+    "strategy.trailing_hurst_low":    {"organ": "strategy_trailing", "default": 1.50, "min": 0.80, "max": 2.50},
+    "strategy.trailing_age_10d":      {"organ": "strategy_trailing", "default": 1.50, "min": 0.80, "max": 2.50},
 }
 
 # Organs that must sum to a target value
 ORGAN_CONSTRAINTS = {
     "evidence_weights": 1.0,
     "opp_weights": 1.0,
+    # Task 17: calibrator.w_cqr + w_ensemble + w_ood must stay normalised
+    # so the fused uncertainty composite remains in [0,1]. Without this
+    # constraint, evolutionary drift in [0.10, 0.80] per weight could let
+    # the sum drift between 0.3 and 2.4 — at the high end uncertainty
+    # would be > 1 and the calibrator's certainty term (1 − uncertainty)
+    # would go negative, inverting the sizing signal.
+    "calibrator": 1.0,
 }
 
 # Seed causal synapses between neurons
@@ -602,8 +680,17 @@ class Hormones:
 
     def compute(self, fng: Optional[int] = None, drawdown_pct: float = 0.0,
                 consec_wins: int = 0, consec_losses: int = 0,
-                active_sources: int = 4, balance_vs_peak: float = 1.0) -> dict:
-        """Recompute all hormone levels from raw inputs + allostatic anticipation."""
+                active_sources: int = 4, balance_vs_peak: float = 1.0,
+                sensor_stress: float = 0.0) -> dict:
+        """Recompute all hormone levels from raw inputs + allostatic anticipation.
+
+        `sensor_stress` is the exogenous pain channel aggregated by
+        sensor_bridges.aggregate_sensor_stress() — covers empty orderbooks,
+        websocket disconnects, data starvation and shadow-Kelly posterior
+        collapse. Before this existed the organism could not feel organ
+        ischemia; cortisol stayed at 1.0 (calm) while ICP's orderbook was
+        empty 18,768 times in 17h.
+        """
         # Market Stress: 0 (calm) → 1 (panic)
         stress = 0.0
         if fng is not None and fng < 20:
@@ -612,6 +699,11 @@ class Hormones:
             stress += min(0.3, drawdown_pct * 0.03)
         if consec_losses >= 3:
             stress += min(0.2, consec_losses * 0.07)
+        # Exogenous sensor contribution — capped so that a completely
+        # saturated field can still only account for ~30% of base stress,
+        # leaving room for real endogenous signal on top.
+        if sensor_stress > 0:
+            stress += min(0.3, max(0.0, float(sensor_stress)) * 0.30)
         stress = min(1.0, max(0.0, stress))
 
         health = max(0.0, min(1.0, balance_vs_peak))
@@ -1764,8 +1856,9 @@ class NeuralOrganism:
                      confidence: float = 0.5, exit_reason: str = "",
                      duration_hours: float = 1.0, stake_amount: float = 0,
                      fng: Optional[int] = None, adx: float = 20,
-                     funding_rate: float = 0, active_sources: int = 4,
-                     balance_vs_peak: float = 1.0, ls_ratio: float = 1.0):
+                     funding_rate: float = 0, active_sources: Optional[int] = None,
+                     balance_vs_peak: float = 1.0, ls_ratio: float = 1.0,
+                     sensor_stress: Optional[float] = None):
         """
         Full 16-step neural update cycle. Called from confirm_trade_exit.
         Phase 25: expanded from 10 to 16 steps with all brain subsystems.
@@ -1815,10 +1908,34 @@ class NeuralOrganism:
         crowd = self.mirror.analyze_crowd(funding_rate, ls_ratio)
 
         # ═══ 4. HORMONES + ALLOSTASIS — global broadcast with anticipation ═══
+        # Pull live sensor stress + active channel count from the sensor
+        # bridges layer so the organism feels orderbook/ws/data/shadow pain
+        # even though update_cycle itself is invoked from trade exits.
+        # Callers may override by passing explicit values (tests, back-
+        # testers); otherwise we read the current field state.
+        if sensor_stress is None:
+            try:
+                from sensor_bridges import aggregate_sensor_stress
+                sensor_stress = float(aggregate_sensor_stress())
+            except Exception:
+                sensor_stress = 0.0
+        effective_active = active_sources
+        if effective_active is None:
+            try:
+                from sensor_bridges import active_sensor_count
+                # Base 4 (legacy) minus dark channels (each missing sensor
+                # removes one, clamped non-negative). active_sensor_count
+                # returns how many sensors are FIRING — they subtract from
+                # "healthy" baseline of 4 feeds.
+                firing = int(active_sensor_count())
+                effective_active = max(1, 4 - firing)
+            except Exception:
+                effective_active = 4
         self.hormones.compute(
             fng=fng, drawdown_pct=0, consec_wins=self._consec_wins,
-            consec_losses=self._consec_losses, active_sources=active_sources,
-            balance_vs_peak=balance_vs_peak)
+            consec_losses=self._consec_losses, active_sources=effective_active,
+            balance_vs_peak=balance_vs_peak,
+            sensor_stress=sensor_stress)
 
         # Phase 28: Deposit hormone state to pheromone field
         try:

@@ -38,8 +38,10 @@ class RegimeClassifier:
     RANGING = "ranging"
     HIGH_VOLATILITY = "high_volatility"
     TRANSITIONAL = "transitional"
+    ILLIQUID = "illiquid"
 
-    ALL_REGIMES = {TRENDING_BULL, TRENDING_BEAR, RANGING, HIGH_VOLATILITY, TRANSITIONAL}
+    ALL_REGIMES = {TRENDING_BULL, TRENDING_BEAR, RANGING, HIGH_VOLATILITY,
+                   TRANSITIONAL, ILLIQUID}
 
     @staticmethod
     def classify(tech_data: Dict[str, Any]) -> str:
@@ -53,6 +55,14 @@ class RegimeClassifier:
             - price or current_price (float): Current price
             - ema200 (float): 200-period EMA
             - ema20 (float): 20-period EMA (optional, for trend confirmation)
+            - spread_regime (str): 'tight'/'normal'/'wide'/'unknown' — fed by
+              lob_encoder when a live orderbook is available. 'wide'/'unknown'
+              combined with empty-book deposits flips regime to ILLIQUID so the
+              rest of the pipeline stops treating an empty book as just a
+              ranging market with bad luck.
+            - empty_book_events_10m (int): number of empty-orderbook sensor
+              hits for this pair in the last 10 minutes (HydraSizer passes it
+              through from sensor_bridges).
 
         Returns: regime string
         """
@@ -62,6 +72,56 @@ class RegimeClassifier:
         price = tech_data.get("price") or tech_data.get("current_price") or tech_data.get("close")
         ema200 = tech_data.get("ema200") or tech_data.get("ema_200")
         ema20 = tech_data.get("ema20") or tech_data.get("ema_20")
+        spread_regime = tech_data.get("spread_regime")
+        empty_book_events = int(tech_data.get("empty_book_events_10m", 0) or 0)
+        pair = tech_data.get("pair") or tech_data.get("trading_pair")
+
+        # Task 21: if the caller didn't inject spread_regime/empty_book_events
+        # into tech_data, fall back to the pheromone field. lob_encoder
+        # publishes its LOB state under (source='lob_encoder',
+        # signal_type='lob_state'), and sensor_bridges exposes a rolling
+        # tally of empty-orderbook events via its pair_circuit trails.
+        # Without this bridge, every call to classify() would see
+        # spread_regime=None and empty_book_events=0 regardless of the
+        # actual book health — ILLIQUID was structurally unreachable.
+        if spread_regime is None or empty_book_events == 0:
+            try:
+                from pheromone_field import get_pheromone_field
+                pfield = get_pheromone_field()
+                lob_state = pfield.read("lob_state")
+                if isinstance(lob_state, dict):
+                    lob_pair = lob_state.get("pair")
+                    # Only trust the deposit when it matches this pair (the
+                    # field is keyed by source::signal so deposits from
+                    # different pairs overwrite each other — we filter here).
+                    if spread_regime is None and (not pair or lob_pair == pair):
+                        spread_regime = lob_state.get("spread_regime")
+            except Exception:
+                pass
+            try:
+                # Pair circuit exposes a per-pair `consecutive_failures`
+                # counter that includes the latest empty-book events. We
+                # treat counter ≥ 3 as "3 empty events in the recent
+                # window" since the circuit is zeroed on healthy books.
+                if pair:
+                    from pair_circuit import get_pair_circuit
+                    status = get_pair_circuit().status(pair)
+                    if empty_book_events == 0:
+                        empty_book_events = int(status.get("consecutive_failures", 0) or 0)
+            except Exception:
+                pass
+
+        # Step 0 (pre-everything): ILLIQUID. If the LOB encoder reports a
+        # 'wide' spread regime OR we have seen >=3 empty-book events in the
+        # last 10 minutes for this pair, the market isn't ranging — it's
+        # absent. Previously this showed up as TRANSITIONAL or RANGING and
+        # the strategy kept trying to size normally on a book with no bids.
+        if spread_regime == "wide" or empty_book_events >= 3:
+            logger.info(
+                f"[RegimeClassifier] ILLIQUID: spread_regime={spread_regime} "
+                f"empty_events_10m={empty_book_events}"
+            )
+            return RegimeClassifier.ILLIQUID
 
         # Default if no data
         if adx is None:

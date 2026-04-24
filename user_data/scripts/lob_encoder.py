@@ -158,6 +158,21 @@ class LOBEncoder:
             "best_ask": round(float(best_ask), 8),
         }
 
+    def encode_and_publish(self, orderbook: Dict, pair: str = "") -> Dict:
+        """Encode the orderbook AND deposit the result to the pheromone
+        field so downstream consumers (regime_classifier spread_regime,
+        api_ai dashboard) actually see live LOB state. Task 14 wire-up:
+        the old `publish_to_pheromone` had no caller, so `lob_state`
+        deposits were always absent and the ILLIQUID regime rule
+        (regime_classifier.py step-0) had nothing to read.
+        """
+        result = self.encode(orderbook, pair=pair)
+        try:
+            self.publish_to_pheromone(result, pair)
+        except Exception:
+            pass
+        return result
+
     def _empty_result(self) -> Dict:
         return {
             "lob_embedding": np.zeros(LOB_EMBEDDING_DIM, dtype=np.float32),

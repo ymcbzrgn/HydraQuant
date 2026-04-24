@@ -88,6 +88,26 @@ class AutonomyManager:
                     updated_at TEXT
                 )
             ''')
+            # Boot-order self-heal: if db.py:init_db() created the retired
+            # schema (current_level/trust_alpha/trust_beta/successful_trades)
+            # before AutonomyManager ran, add the canonical columns so all
+            # SELECT/UPDATE paths (api_ai.py:215-216 etc.) keep working.
+            for _col, _typ in [
+                ("level", "INTEGER DEFAULT 0"),
+                ("promoted_at", "TEXT"),
+                ("sharpe_estimate", "REAL DEFAULT 0.0"),
+                ("max_drawdown_pct", "REAL DEFAULT 0.0"),
+                ("days_at_level", "INTEGER DEFAULT 0"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE autonomy_state ADD COLUMN {_col} {_typ}")
+                except sqlite3.OperationalError:
+                    pass
+            # Migrate legacy current_level → level if retired schema had data.
+            try:
+                conn.execute("UPDATE autonomy_state SET level = current_level WHERE (level IS NULL OR level = 0) AND current_level IS NOT NULL")
+            except sqlite3.OperationalError:
+                pass
             # Ensure exactly one row exists
             row = conn.execute("SELECT COUNT(*) FROM autonomy_state").fetchone()
             if row[0] == 0:

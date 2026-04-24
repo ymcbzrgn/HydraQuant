@@ -210,9 +210,23 @@ class EvidenceEngine:
         price = tech_data.get("current_price")
         if not price or (isinstance(price, (int, float)) and price <= 0):
             tech_data = self._build_minimal_tech_data(pair, tech_data)
+            # Afferent sensor: degraded data path — deposit a stress pheromone
+            # so the organism feels data starvation (observed 64× in 17h as
+            # "No real-time tech_data" warnings previously invisible).
+            if tech_data.get("_price_from_db"):
+                try:
+                    from sensor_bridges import record_data_starvation
+                    record_data_starvation(pair, source="tech_data", reason="db_fallback")
+                except Exception:
+                    pass
 
         price = tech_data.get("current_price")
         if not price or (isinstance(price, (int, float)) and price <= 0):
+            try:
+                from sensor_bridges import record_data_starvation
+                record_data_starvation(pair, source="tech_data", reason="fallback_empty")
+            except Exception:
+                pass
             raise EvidenceEngineDataError(
                 f"{pair}: no price data available (tech_data empty, DB fallback empty)"
             )

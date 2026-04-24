@@ -116,6 +116,18 @@ class PipelineScheduler:
         except Exception as e:
             logger.warning(f"[Scheduler] Grafeo broker start failed: {e}")
 
+        # Task 11: Start SQLite write broker — mirrors the Grafeo pattern
+        # so 5 processes serialise WRITES through a single socket instead
+        # of racing for the WAL writer slot (~1,950 `database is locked`
+        # retry log lines in 17h of production). Readers remain
+        # process-local. Clients fall back to a dead-letter spool when
+        # the broker is unreachable, so nothing is lost on startup-race.
+        try:
+            from sqlite_broker import start_sqlite_broker
+            start_sqlite_broker()
+        except Exception as e:
+            logger.warning(f"[Scheduler] SQLite broker start failed: {e}")
+
         # Every 5 minutes: RSS + FNG + Sentiment
         self.scheduler.add_job(
             self._fetch_and_analyze,
@@ -382,6 +394,72 @@ class PipelineScheduler:
         self.scheduler.add_job(self._pheromone_cleanup, 'interval', minutes=30,
             id='pheromone_cleanup', name='Pheromone Field Cleanup', max_instances=1, replace_existing=True)
 
+        # Sensor bridges (sensor_bridges.py) — afferent nerves translating
+        # exteroceptive pain (shadow-Kelly posterior collapse, exchange WS
+        # drops) into pheromone deposits the organism's hormone pipeline
+        # consumes as sensor_stress. Orderbook + data-starvation sensors
+        # fire in-line from HydraSizer / evidence_engine; these two need
+        # periodic scanning to surface aggregate signal.
+        self.scheduler.add_job(self._shadow_kelly_divergence_tick, 'interval',
+            minutes=30, id='shadow_kelly_divergence',
+            name='Shadow-Kelly Posterior Divergence Probe',
+            max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._ws_health_tick, 'interval',
+            minutes=5, id='ws_health_tick',
+            name='Exchange WS Disconnect Scanner',
+            max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._pair_circuit_revive_tick, 'interval',
+            minutes=5, id='pair_circuit_revive',
+            name='Pair Circuit Revival Probe',
+            max_instances=1, replace_existing=True)
+        self.scheduler.add_job(self._cache_health_drain_tick, 'interval',
+            minutes=10, id='cache_health_drain',
+            name='Semantic Cache Health Drain',
+            max_instances=1, replace_existing=True)
+        # Task 13: size-based WAL checkpoint. Prior design was release-
+        # count-based (every 50 releases → TRUNCATE) which is uncorrelated
+        # with actual WAL growth. A quiet interval could leave WAL at
+        # 166 MB for hours; a busy one fired TRUNCATEs every few seconds
+        # and contended with hot writers. Checking the file size every
+        # 60s and truncating above 32 MB gives deterministic bounds.
+        self.scheduler.add_job(self._wal_checkpoint_tick, 'interval',
+            seconds=60, id='wal_checkpoint',
+            name='WAL Size-Based Checkpoint',
+            max_instances=1, replace_existing=True)
+        # Task 11/12: drain the hot_writes spool. Any write that missed
+        # the broker (startup race, transient ZMQ disconnect) sits in
+        # `hot_writes` state='pending' — this job replays them.
+        self.scheduler.add_job(self._sqlite_spool_drain_tick, 'interval',
+            minutes=1, id='sqlite_spool_drain',
+            name='SQLite Write Spool Drain',
+            max_instances=1, replace_existing=True)
+        # Task 14: weekly risk_budget adaptation. `RiskBudgetManager.weekly_adjust`
+        # existed from Phase 3.5.3 but was never wired — multiplier stayed at
+        # 1.0 in production for weeks. Sunday 23:55 UTC computes the past
+        # week's PnL% and nudges next week's VaR budget up or down.
+        self.scheduler.add_job(self._weekly_budget_adjust, 'cron',
+            day_of_week='sun', hour=23, minute=55,
+            id='weekly_budget_adjust',
+            name='Risk Budget Weekly P&L Adjustment',
+            max_instances=1, replace_existing=True)
+        # Task 14: autopoietic_integrity reader. The table is write-only
+        # right now (self_model.compute_aii pushes rows; nobody reads).
+        # Daily tick queries the trend and raises an alarm when the
+        # organism's architectural drift crosses a threshold.
+        self.scheduler.add_job(self._autopoietic_integrity_review, 'cron',
+            hour=0, minute=5,
+            id='autopoietic_integrity_review',
+            name='Autopoietic Integrity Daily Review',
+            max_instances=1, replace_existing=True)
+        # Task 26: drain ProactiveDispatcher's retrain_request pheromone.
+        # When PredictiveInteroception fires "Models degrading, trigger
+        # retraining", dispatcher deposits the request. This tick checks
+        # hourly and advances the weekly CatBoost cron on demand.
+        self.scheduler.add_job(self._retrain_request_drain_tick, 'interval',
+            minutes=30, id='retrain_request_drain',
+            name='Proactive Retrain Request Drain',
+            max_instances=1, replace_existing=True)
+
         # Phase 28: ML Model Retraining Jobs
         self.scheduler.add_job(self._catboost_retrain, 'cron', day_of_week='sun', hour=3,
             id='catboost_retrain', name='CatBoost Weekly Retrain', max_instances=1, replace_existing=True)
@@ -538,6 +616,23 @@ class PipelineScheduler:
 
     def stop(self):
         """Gracefully shutdown the scheduler."""
+        # Task 13: tear the ZMQ brokers down BEFORE APScheduler stops so
+        # their REP sockets can flush one final checkpoint and release
+        # the IPC socket file cleanly. Prior to this the brokers stayed
+        # alive as daemon threads and were SIGKILLed at process exit,
+        # leaving the WAL uncheckpointed (observed 166 MB growth in
+        # production before the release-count TRUNCATE hotfix).
+        try:
+            from graph_store import stop_graph_broker
+            stop_graph_broker()
+        except Exception as e:
+            logger.debug(f"[Scheduler] Grafeo broker stop failed: {e}")
+        try:
+            from sqlite_broker import stop_sqlite_broker
+            stop_sqlite_broker()
+        except Exception as e:
+            logger.debug(f"[Scheduler] SQLite broker stop failed: {e}")
+
         if self.scheduler and self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("[Scheduler] Stopped.")
@@ -1637,6 +1732,23 @@ class PipelineScheduler:
                     f"{len(result['alerts'])} alerts: "
                     + ", ".join(a['metric'] for a in result['alerts'])
                 )
+            # Efferent: turn the prescription strings into concrete effector
+            # calls. Previously this key was produced and discarded — now
+            # each proactive_action maps to a pheromone deposit that the
+            # HydraSizer / llm_router / catboost retrain consumers honour.
+            try:
+                from proactive_dispatcher import get_proactive_dispatcher
+                dispatcher = get_proactive_dispatcher()
+                counters = dispatcher.dispatch(result)
+                if counters.get("dispatched"):
+                    logger.info(
+                        f"[Phase26:Interoception] dispatcher "
+                        f"dispatched={counters['dispatched']} "
+                        f"cooldown={counters['cooldown_skipped']} "
+                        f"unclassified={counters['unclassified']}"
+                    )
+            except Exception as disp_err:
+                logger.debug(f"[Phase26:Interoception] dispatcher failed: {disp_err}")
 
         except Exception as e:
             logger.error(f"[Phase26:Interoception] Check failed: {e}")
@@ -1654,6 +1766,360 @@ class PipelineScheduler:
             )
         except Exception as e:
             logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
+
+    def _shadow_kelly_divergence_tick(self):
+        """Every 30min: inspect shadow-Kelly posterior per pair. When the
+        posterior winrate collapses (<25% with enough samples) the sensor
+        bridges deposit a stress pheromone the organism will read via
+        aggregate_sensor_stress(). Gives the organism awareness of
+        systematic signal-quality decay WITHOUT having to trade those
+        pairs — prior to this the 40+ shadow pairs with 7-21% winrate
+        were invisible to every downstream consumer.
+        """
+        try:
+            from db import get_db_connection
+            from sensor_bridges import record_shadow_divergence
+            with get_db_connection() as conn:
+                rows = conn.execute(
+                    """SELECT s.pair,
+                              s.alpha AS s_alpha, s.beta_param AS s_beta, s.n_trades AS s_n,
+                              l.alpha AS l_alpha, l.beta_param AS l_beta
+                         FROM bayesian_kelly_shadow_per_pair s
+                         LEFT JOIN bayesian_kelly_per_pair l
+                           ON l.pair = s.pair AND l.regime = s.regime
+                        WHERE s.regime = '_global' AND s.n_trades > 3
+                     ORDER BY s.updated_at DESC LIMIT 100"""
+                ).fetchall()
+            fired = 0
+            for row in rows:
+                try:
+                    s_alpha = float(row["s_alpha"]); s_beta = float(row["s_beta"])
+                    s_total = s_alpha + s_beta
+                    if s_total <= 0:
+                        continue
+                    shadow_wr = s_alpha / s_total
+                    real_wr = None
+                    if row["l_alpha"] is not None and row["l_beta"] is not None:
+                        la = float(row["l_alpha"]); lb = float(row["l_beta"])
+                        if la + lb > 0:
+                            real_wr = la / (la + lb)
+                    if shadow_wr < 0.25 and int(row["s_n"]) >= 5:
+                        record_shadow_divergence(
+                            pair=row["pair"],
+                            real_winrate=real_wr,
+                            shadow_winrate=shadow_wr,
+                            n_shadow=int(row["s_n"]),
+                        )
+                        fired += 1
+                except Exception:
+                    continue
+            if fired:
+                logger.info(f"[SensorBridges:Shadow] {fired} divergence deposits emitted")
+        except Exception as e:
+            logger.debug(f"[SensorBridges:Shadow] tick failed: {e}")
+
+    def _weekly_budget_adjust(self):
+        """Every Sunday 23:55 UTC: compute the past week's PnL% and
+        drive RiskBudgetManager.weekly_adjust so next week's initial
+        budget multiplier tracks performance. Uses tradesv3 for realised
+        PnL so the signal is unambiguous (no forgone approximations)."""
+        try:
+            import sqlite3 as _sqlite
+            import os
+            trades_db = os.path.join(os.path.dirname(__file__), "..", "tradesv3.sqlite")
+            trades_db = os.path.abspath(trades_db)
+            if not os.path.exists(trades_db):
+                logger.debug(f"[WeeklyBudget] trades DB missing at {trades_db}")
+                return
+            conn = _sqlite.connect(trades_db, timeout=30.0)
+            try:
+                row = conn.execute(
+                    """SELECT COALESCE(SUM(close_profit_abs), 0.0) AS pnl_abs,
+                              COALESCE(SUM(stake_amount), 0.0) AS stake_abs
+                         FROM trades
+                        WHERE close_date IS NOT NULL
+                          AND close_date >= datetime('now', '-7 days')"""
+                ).fetchone()
+            finally:
+                conn.close()
+            pnl_abs = float(row[0] or 0.0)
+            stake_abs = float(row[1] or 0.0)
+            if stake_abs <= 0:
+                logger.info("[WeeklyBudget] no closed trades in the last 7 days — skipping")
+                return
+            pnl_pct = (pnl_abs / stake_abs) * 100.0
+            from risk_budget import RiskBudgetManager
+            mgr = RiskBudgetManager(portfolio_value=self._read_portfolio_value())
+            mgr.weekly_adjust(pnl_pct)
+            logger.info(f"[WeeklyBudget] weekly_adjust fired pnl_pct={pnl_pct:+.2f}%")
+        except Exception as e:
+            logger.warning(f"[WeeklyBudget] adjust failed: {e}")
+
+    def _autopoietic_integrity_review(self):
+        """Daily at 00:05 UTC: read the latest `autopoietic_integrity`
+        row written by self_model. If the AII score has trended below
+        0.6 the past 7 days (the "organism losing its coherence" band
+        in self_model documentation), deposit a defensive pheromone so
+        the rest of the pipeline throttles until the next consolidation.
+        """
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                # Task 23: column is `aii_composite` (see db.py:787 and
+                # self_model.py:598 INSERT). The earlier `aii_score` name
+                # triggered OperationalError and was swallowed by the
+                # outer try/except, making the review a silent no-op.
+                rows = conn.execute(
+                    """SELECT aii_composite, timestamp FROM autopoietic_integrity
+                        ORDER BY timestamp DESC LIMIT 7"""
+                ).fetchall()
+            scores = [float(r[0]) for r in rows if r and r[0] is not None]
+            if not scores:
+                return
+            import statistics as _st
+            median = _st.median(scores)
+            logger.info(
+                f"[AII:Review] median_7d={median:.3f} samples={len(scores)}"
+            )
+            if median < 0.6:
+                try:
+                    from pheromone_field import get_pheromone_field
+                    pfield = get_pheromone_field()
+                    pfield.deposit(
+                        "autopoietic_review", "defensive_mode",
+                        {"sizing_cap": 0.5, "reason": "aii_median_below_0.6",
+                         "median_7d": median},
+                        half_life=86400.0,
+                    )
+                    logger.warning(
+                        f"[AII:Review] median {median:.3f} < 0.6 — defensive mode deposited"
+                    )
+                except Exception as e:
+                    logger.debug(f"[AII:Review] defensive deposit failed: {e}")
+        except Exception as e:
+            logger.debug(f"[AII:Review] tick failed: {e}")
+
+    def _wal_checkpoint_tick(self):
+        """Every 60s: inspect the WAL file size and TRUNCATE if it has
+        grown beyond the threshold. Complements the in-pool
+        release-count trigger by catching the "quiet process, huge WAL"
+        scenario that produced the 166 MB incident before Mega Sprint.
+        """
+        try:
+            import os
+            from ai_config import AI_DB_PATH
+            wal_path = AI_DB_PATH + "-wal"
+            if not os.path.exists(wal_path):
+                return
+            size = os.path.getsize(wal_path)
+            threshold = 32 * 1024 * 1024  # 32 MB
+            if size <= threshold:
+                return
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.commit()
+                    logger.info(
+                        f"[WALCheckpoint] TRUNCATE fired size={size/1024/1024:.1f}MB → "
+                        f"{os.path.getsize(wal_path)/1024/1024:.1f}MB"
+                    )
+                except Exception as e:
+                    logger.debug(f"[WALCheckpoint] TRUNCATE failed: {e}")
+        except Exception as e:
+            logger.debug(f"[WALCheckpoint] tick failed: {e}")
+
+    def _sqlite_spool_drain_tick(self):
+        """Every 60s: try to replay pending rows from `hot_writes` via
+        the broker. No-op when the broker is unreachable (the client
+        bails after a single ping). When the broker is alive this lets
+        any write that raced the broker's start-up on process boot make
+        its way into the canonical DB within a minute.
+        """
+        try:
+            from sqlite_broker import drain_spool
+            drained = drain_spool(batch_size=50)
+            if drained:
+                logger.info(f"[SpoolDrain] {drained} pending write(s) committed via broker")
+        except Exception as e:
+            logger.debug(f"[SpoolDrain] tick failed: {e}")
+
+    def _retrain_request_drain_tick(self):
+        """Every 30min: check whether ProactiveDispatcher has deposited a
+        retrain_request pheromone. If yes, advance the CatBoost retrain
+        on demand (out-of-band from its Sunday 03:00 UTC cron). State
+        is held on the instance (`_last_retrain_handled_ts`) so the same
+        deposit isn't re-honoured after its 6h half-life naturally
+        clears — mirrors the dispatcher cooldown semantics.
+        """
+        try:
+            from pheromone_field import get_pheromone_field
+            hint = get_pheromone_field().read("retrain_request")
+            if not isinstance(hint, dict):
+                return
+            ts_key = "_last_retrain_handled_ts"
+            last_handled = getattr(self, ts_key, 0.0)
+            import time as _tm
+            now = _tm.time()
+            # Only re-fire if at least 6h passed since last handling to
+            # avoid thrashing the training pipeline.
+            if now - last_handled < 6 * 3600:
+                return
+            severity = float(hint.get("severity", 1.0))
+            logger.info(
+                f"[RetrainDrain] handling proactive retrain_request "
+                f"(severity={severity:.2f}, reason={hint.get('reason')})"
+            )
+            try:
+                self._catboost_retrain()
+                setattr(self, ts_key, now)
+            except Exception as e:
+                logger.warning(f"[RetrainDrain] retrain invocation failed: {e}")
+        except Exception as e:
+            logger.debug(f"[RetrainDrain] tick failed: {e}")
+
+    def _cache_health_drain_tick(self):
+        """Every 10min: drain semantic_cache's hit/miss counters into the
+        `cache_health_log` table. Turns the previously-silent cache into
+        an observable organ — a hit rate stuck near zero becomes a real
+        alert instead of sitting there as a 6,548-row dead column.
+
+        Task 22: use the singleton accessor so we read THE SAME instance
+        rag_graph publishes to. The prior implementation instantiated a
+        fresh SemanticCache() here, which meant health_snapshot() always
+        returned zeros and cache_health_log was a lie.
+        """
+        try:
+            from semantic_cache import get_semantic_cache
+            cache = get_semantic_cache()
+            snap = cache.health_snapshot()
+            from db import execute_with_retry
+            execute_with_retry(
+                """INSERT INTO cache_health_log
+                   (hits, misses, puts, rejects, invalidations,
+                    hit_rate, median_similarity, threshold)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(snap["hits"]), int(snap["misses"]),
+                    int(snap["puts"]), int(snap["rejects"]),
+                    int(snap["invalidations"]),
+                    float(snap["hit_rate"]),
+                    float(snap["median_similarity"]),
+                    float(snap["threshold"]),
+                ),
+                max_retries=3,
+            )
+            logger.info(
+                f"[CacheHealth] drain — hits={snap['hits']} misses={snap['misses']} "
+                f"hit_rate={snap['hit_rate']:.2%} med_sim={snap['median_similarity']:.3f} "
+                f"puts={snap['puts']} rejects={snap['rejects']} inv={snap['invalidations']}"
+            )
+        except Exception as e:
+            logger.debug(f"[CacheHealth] drain failed: {e}")
+
+    def _pair_circuit_revive_tick(self):
+        """Every 5min: probe dormant pairs to see if their orderbooks have
+        come back. No exchange client is available inside the scheduler
+        process, so this job runs a lightweight in-process check against
+        the pheromone field — if a `pair_circuit::dormant::<pair>` trail
+        is still fresh AND the most recent sensor deposit for that pair
+        is >90s old, that's a reasonable signal the exchange quieted;
+        clear the circuit so HydraSizer can try the pair again on the
+        next candle. Actual healthy-book confirmation still happens
+        in-line via probe_orderbook → record_success.
+        """
+        try:
+            import time
+            from pair_circuit import get_pair_circuit
+            circuit = get_pair_circuit()
+            revived = 0
+            now = time.time()
+            for pair in list(circuit._slots.keys()):
+                slot = circuit._slots[pair]
+                # Revive if blacklist window expired AND we haven't seen
+                # another failure within the last 90 seconds.
+                if slot.blacklisted_until <= now and slot.consecutive_failures > 0:
+                    if (now - slot.last_event_at) > 90.0:
+                        circuit.record_success(pair)
+                        revived += 1
+            if revived:
+                logger.info(f"[PairCircuit] revival_tick — {revived} pair(s) reopened")
+        except Exception as e:
+            logger.debug(f"[PairCircuit] revival_tick failed: {e}")
+
+    def _ws_health_tick(self):
+        """Every 5min: scan recent strategy log for websocket disconnects
+        (the 54× `_unwatch_ohlcv` / code-1006 events observed in production
+        that previously never touched cortisol). Tail-based approach keeps
+        the strategy process patch-free. Each detected disconnect deposits
+        a short-half-life pheromone; sustained flapping aggregates.
+
+        Task 25: probe BOTH `hydraquant.log` (docker/systemd production
+        path) AND `freqtrade.log` (upstream default). The earlier
+        single-path lookup silently missed production logs because
+        docker-compose wires --logfile=hydraquant.log, so the exchange
+        sensor channel was permanently dark on prod.
+        """
+        try:
+            import os, subprocess, re
+            from sensor_bridges import record_ws_disconnect
+
+            log_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "logs",
+            )
+            candidates = ["hydraquant.log", "freqtrade.log"]
+            # Freqtrade's configured logfile path may override both —
+            # prefer it when available.
+            cfg_path = None
+            try:
+                import json as _json
+                cfg_candidate = os.path.join(
+                    os.path.dirname(log_dir),
+                    "..",
+                    "config_bybit_testnet_futures.json",
+                )
+                cfg_candidate = os.path.abspath(cfg_candidate)
+                if os.path.exists(cfg_candidate):
+                    with open(cfg_candidate, "r", encoding="utf-8") as fh:
+                        _cfg = _json.load(fh)
+                    cfg_path = _cfg.get("logfile")
+            except Exception:
+                cfg_path = None
+
+            log_path = None
+            if cfg_path and os.path.exists(cfg_path):
+                log_path = cfg_path
+            else:
+                for name in candidates:
+                    candidate = os.path.join(log_dir, name)
+                    if os.path.exists(candidate):
+                        log_path = candidate
+                        break
+            if log_path is None:
+                return
+
+            result = subprocess.run(
+                ["tail", "-n", "1000", log_path],
+                capture_output=True, text=True, timeout=5,
+            )
+            pattern = re.compile(
+                r"(_unwatch_ohlcv|Connection closed by remote server|closing code 1006)",
+                re.IGNORECASE,
+            )
+            hits = sum(1 for line in result.stdout.splitlines() if pattern.search(line))
+            if hits >= 2:
+                record_ws_disconnect(
+                    exchange="unknown",
+                    pair="",
+                    timeframe="",
+                    code=1006,
+                )
+                logger.debug(
+                    f"[SensorBridges:WS] {hits} disconnect events @ {os.path.basename(log_path)} → deposit"
+                )
+        except Exception as e:
+            logger.debug(f"[SensorBridges:WS] tick failed: {e}")
 
 
     # ═══ Phase 28: ML Model Retraining Handlers ═══════════════════

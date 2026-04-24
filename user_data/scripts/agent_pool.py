@@ -584,6 +584,24 @@ class AgentPool:
             return None
 
         agents = self.select_agents(regime)
+        # Task 26: consume ProactiveDispatcher's rag_depth_hint. When the
+        # interoceptive loop fires "Pre-warm caches, reduce RAG depth"
+        # because signal_latency_ms crossed danger, the dispatcher
+        # deposits a cap. Trim the agent roster to match so the debate
+        # takes fewer LLM round-trips and the p95 latency recovers.
+        try:
+            from pheromone_field import get_pheromone_field
+            depth_hint = get_pheromone_field().read("rag_depth_hint")
+            if isinstance(depth_hint, dict):
+                cap = int(depth_hint.get("depth_cap", len(agents)))
+                if cap > 0 and cap < len(agents):
+                    logger.info(
+                        f"[AgentPool:Debate] depth_cap={cap} from proactive "
+                        f"dispatcher — trimming agents {len(agents)}→{cap}"
+                    )
+                    agents = list(agents)[:cap]
+        except Exception:
+            pass
         positions = {}
 
         # ── Round 1: each agent states position (parallel) ──

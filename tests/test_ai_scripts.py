@@ -409,10 +409,14 @@ def test_risk_budget_consume(tmp_db):
     remaining = mgr.remaining_budget()
     assert remaining == 100.0, f"Expected $100 remaining, got {remaining}"
 
-    # Consume some budget: position=$500, vol=0.03, conf=0.5
-    # consumption = 500 * 0.03 * (1/0.5) = 30.0
+    # Consume some budget. Post-Task-4 (2026-04-24) the formula dropped the
+    # (1/confidence) divisor because PositionSizer already applies a
+    # confidence^1.5 curve upstream — re-dividing by confidence here was a
+    # double-penalty that let `consumed` exceed `initial_budget` by day 3 in
+    # production. New formula: consumption = position * volatility
+    # => 500 * 0.03 = 15.0 (in dollars, 1-sigma move of the position).
     remaining_after = mgr.consume_budget(500.0, 0.03, 0.5)
-    assert abs(remaining_after - 70.0) < 0.01, f"Expected ~$70 remaining, got {remaining_after}"
+    assert abs(remaining_after - 85.0) < 0.01, f"Expected ~$85 remaining, got {remaining_after}"
 
 
 # ============================================================
@@ -424,8 +428,9 @@ def test_risk_budget_daily_reset(tmp_db):
 
     mgr = RiskBudgetManager(portfolio_value=10000.0, daily_var_pct=0.01, db_path=tmp_db)
 
-    # Consume almost all budget
-    mgr.consume_budget(1000.0, 0.05, 0.5)  # 1000*0.05*2 = 100 → budget fully consumed
+    # Consume the full budget with the post-Task-4 formula (pos * vol).
+    # daily_budget = 10000 * 0.01 = 100, so 2000 * 0.05 = 100 depletes it.
+    mgr.consume_budget(2000.0, 0.05, 0.5)
 
     assert mgr.remaining_budget() <= 0.01, "Budget should be nearly depleted"
 

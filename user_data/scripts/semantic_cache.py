@@ -40,9 +40,26 @@ class SemanticCache:
     """
     Caches LLM responses using semantic similarity of the query.
     Saves API costs by reusing recent identical or highly similar queries.
+
+    Task 10 additions (2026-04-24):
+      * `_hits` / `_misses` / `_puts` / `_rejects` atomic counters the
+        scheduler drains into `cache_health_log` for rolling hit-rate
+        observability. Previously `llm_calls.cache_hit` was a dead
+        column — 6,548 rows, all 0, because `cache_hit=True` was never
+        passed. The observer ledger side-steps that column entirely.
+      * `similarity_distribution` deque — every get() records the
+        best-match similarity even on miss so similarity_probe() can
+        self-tune the threshold.
+      * `_embedding_model_name` — the model actually used to embed
+        incoming queries. put() stamps the row with the model; get()
+        only compares embeddings produced by the same model so a Jina
+        migration or Gemini version bump doesn't silently turn the
+        whole cache into noise.
     """
     def __init__(self, db_path=None, similarity_threshold=0.92):
         import ai_config
+        import threading
+        from collections import deque
         self.db_path = db_path if db_path is not None else ai_config.AI_DB_PATH
         self.similarity_threshold = similarity_threshold
         # Create genai clients for all available keys (store key suffix for logging)
@@ -58,6 +75,15 @@ class SemanticCache:
         else:
             logger.info(f"[SemanticCache] Initialized {len(self._genai_clients)} Gemini clients for embedding")
         self._client_idx = 0
+        # Task 10 observability counters.
+        self._counter_lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
+        self._puts = 0
+        self._rejects = 0
+        self._invalidations = 0
+        self._similarity_samples = deque(maxlen=500)
+        self._embedding_model_name: Optional[str] = None
         self._init_db()
 
     def _init_db(self):
@@ -72,7 +98,26 @@ class SemanticCache:
                         response TEXT NOT NULL,
                         pair TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        ttl_seconds INTEGER DEFAULT 300
+                        ttl_seconds INTEGER DEFAULT 300,
+                        embedding_model TEXT
+                    )
+                """)
+                # Task 10: embedding_model column for cross-model isolation.
+                try:
+                    cursor.execute("ALTER TABLE semantic_cache ADD COLUMN embedding_model TEXT")
+                except sqlite3.OperationalError:
+                    pass
+                # Task 10: cache_health_log — hit/miss/put/reject counters
+                # the scheduler drains every 10 min so the organism can
+                # observe its own cache.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS cache_health_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        hits INTEGER, misses INTEGER, puts INTEGER,
+                        rejects INTEGER, invalidations INTEGER,
+                        hit_rate REAL, median_similarity REAL,
+                        threshold REAL
                     )
                 """)
                 # Startup sanitization: purge poisoned entries with low/null confidence
@@ -108,6 +153,12 @@ class SemanticCache:
                         kwargs["config"] = {"output_dimensionality": model_cfg["dims"]}
                     result = client.models.embed_content(**kwargs)
                     emb = np.array(result.embeddings[0].values, dtype=np.float32)
+                    # Task 10: remember which model produced the embedding
+                    # so get() can filter by model fingerprint and put()
+                    # can stamp the row. Without this, a Gemini version
+                    # bump silently turned every cached row into a
+                    # different vector space than the current query.
+                    self._embedding_model_name = model_cfg["name"]
                     return emb
                 except Exception as e:
                     err_str = str(e).lower()
@@ -131,6 +182,7 @@ class SemanticCache:
         query_emb = self._get_embedding(query)
         if query_emb is None:
             return None
+        model_fingerprint = self._embedding_model_name
 
         # Clean up expired entries first
         self.cleanup_expired()
@@ -141,21 +193,46 @@ class SemanticCache:
         try:
             with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
+                # Task 10: cross-model isolation. Rows whose embedding_model
+                # differs from the current fingerprint live in a different
+                # vector space; including them in cosine similarity compares
+                # apples to ducks. Legacy rows with NULL embedding_model
+                # fall through for backwards compatibility.
                 if pair:
-                    cursor.execute("SELECT query_embedding, response FROM semantic_cache WHERE pair = ?", (pair,))
+                    cursor.execute(
+                        "SELECT query_embedding, response, embedding_model "
+                        "FROM semantic_cache WHERE pair = ?",
+                        (pair,),
+                    )
                 else:
-                    cursor.execute("SELECT query_embedding, response FROM semantic_cache WHERE pair IS NULL OR pair = ''")
-                
+                    cursor.execute(
+                        "SELECT query_embedding, response, embedding_model "
+                        "FROM semantic_cache WHERE pair IS NULL OR pair = ''"
+                    )
+
                 rows = cursor.fetchall()
-                for emb_blob, response in rows:
-                    if emb_blob:
-                        cached_emb = np.frombuffer(emb_blob, dtype=np.float32)
-                        if cached_emb.shape == query_emb.shape:
-                            sim = self._cosine_similarity(query_emb, cached_emb)
-                            if sim >= self.similarity_threshold and sim > highest_sim:
-                                highest_sim = sim
-                                best_match_response = response
-                                
+                for row in rows:
+                    emb_blob = row[0]
+                    response = row[1]
+                    row_model = row[2] if len(row) > 2 else None
+                    if not emb_blob:
+                        continue
+                    if row_model and model_fingerprint and row_model != model_fingerprint:
+                        continue  # different embedding model, skip
+                    cached_emb = np.frombuffer(emb_blob, dtype=np.float32)
+                    if cached_emb.shape == query_emb.shape:
+                        sim = self._cosine_similarity(query_emb, cached_emb)
+                        # Track the best-match similarity across the whole
+                        # scan, even misses — drives similarity_probe().
+                        if sim > highest_sim:
+                            highest_sim = sim
+                        if sim >= self.similarity_threshold and sim >= highest_sim:
+                            best_match_response = response
+
+            if highest_sim > 0:
+                with self._counter_lock:
+                    self._similarity_samples.append(float(highest_sim))
+
             if best_match_response:
                 # Reject cached results with low confidence (poisoned cache entries)
                 try:
@@ -164,14 +241,21 @@ class SemanticCache:
                     cached_conf = float(confidence_val) if confidence_val is not None else 0.0
                     if cached_conf < 0.3:
                         logger.warning(f"Semantic Cache Hit REJECTED — cached confidence too low ({cached_conf:.2f}). Forcing fresh pipeline.")
+                        with self._counter_lock:
+                            self._rejects += 1
+                            self._misses += 1
                         return None
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass  # Non-JSON cache entry, return as-is
                 logger.info(f"Semantic Cache Hit! Similarity: {highest_sim:.4f}")
+                with self._counter_lock:
+                    self._hits += 1
                 return best_match_response
         except Exception as e:
             logger.error(f"Error accessing semantic cache: {e}")
 
+        with self._counter_lock:
+            self._misses += 1
         return None
 
     def put(self, query: str, response: str, pair: Optional[str] = None, ttl: int = 300):
@@ -194,13 +278,16 @@ class SemanticCache:
         try:
             execute_with_retry(
                 """INSERT INTO semantic_cache
-                   (query_text, query_embedding, response, pair, ttl_seconds)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (query, query_emb.tobytes(), response, pair, ttl),
+                   (query_text, query_embedding, response, pair, ttl_seconds, embedding_model)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (query, query_emb.tobytes(), response, pair, ttl,
+                 self._embedding_model_name),
                 max_retries=5,
                 db_path=self.db_path,
             )
             logger.info(f"Stored response in semantic cache for query: '{query[:30]}...' (TTL: {ttl}s)")
+            with self._counter_lock:
+                self._puts += 1
         except Exception as e:
             logger.error(f"Error writing to semantic cache: {e}")
 
@@ -221,8 +308,47 @@ class SemanticCache:
                     db_path=self.db_path,
                 )
             logger.info(f"Invalidated semantic cache (pair: {pair})")
+            with self._counter_lock:
+                self._invalidations += 1
         except Exception as e:
             logger.error(f"Error invalidating semantic cache: {e}")
+
+    def health_snapshot(self) -> dict:
+        """Drained snapshot of cache observability counters. After read
+        the counters reset so each window stays independent. Scheduler
+        calls this every 10 min and persists to `cache_health_log`.
+        """
+        with self._counter_lock:
+            hits = self._hits
+            misses = self._misses
+            puts = self._puts
+            rejects = self._rejects
+            invalidations = self._invalidations
+            sims = list(self._similarity_samples)
+            self._hits = 0
+            self._misses = 0
+            self._puts = 0
+            self._rejects = 0
+            self._invalidations = 0
+            self._similarity_samples.clear()
+        total = hits + misses
+        hit_rate = (hits / total) if total > 0 else 0.0
+        median_sim = float(np.median(sims)) if sims else 0.0
+        return {
+            "hits": hits, "misses": misses, "puts": puts,
+            "rejects": rejects, "invalidations": invalidations,
+            "hit_rate": hit_rate, "median_similarity": median_sim,
+            "threshold": self.similarity_threshold,
+        }
+
+    def similarity_probe(self) -> Optional[float]:
+        """Read-only peek at the running median similarity. If systematically
+        below the threshold, the caller can loosen the threshold — signals
+        that the semantic distance of real queries drifted."""
+        with self._counter_lock:
+            if not self._similarity_samples:
+                return None
+            return float(np.median(self._similarity_samples))
 
     def cleanup_expired(self):
         """Remove expired entries based on TTL."""
@@ -237,3 +363,28 @@ class SemanticCache:
                 logger.debug(f"Cleaned up {cursor.rowcount} expired semantic cache entries.")
         except Exception as e:
             logger.error(f"Error cleaning up expired cache: {e}")
+
+
+# ─── Task 22: singleton accessor ────────────────────────────────────────────
+# rag_graph's module-level `_semantic_cache` was the only real in-process
+# instance carrying the hit/miss counters. When the scheduler drain job
+# instantiated a NEW `SemanticCache()` every 10 min, it read the fresh
+# instance's all-zero counters — making cache_health_log a lie.
+# This accessor lets both rag_graph and scheduler bind to the same
+# instance (per `db_path` so tests with tmp_path still isolate).
+
+import ai_config as _ai_config_for_cache
+
+_semantic_cache_instances: dict = {}
+
+
+def get_semantic_cache(db_path: Optional[str] = None,
+                       similarity_threshold: float = 0.92) -> "SemanticCache":
+    """Return the per-db_path SemanticCache singleton. The first caller
+    per path owns the counters; every subsequent caller shares them."""
+    key = db_path if db_path is not None else _ai_config_for_cache.AI_DB_PATH
+    inst = _semantic_cache_instances.get(key)
+    if inst is None:
+        inst = SemanticCache(db_path=key, similarity_threshold=similarity_threshold)
+        _semantic_cache_instances[key] = inst
+    return inst
