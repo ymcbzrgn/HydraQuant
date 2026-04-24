@@ -100,6 +100,14 @@ class HydraSizer(IStrategy):
         # Map pair -> forgone_id for resolving on trade exit
         self._forgone_ids: dict = {}
 
+        # Task 4 patch: pending risk-budget consumption. custom_stake_amount
+        # parks the proposed (stake, vol, conf) tuple per pair; confirm_trade_entry
+        # commits it exactly once when the trade actually fires. Prior design
+        # called consume_budget on every candle that custom_stake_amount ran,
+        # even for pending/unfilled limit orders — so one stale pending trade
+        # could accumulate 10+ duplicate consumption rows in a few hours.
+        self._pending_risk_consume: dict[str, tuple] = {}
+
         # Risk/Position Management Modules
         from risk_budget import RiskBudgetManager
         from position_sizer import BayesianKelly, PositionSizer
@@ -1864,16 +1872,26 @@ class HydraSizer(IStrategy):
             final_stake = min_stake
 
         realised_stake = min(final_stake, max_stake)
-        # Only real entries consume the risk budget — shadow/min-stake SKIPs
-        # have already returned above with final_stake=0.
+        # Task 4 patch (2026-04-25): defer consume_budget until
+        # confirm_trade_entry. custom_stake_amount fires on every candle
+        # while a limit order is still pending (observed 6 identical
+        # $2.21 consume logs for the same pair across 3 hours →
+        # consumed crossed 215% of initial_budget). We cache the
+        # proposed risk here and only commit it when Freqtrade actually
+        # confirms the trade. The cache holds the LATEST proposal per
+        # pair, so a second custom_stake_amount before the fill
+        # overwrites the first — matching Freqtrade's own "last call
+        # wins" stake semantics.
         try:
-            self.risk_budget.consume_budget(
-                realised_stake,
-                locals().get("_rb_atr_vol", 0.0),
-                confidence,
+            if not hasattr(self, "_pending_risk_consume"):
+                self._pending_risk_consume: dict[str, tuple] = {}
+            self._pending_risk_consume[pair] = (
+                float(realised_stake),
+                float(locals().get("_rb_atr_vol", 0.0)),
+                float(confidence),
             )
         except Exception as _rb_e:
-            logger.debug(f"[RiskBudget] consume_budget post-gate failed: {_rb_e}")
+            logger.debug(f"[RiskBudget] pending consume cache failed: {_rb_e}")
         return realised_stake
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
@@ -1942,6 +1960,23 @@ class HydraSizer(IStrategy):
             self._last_entry_ts_per_pair[pair] = _tm.time()
         except Exception:
             pass
+
+        # Task 4 patch: commit the cached risk budget for THIS trade.
+        # custom_stake_amount parks the (stake, vol, conf) tuple; we
+        # consume it exactly once here — right when Freqtrade confirms
+        # the order is going to the exchange. A trade that was offered
+        # but never confirmed (different pair, cancelled, or limit
+        # rejected) quietly expires when the next custom_stake_amount
+        # overwrites the cache entry OR when the process restarts.
+        try:
+            pending = getattr(self, "_pending_risk_consume", {}).pop(pair, None)
+            if pending:
+                stake, vol, conf = pending
+                self.risk_budget.consume_budget(stake, vol, conf)
+        except Exception as _rb_commit_e:
+            logger.debug(
+                f"[RiskBudget] confirm consume failed: {_rb_commit_e}"
+            )
 
         # Phase 22: Notify via strategy message
         try:
