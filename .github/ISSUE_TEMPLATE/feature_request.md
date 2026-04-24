@@ -1,26 +1,24 @@
 ---
-name: Feature request
-about: Suggest a new feature or idea for this project
+name: Feature Request
+about: Suggest an enhancement for HydraQuant
 title: ''
-labels: ''
+labels: "enhancement"
 assignees: ''
 
 ---
 
-<!-- 
-Note: this section will not show up in the issue.
-Have you search for this feature before requesting it? It's highly likely that a similar request was already filed.
--->
+## What problem does this solve?
 
-## Describe your environment
-(if applicable)
+<!-- Describe the use case or limitation that motivates this request. -->
 
-  * Operating system: ____
-  * Python Version: _____ (`python -V`)
-  * CCXT version: _____ (`pip freeze | grep ccxt`)
-  * Freqtrade Version: ____ (`freqtrade -V` or `docker compose run --rm freqtrade -V` for Freqtrade running in docker)
+## Proposed solution
 
+<!-- Describe what you would like to see implemented. -->
 
-## Describe the enhancement
+## Alternatives considered
 
-*Explain the enhancement you would like*
+<!-- Have you considered other approaches? -->
+
+## Additional context
+
+<!-- Link to relevant research, docs, or prior art. -->

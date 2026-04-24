@@ -1,423 +1,285 @@
 <p align="center">
-  <img src="docs/assets/hydraquant-banner.png" alt="HydraQuant Banner" width="100%">
+  <img src="docs/assets/hydraquant-banner.png" alt="HydraQuant" width="100%">
 </p>
 
 <h1 align="center">HydraQuant</h1>
 
 <p align="center">
-  <strong>AI-Powered Quantitative Crypto Trading Engine</strong><br>
-  <em>25 RAG Types &middot; 14 Brain Subsystems &middot; 1758 Adaptive Neurons &middot; Living Neural Organism</em>
+  A cognitive trading organism for cryptocurrency markets.
 </p>
 
 <p align="center">
-  <a href="https://github.com/ymcbzrgn/HydraQuant/releases"><img src="https://img.shields.io/badge/Release-v0.1.0--alpha-blue" alt="Release"></a>
-  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/AI_Modules-67-blueviolet" alt="AI Modules">
-  <img src="https://img.shields.io/badge/RAG_Types-25-orange" alt="RAG Types">
-  <img src="https://img.shields.io/badge/Neurons-1758-ff69b4" alt="Neurons">
-  <img src="https://img.shields.io/badge/Brain_Subsystems-14-green" alt="Brain Subsystems">
-  <img src="https://img.shields.io/badge/Tests-185-brightgreen" alt="Tests">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-red" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python">
+  <img src="https://img.shields.io/badge/status-alpha-orange" alt="Status">
 </p>
+
+---
+
+## Overview
+
+HydraQuant trades crypto the way a brain does: by remembering, debating, and learning from every signal it sees. Under the hood it combines a rule-based signal engine, a multi-agent LLM debate, brain-inspired adaptive learning, and Bayesian position sizing into a single closed loop. It is built on top of the [freqtrade](https://github.com/freqtrade/freqtrade) execution framework, which handles exchange integration, candle streaming, and order persistence.
+
+Unlike classical ML trading pipelines that retrain on a schedule and forget between runs, HydraQuant learns continuously. Every closed trade mutates an adaptive parameter organism: learning rates, risk thresholds, exit multipliers, and agent-selection weights all evolve based on outcomes.
+
+The system runs entirely on free-tier LLM providers and free data sources. It is designed for Bybit and Binance testnet first, with a graduated autonomy ladder that scales position sizing only after sustained performance.
+
+## Why HydraQuant
+
+- **LLMs earn their turn.** The rule-based Evidence Engine runs first in ~50 ms at zero API cost; large language models are invoked only when remaining uncertainty justifies them. Most trading decisions never touch an LLM.
+- **The organism never calcifies.** Every closed trade mutates a parameter-neuron substrate via BCM metaplasticity and STDP temporal credit. Parameters that change frequently become resistant to further change; parameters that change just before a trade receive more credit or blame. Learning continues indefinitely without drift.
+- **Modules don't message — they deposit.** A stigmergic pheromone field replaces locks and queues with leaky-integrate dynamics. Subsystems deposit signals; readers see a continuously decaying summary. No RLock, no cascading waits, no race conditions.
+- **Confidence sizes; it never blocks.** A 0.40 signal becomes a shadow trade the calibrator studies forever. A 0.75 signal becomes a standard position. A 0.95 signal in a favorable regime, with the organism's cortisol low and the immune system quiet, becomes a larger one. The default is TRADE.
+- **Forgotten decisions are tracked.** A forgone-alpha ledger records every skipped signal and what it would have earned. When caution costs alpha over a sustained window, the per-pair confidence thresholds auto-loosen. The system studies its own hesitation.
+- **No single point of failure.** Seven LLM providers behind a Thompson + LinUCB bandit router with circuit breaker. Three macro-data cascades. Four memory substrates each addressing a distinct access pattern. Five independent risk guardrails. Cut any head — the rest keep thinking.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Lines_of_AI_Code-28%2C000%2B-yellow" alt="Lines">
-  <img src="https://img.shields.io/badge/API_Endpoints-27-blue" alt="API">
-  <img src="https://img.shields.io/badge/Data_Sources-8-teal" alt="Data Sources">
-  <img src="https://img.shields.io/badge/Scheduled_Jobs-33-purple" alt="Jobs">
-  <img src="https://img.shields.io/badge/SQLite_Tables-49-darkblue" alt="Tables">
-  <img src="https://img.shields.io/badge/Telegram-Bot_Control-2CA5E0?logo=telegram" alt="Telegram">
+  <img src="docs/assets/arch-layers.png" alt="HydraQuant Architecture" width="90%">
 </p>
 
----
+## Architecture
 
-> *"Cut one head, two more shall take its place."*
->
-> Like the mythological Hydra, this system has no single point of failure. Kill an LLM provider, two fallbacks activate. Lose a data feed, three alternatives take over. Every component is redundant, self-healing, and self-learning.
+HydraQuant is organized in six layers:
 
----
+- **Presentation** — a Vue 3 web dashboard (FreqUI extended with HydraQuant views and widgets) and an outbound Telegram notifier.
+- **API** — a FastAPI read surface on port 8890 exposing system state (signals, risk, organism, cost, evidence) through documented GET endpoints.
+- **Orchestration** — an in-process APScheduler driving periodic jobs: training, evolution, causal discovery, sleep consolidation, cost summaries.
+- **Cognition** — the Evidence Engine, MADAM multi-agent debate, AgentPool, LLM Router, Neural Organism, and pheromone field.
+- **Decision** — Bayesian Kelly sizing, Constitution enforcement, risk budget, graduated autonomy, Chandelier exits.
+- **Execution** — delegated to freqtrade: CCXT-based exchange integration, candle streaming, order lifecycle, persistence.
 
-## What is HydraQuant?
-
-HydraQuant is an **AI-augmented quantitative trading engine** for cryptocurrency markets. At its core is a **Neural Organism** — a brain-inspired self-learning system with 1758 adaptive neurons, 14 brain subsystems, hormonal modulation, and BCM metaplasticity. It combines a massive RAG (Retrieval-Augmented Generation) system with an LLM-free Evidence Engine, multi-agent debate, and self-learning position sizing to generate, validate, and execute trading signals autonomously.
-
-Built on top of [Freqtrade](https://github.com/freqtrade/freqtrade) (open-source crypto trading bot), HydraQuant extends it with **28,000+ lines of AI code**, transforming a rule-based bot into a **living cognitive architecture** that perceives, imagines, reasons, decides, learns, and knows what it doesn't know.
+## How It Works
 
 <p align="center">
-  <img src="docs/assets/hydraquant-architecture.png" alt="HydraQuant Architecture" width="85%">
+  <img src="docs/assets/signal-pipeline.png" alt="Signal Pipeline" width="90%">
 </p>
 
-### Philosophy
+A trading decision flows through the following stages:
 
-| Principle | Description |
-|-----------|-------------|
-| **Evidence-First** | The LLM-free Evidence Engine runs first. LLMs enhance, never dictate. |
-| **Trade-First** | Default = TRADE, not BLOCK. Confidence modulates size, never permission. |
-| **Self-Learning** | Bayesian Kelly sizing auto-shrinks after losses, auto-grows after wins. |
-| **No Single Point of Failure** | 3-layer LLM failover, 3-layer macro data failover, graceful degradation at every level. |
-| **Forgone P&L Tracking** | Tracks what you *didn't* trade. If guardrails destroy more value than they protect, they auto-loosen. |
+1. **Candle arrival.** Freqtrade invokes the strategy's `populate_entry_trend` callback.
+2. **Triple Perception.** Three complementary forecasters run in parallel: Tiny Time Mixer embeddings, Chronos-Bolt probabilistic quantiles, and a CatBoost classifier trained on engineered chart features. Their outputs are fused into a direction estimate, a magnitude estimate, and an uncertainty-aware sizing multiplier.
+3. **Evidence Engine.** A rule-based signal generator scores the trade across six independent sub-questions — trend, momentum, crowd positioning, historical evidence, macro, risk — using data from Bybit's public API, DeFi Llama, CoinGecko, Yahoo Finance, FRED, RSS feeds, Google Trends, and cryptocurrency.cv. Weights adapt to the current market regime. The engine completes in under 50ms with no LLM cost.
+4. **Confidence gate.** If Evidence Engine confidence exceeds an organism-adaptive threshold, the signal ships immediately and a background MADAM debate populates the semantic cache for the next cycle. Otherwise the slow path is taken.
+5. **MADAM debate.** Four to seven specialist agents are selected from a registry of twelve based on the current regime. They run a three-round debate: parallel analysis, conditional cross-examination (skipped when round-one consensus is high enough), and meta-synthesis.
+6. **Position sizing.** A nine-stage pipeline applies Bayesian Kelly per pair per regime, Peters volatility drag, Baker-McHale small-sample shrinkage, trade-graduation scaling, effective-number-of-bets diversification, and blended multipliers from CAAT, DualAxis, cerebellum timing, and lifecycle.
+7. **Risk guards.** Constitution (hard caps), VaR budget, pair-specific immune memory, equal-risk cap, and minimum-stake guard cascade before the order reaches the exchange.
+8. **Organism update.** On trade close, a sixteen-step cycle updates the Neural Organism: BCM metaplasticity, STDP temporal credit, amygdala fear learning, hippocampal memory write, prediction-error learning-rate boost, pheromone deposits, immune memory, prefrontal executive veto.
 
----
-
-## Architecture Overview
-
-```
-                    +-------------------------+
-                    |    REST API (27 eps)    |
-                    |    Telegram Bot Control  |
-                    +------------+------------+
-                                 |
-              +------------------+------------------+
-              |                                     |
-    +---------+---------+              +------------+------------+
-    |  Evidence Engine   |              |    RAG Pipeline (18)    |
-    |  (LLM-FREE)        |              |    + MADAM Debate       |
-    |  6 sub-scores       |              |    + 10 Agent Pool      |
-    |  Dynamic-k sigmoid  |              |    + Cross-Pair Intel   |
-    +---------+---------+              +------------+------------+
-              |                                     |
-              +------------------+------------------+
-                                 |
-                    +------------+------------+
-                    |   Decision Synthesis    |
-                    |   Confidence Calibrator |
-                    |   Contradiction Detect  |
-                    +------------+------------+
-                                 |
-              +------------------+------------------+
-              |                                     |
-    +---------+---------+              +------------+------------+
-    |  Position Sizing   |              |   Risk Management       |
-    |  BayesianKelly     |              |   Dynamic VaR Budget    |
-    |  ATR-based SL      |              |   Graduated Autonomy    |
-    +---------+---------+              +------------+------------+
-              |                                     |
-              +------------------+------------------+
-                                 |
-                    +------------+------------+
-                    |      Exchange API       |
-                    |   Bybit / Binance /...  |
-                    +-------------------------+
-```
-
----
-
-## The Hydra's Heads
-
-### Head 1: Evidence Engine (LLM-Free)
-
-The core signal generator. **Zero API cost, ~50ms latency.** Decomposes every trading decision into 6 independent sub-questions:
-
-| Sub-Score | Weight | What it Measures |
-|-----------|--------|-----------------|
-| **Trend** | 0.22 | EMA cascade alignment + ADX strength |
-| **Momentum** | 0.20 | RSI >50 momentum zone (2.8x alpha vs oversold) |
-| **Crowd** | 0.22 | F&G extremes + funding rate + L/S ratio (contrarian) |
-| **Evidence** | 0.15 | k-NN historical matching + backtest pattern stats |
-| **Macro** | 0.10 | DXY, VIX, S&P500, Gold (low crypto correlation) |
-| **Risk** | 0.11 | ATR volatility + volume confirmation |
-
-**Adaptive Synthesis:** Blind sub-scores (no data) are automatically excluded and their weights redistributed. Dynamic-k sigmoid adjusts confidence sharpness based on factor alignment — disagreement makes the engine *cautious*, not *blind*.
-
-### Head 2: RAG Pipeline (25 Types)
-
-The largest RAG implementation in any open-source trading system:
+## Evidence Engine
 
 <p align="center">
-  <img src="docs/assets/hydraquant-rag-types.png" alt="25 RAG Types" width="85%">
+  <img src="docs/assets/data-ingestion.png" alt="Data Ingestion" width="85%">
 </p>
 
-| Category | RAG Types |
-|----------|-----------|
-| **Core Retrieval** | Hybrid (Dense+BM25+ColBERT+RRF), Semantic Cache, Binary Quantization |
-| **Quality Control** | CRAG (Corrective), Self-RAG (Reflective), FLARE (Forward-Looking), RAGAS Feedback Loop |
-| **Reasoning** | CoT-RAG (Chain-of-Thought), Speculative RAG, HyDE, RAG-Fusion |
-| **Memory** | MemoRAG (Global), StreamingRAG (Hot/Cold), Bidirectional (Lessons), MAGMA (Graph) |
-| **Structure** | RAPTOR (Hierarchical), GAM-RAG (Graph-Augmented), GraphRAG (Community), Adaptive Router |
-| **Context** | Contextual Retrieval (Anthropic-style), Regime-Aware Filter, Event-Driven Temporal |
-| **Self-Improving** | Outcome-Based Chunk Scoring (PnL→quality), Agentic RAG (agent-driven retrieval) |
-| **Reranking** | ColBERT v2 (Token-level), FlashRank (Lightweight) |
+The Evidence Engine is the core signal generator. It is rule-based and LLM-free, which makes it fast and deterministic.
 
-### Head 3: Agent Pool (10 Specialists)
+It decomposes every trading decision into six sub-questions:
 
-Inspired by MiroFish's $30M autonomous trading system. Each agent has a personality, memory, and track record:
+- **Trend** — is price aligned with medium-term EMA cascade and supported by ADX strength?
+- **Momentum** — is there persistent follow-through, measured through RSI position and MACD agreement?
+- **Crowd positioning** — where is the crowd, via Fear & Greed, funding rate, and long/short ratio? Interpreted contrarian.
+- **Historical evidence** — do nearest neighbors in the pattern database and backtest statistics support the direction?
+- **Macro** — what are DXY, VIX, Treasury yields, and BTC dominance doing?
+- **Risk** — is volatility (ATR) and volume supporting a reliable trade?
 
-| Agent | Role | Best Regime |
-|-------|------|-------------|
-| TrendFollower | EMA + ADX momentum signals | Trending markets |
-| MeanReverter | RSI extreme + BB contrarian | Ranging markets |
-| MomentumRider | Accelerating moves + volume | Bull runs |
-| FundingContrarian | Fade extreme funding rates | High volatility |
-| RiskMinimizer | Capital preservation, drawdown limits | Uncertain markets |
-| DevilsAdvocate | Challenge the majority (always active) | All regimes |
-| EvidenceValidator | Fact-check agent claims against data | All regimes |
-| MacroCorrelator | DXY-BTC, S&P500, Treasury cross-asset | All regimes |
-| TemporalAnalyst | Day/hour seasonality, FOMC/CPI events | Transitions |
-| ReflectionAgent | Meta-analysis of agent past performance | All regimes |
+Each sub-question is scored independently, weights are regime-adaptive, and disagreement between sub-scores makes the final synthesis cautious rather than neutral. Sub-questions with missing data abstain explicitly; their weight is redistributed across the remaining sub-questions rather than defaulting to a neutral value that would pollute downstream statistics.
 
-**Debate Protocol:** 5 agents selected per signal (2 permanent + 3 regime-based). 3-round debate: Position, Cross-Examination, Meta-Analysis.
+## MADAM Debate
 
-### Head 4: Self-Learning Risk Engine
+<p align="center">
+  <img src="docs/assets/madam-debate.png" alt="MADAM Debate" width="85%">
+</p>
 
-| Component | What it Does |
-|-----------|-------------|
-| **Bayesian Kelly** | Self-learning position sizing. Losses auto-shrink bets, wins auto-grow. |
-| **Dynamic VaR** | Millennium/Citadel pod-model risk budgeting. Daily reset, per-trade limits. |
-| **Graduated Autonomy** | 6 levels (L0 Backtest → L5 Full Auto). Trust earned via Beta distribution. |
-| **Forgone P&L** | Tracks shadow trades (signals not executed). Proves if thresholds are too tight. |
-| **Confidence Calibrator** | Platt scaling: "When AI says 80% confident, is it *really* 80%?" |
+When Evidence Engine confidence is insufficient, HydraQuant convenes a multi-agent debate.
 
-### Head 5: Neural Organism (Brain-Inspired Self-Learning)
+Twelve specialist agents are registered: `TrendFollower`, `MeanReverter`, `MomentumRider`, `FundingContrarian`, `RiskMinimizer`, `DevilsAdvocate`, `EvidenceValidator`, `MacroCorrelator`, `TemporalAnalyst`, `ExploiterAgent`, `DefenderAgent`, `ReflectionAgent`. Four to seven are selected per debate based on the current market regime (trending bull, trending bear, ranging, high-volatility, transitional).
 
-The beating heart of HydraQuant. A **living cognitive system** inspired by the human brain — every parameter adapts, every subsystem learns, every decision is modulated by the organism's internal state.
+The debate runs in three rounds:
 
-```
-                    ┌───────────┐  ┌───────────┐  ┌───────────┐
-                    │ Hormones  │  │ Amygdala  │  │Cerebellum │
-                    │ (stress,  │  │ (fear     │  │ (timing   │
-                    │  reward)  │  │  response)│  │  learning)│
-                    └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
-                          │              │              │
-                          ▼              ▼              ▼
-                    ╔═══════════════════════════════════════╗
-                    ║     GLOBAL WORKSPACE (Shared State)   ║
-                    ║   1758 neurons × 50 organ groups      ║
-                    ╚═══════════════════════════════════════╝
-                          ▲              ▲              ▲
-                          │              │              │
-                    ┌─────┴─────┐  ┌─────┴─────┐  ┌─────┴─────┐
-                    │  Mirror   │  │ Adaptive  │  │Predictive │
-                    │ Neurons   │  │ Immunity  │  │  Model    │
-                    │ (crowd)   │  │ (threats) │  │ (predict) │
-                    └───────────┘  └───────────┘  └───────────┘
-```
+- **Round 1** — parallel analysis. Each agent forms an independent position with a 12-second wall-clock budget.
+- **Round 2** — cross-examination, skipped when Round 1 consensus is already high enough to save LLM cost.
+- **Round 3** — meta-synthesis by a coordinator that considers argument quality, agent track record, and consistency with the Evidence Engine output.
 
-| Subsystem | Biological Analog | What it Does |
-|-----------|------------------|-------------|
-| **Hormones** | Endocrine system | 4 hormones (cortisol, dopamine, serotonin, adrenaline) modulate ALL parameters globally. F&G=9 → cortisol rises → sizing auto-shrinks. |
-| **Amygdala** | Fear center | Graduated fear: -2%=normal, -5%=stress, -10%=fear, -15%=PANIC. Panic → freeze all non-essential params. |
-| **Hippocampus** | Memory | Stores situation fingerprints. "Last time conditions looked like THIS, we lost 8%." |
-| **Synapses** | Neural connections | 12 causal chains link parameters. F&G→crowd→synthesis→sizing→leverage. |
-| **BCM Plasticity** | Metaplasticity | Neurons that update frequently become MORE RESISTANT to change. Prevents overfitting. |
-| **STDP** | Temporal credit | Parameters changed JUST BEFORE a trade get more credit/blame. |
-| **Cerebellum** | Timing center | 24-slot hour-of-day model. Learns which hours are profitable. |
-| **Mirror Neurons** | Social cognition | Models crowd behavior from funding rate, L/S ratio, open interest. |
-| **Adaptive Immunity** | B-cells / T-cells | Remembers specific threat PATTERNS. Known threat → auto-reduce sizing. |
-| **Interoception** | Internal body sense | 8 sensors: param drift, belief width, prediction error, hormone stability, win rate, data completeness... |
-| **Allostasis** | Anticipation | Detects TRENDS in F&G/drawdown. Pre-adjusts cortisol BEFORE the crash. |
-| **Proprioception** | Self-awareness | Knows own phase: learning, maturing, mature, overconfident. |
-| **Prefrontal Cortex** | Executive control | Hard rules that NEVER learn: leverage cap, ATR×leverage limit, adrenaline freeze. |
-| **Sleep/Dreams** | Memory consolidation | Weekly: replay trades, prune weak synapses, counterfactual analysis. |
+Every debate is persisted: agent arguments go to the `agent_memory` table, quality scores go to `argument_quality`, and the full causal structure is written to the Grafeo graph. The argument-quality scores feed back into agent selection via a RLAIF loop.
 
-**16-step update cycle** runs on every trade close — perception, prediction, hormones, fear, memory, learning, synapse firing, timing, habit formation, immunity, executive veto, organ rebalancing, persistence, evolution logging.
+## Neural Organism
 
-> **Vision:** Phase 26 ([CAAT Manifesto](docs/PHASE26_ML_ORGANISM_EVOLUTION.md)) evolves this into a full ML cognitive architecture — Temporal Transformer perception, JEPA world model, causal inference, hierarchical RL, meta-learning, and uncertainty quantification. 1918 lines of research vision, unified under Free Energy Principle.
+<p align="center">
+  <img src="docs/assets/neural-organism.png" alt="Neural Organism" width="85%">
+</p>
 
-### Head 6: Data Pipeline (8 Sources, $0/month)
+Parameters that would be hardcoded constants in a traditional system — learning rates, risk thresholds, exit multipliers, weight coefficients — are represented in HydraQuant as neurons. Each neuron holds a Beta posterior, is sampled via Thompson draw when its value is needed, and is updated via BCM metaplasticity and STDP temporal credit when outcomes arrive.
 
-| Source | Data | Cost |
-|--------|------|------|
-| Bybit Public API | Open Interest, Funding Rate, L/S Ratio | Free |
-| DeFi Llama | TVL, Stablecoin Supply | Free |
-| CoinGecko | BTC Dominance, Total Market Cap | Free |
-| Yahoo Finance (HTTP) | DXY, VIX, S&P500, Gold, NASDAQ | Free |
-| FRED (Federal Reserve) | DXY, Treasury Yields, VIX (fallback) | Free (key) |
-| RSS (15 feeds) | CoinDesk, CoinTelegraph, Decrypt, The Block... | Free |
-| Google Trends | "buy bitcoin", "crypto crash" search interest | Free |
-| CryptoCurrency.cv | 200+ sources, built-in sentiment, SSE stream | Free |
+Around these neurons the organism has seventeen biologically-inspired subsystems:
 
-**3-layer macro fallback:** yfinance → Yahoo HTTP → FRED. If all 3 fail, Evidence Engine gracefully degrades.
+- **Hormones** — cortisol, dopamine, serotonin, adrenaline — modulate the whole system. Cortisol decays with a 24-hour half-life from its peak, so yesterday's drawdown still affects today's risk appetite.
+- **Amygdala** — graduated fear response with four tiers and explicit decay.
+- **Hippocampus** — stores situation fingerprints and their outcomes; provides recall for the prefrontal cortex.
+- **Prefrontal Cortex** — executive veto with five hard rules that do not learn (leverage cap, equity-loss bound, confidence cap on low information quality, adrenaline freeze, hippocampal warning).
+- **Basal Ganglia** — habit consolidation. Neurons that have updated frequently and converged become resistant to change.
+- **Cerebellum** — 24-slot hour-of-day timing model.
+- **Mirror Neurons** — crowd behavior inference from funding, long/short ratio, and open interest.
+- **Adaptive Immunity** — B-cell-style per-pattern memory. Known threat patterns auto-reduce sizing.
+- **Predictive Model** — free-energy-principle prediction error boosts learning rate on surprise.
+- **Interoception** — eight internal sensors (drift, belief width, hormone stability, data completeness, etc.) producing an organism health score.
+- **Default Mode Network** — idle counterfactual analysis on worst recent episodes.
+- **Sleep Consolidation** — weekly synapse decay and stale habit breaking.
+- **Neuroevolution** — tournament selection over archived genomes, blending toward the best when performance degrades.
+- **Proprioception** — lifecycle-phase awareness (learning / maturing / mature / overconfident) that modulates learning rate.
 
----
+Coordination between modules is **stigmergic**. Instead of passing messages through locks, modules deposit signals into a shared pheromone field with leaky-integrate dynamics. Every reader sees a continuously decaying summary of recent activity, and no one blocks anyone.
 
-## By the Numbers
+## LLM Router
 
-| Metric | Value |
-|--------|-------|
-| AI Python modules | **67** |
-| Lines of AI code | **28,000+** |
-| RAG types implemented | **25** (self-improving) |
-| **Adaptive neurons** | **1,758** (293 params × 6 regimes) |
-| **Brain subsystems** | **14** (hormones, amygdala, hippocampus, synapses, prefrontal cortex, basal ganglia, proprioception, immune memory, cerebellum, predictive model, interoception, mirror neurons, adaptive immunity, neuroevolution) |
-| Autonomous agents | **10** |
-| Evidence Engine sub-scores | **6** (all adaptive via Neural Organism) |
-| IStrategy callbacks | **19** |
-| Scheduled jobs | **33** (27 + 6 organism jobs) |
-| API endpoints | **27** |
-| SQLite tables | **49** (36 + 13 organism tables) |
-| Tests | **185** |
-| Data sources | **8** (all free) |
-| LLM providers (failover) | **6** (Gemini → Groq → OpenRouter → Cerebras → SambaNova → Mistral) |
-| Web UI (FreqUI) | **Vue 3 + PrimeVue** |
-| AI/ML dependencies | **28** |
+<p align="center">
+  <img src="docs/assets/llm-router.png" alt="LLM Router" width="85%">
+</p>
 
----
+HydraQuant runs entirely on free-tier LLM providers. Seven providers are supported — **Gemini**, **Groq**, **Cerebras**, **DeepSeek**, **SambaNova**, **Mistral**, and **OpenRouter** — with model slot expansion over multiple API keys.
 
-## Quick Start
+The router uses Thompson sampling for exploration (a Beta posterior over success rate per slot) and a LinUCB contextual bandit for exploitation once a slot has accumulated enough samples. The context vector captures task type, prompt length, JSON requirement, market regime, and hour of day.
 
-### Prerequisites
+A circuit breaker on the Gemini path prevents cascade failures: ten failures within a sixty-second window opens the breaker for thirty seconds, and three consecutive successes close it again.
 
-- Python 3.11+
-- 4GB+ RAM (8GB recommended for model server)
-- API keys: Gemini (primary), Groq (optional), OpenRouter (optional)
+When a trade closes, the router walks back through every LLM call that fired during the trade's lifetime and applies a small retroactive reward to each contributing slot's LinUCB posterior. This closes the loop between LLM quality and realized PnL.
 
-### Installation
+## Risk Engine
+
+Position sizing uses a **nine-stage pipeline**: Beta posterior, Peters volatility drag, volatility-of-volatility shrinkage, Baker-McHale small-sample correction, trade-graduation scaling, effective-number-of-bets diversification, blended multiplier from CAAT / DualAxis / cerebellum / lifecycle, Constitution clamp, equal-risk cap, minimum-stake guard.
+
+Graduated autonomy runs from L0 (nano-live trading at 3% Kelly fraction) up to L5 (75% Kelly fraction). Promotion requires sustained trade count, Sharpe ratio, maximum drawdown bound, and minimum time at each level.
+
+A **shadow Kelly ledger** runs in parallel with the real ledger. Every decision that was considered but not executed — through confidence shortfall, minimum-stake guard, or Constitution block — is recorded. The shadow ledger calibrates thresholds (the **Forgone Alpha Harvester** auto-loosens per-pair thresholds when the foregone PnL is consistently positive) without contaminating live sizing.
+
+Exits are **confidence-adaptive Chandelier** ATR trailing stops. High-confidence signals use tighter multipliers, low-confidence signals use wider ones. Hurst exponent scales the multiplier further in strongly trending markets. The Constitution enforces hard stops on drawdown, leverage, position concentration, and consecutive-loss streaks.
+
+## Installation
 
 ```bash
-# Clone
 git clone https://github.com/ymcbzrgn/HydraQuant.git hydraquant
 cd hydraquant
 
-# Setup
-python -m venv .venv && source .venv/bin/activate
-pip install -e . && pip install -r requirements-ai.txt
+python -m venv .venv
+source .venv/bin/activate
 
-# Download embedding models (BGE + ColBERT + FlashRank)
+pip install -e .
+pip install -r requirements/requirements-phase27.txt
+
 python user_data/scripts/download_models.py
-
-# Configure
-cp config_examples/config_bybit_testnet_futures.json config.json
-# Edit config.json with your exchange API keys
-
-# Environment
-cat > .env << EOF
-GEMINI_API_KEY=your_key_here
-GROQ_API_KEY=your_key_here        # optional
-OPENROUTER_API_KEY=your_key_here  # optional
-EOF
-
-# Bootstrap data (patterns, embeddings, MAGMA graph)
-PYTHONPATH=user_data/scripts python user_data/scripts/bootstrap_data.py --all
 ```
 
-### Running
+## Configuration
+
+Copy an example config and edit with your exchange and LLM API keys:
 
 ```bash
-# Start all 4 services
-python user_data/scripts/model_server.py &     # Port 8895: BGE + ColBERT + FlashRank
-python user_data/scripts/scheduler.py &         # 22 background jobs
-python user_data/scripts/api_ai.py &            # Port 8891: AI REST API
-freqtrade trade --strategy AIFreqtradeSizer --config config.json
+cp config_bybit_testnet_futures.json config.json
+# Edit config.json with your API keys and pair whitelist
 ```
 
-### Docker
+Environment variables live in `.env`:
+
+```
+GEMINI_API_KEY_1=...
+GROQ_API_KEY=...
+CEREBRAS_API_KEY=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+BYBIT_API_KEY=...
+BYBIT_SECRET=...
+```
+
+## Running
+
+HydraQuant runs as five processes:
 
 ```bash
-docker build -f docker/Dockerfile.ai -t hydraquant .
-docker-compose up -d
+python user_data/scripts/model_server.py &      # embedding and reranker models
+python user_data/scripts/rag_graph.py &         # RAG orchestrator and MADAM
+python user_data/scripts/api_ai.py &            # FastAPI read surface
+python user_data/scripts/scheduler.py &         # periodic jobs
+
+freqtrade trade --strategy HydraSizer --config config.json
 ```
 
----
+Or using Docker Compose:
 
-## Signal Flow
-
-```
-Market Data (1h candles)
-    |
-    v
-+-------------------+     +-------------------+
-| Evidence Engine    |     | RAG Pipeline      |
-| (LLM-free, 50ms)  |     | (18 RAG types)    |
-| 6 sub-scores       |     | + MADAM Debate    |
-+--------+----------+     +--------+----------+
-         |                          |
-         v                          v
-    +---------+              +-----------+
-    | BULLISH |              |  BULLISH  |
-    | conf=0.68|              |  conf=0.72|
-    +---------+              +-----------+
-         |                          |
-         +------------+-------------+
-                      |
-                      v
-            +-------------------+
-            | Agent Pool Vote   |
-            | (5 agents, 3 rnd) |
-            +--------+----------+
-                     |
-                     v
-            +-------------------+
-            | Cross-Pair Intel  |
-            | (BTC lead, crowd) |
-            +--------+----------+
-                     |
-                     v
-            +-------------------+
-            | Confidence Calib  |
-            | Platt scaling     |
-            +--------+----------+
-                     |
-                     v
-        +-----------+-----------+
-        |                       |
-   conf >= 0.40            conf < 0.40
-        |                       |
-   REAL TRADE              SHADOW TRADE
-   BayesianKelly           (paper only,
-   position size            for learning)
-        |
-        v
-   +-------------------+
-   | Neural Organism    |
-   | Hormone modulation |
-   | Cortisol × sizing  |
-   | Cerebellum × hour  |
-   | Immunity check     |
-   +--------+----------+
-            |
-            v
-   +----------+
-   | Exchange  |
-   | Bybit API |
-   +----------+
-            |
-            v (trade closes)
-   +-------------------+
-   | 16-Step Update    |
-   | BCM + STDP learn  |
-   | Amygdala fear     |
-   | Hippocampus store |
-   | Pair ban check    |
-   +-------------------+
+```bash
+docker compose -f docker/docker-compose.ai.yml up -d
 ```
 
----
+On a systemd-managed host, install the provided unit:
 
-## Disclaimer
+```bash
+sudo cp docker/hydraquant.service.watchdog /etc/systemd/system/hydraquant.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hydraquant
+```
 
-This software is for **educational and research purposes only**. Cryptocurrency trading carries significant risk. Do not trade with money you cannot afford to lose. The authors assume no responsibility for trading losses.
+## Project Structure
 
-**Always start with testnet.** This system is designed for Bybit/Binance testnet first, with graduated autonomy (L0→L5) before any real capital deployment.
+```
+user_data/scripts/       HydraQuant AI modules (Evidence Engine, MADAM, Organism, ...)
+user_data/strategies/    HydraSizer strategy — the bridge to freqtrade
+user_data/db/            SQLite (ai_data), LanceDB vector store, Grafeo graph store
+tests/                   Test suite
+docs/                    Architecture, design, and phase documents
+frequi/                  Vue 3 web dashboard (FreqUI fork with HydraQuant views)
+docker/                  Dockerfile.ai, docker-compose.ai.yml, systemd units
+freqtrade/               Vendored freqtrade execution framework (GPL v3)
+```
 
----
+## Documentation
 
-## Attribution
+| Document | Scope |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | Full technical architecture and signal flow |
+| [Neural Organism](docs/NEURAL_ORGANISM.md) | Brain subsystems, BCM, STDP, hormones |
+| [Evidence Engine](docs/EVIDENCE_ENGINE.md) | Six sub-questions, regime weights, synthesis |
+| [LLM Routing](docs/LLM_ROUTING.md) | Thompson sampling, LinUCB, circuit breaker |
+| [Features](docs/FEATURES.md) | Full feature catalog with status markers |
+| [Deployment](docs/DEPLOYMENT.md) | Production setup, systemd, health dashboard |
+| [Roadmap](docs/ROADMAP.md) | Phase 29 current sprint and forward plan |
+| [Changelog](docs/CHANGELOG.md) | Phase-by-phase release history |
 
-HydraQuant is built on top of [Freqtrade](https://github.com/freqtrade/freqtrade), an open-source crypto trading bot licensed under GPL v3. We gratefully acknowledge the Freqtrade team's foundational work.
+## Testing
 
-**Modifications from original Freqtrade:**
-- Added 67 AI modules (28,000+ lines) for RAG, Evidence Engine, Agent Pool, Neural Organism, and autonomous trading
-- **Neural Organism**: Brain-inspired self-learning system with 1758 neurons, 14 subsystems, hormonal modulation, BCM metaplasticity, STDP temporal credit, and adaptive immunity
-- Extended IStrategy with 19 AI-powered callbacks + organism feedback loop
-- Added 4 microservices (model server, scheduler, AI API, RAG pipeline) + 6 organism scheduler jobs
-- 49 SQLite tables (36 core + 13 organism tables)
-- Thompson Sampling LLM Router with 79 model slots across 6 providers
-- FreqUI web dashboard with AI-specific components
-- Telegram bot integration for daily/weekly AI summaries and trade alerts
-- All original Freqtrade functionality is preserved and fully operational
+```bash
+PYTHONPATH=user_data/scripts python -m pytest tests/test_ai_scripts.py -v
+```
+
+A dedicated health-check script verifies system state after deploys:
+
+```bash
+python user_data/scripts/deploy_health_check.py
+```
+
+## Where We Are
+
+HydraQuant is in **testnet alpha**, actively shipping Phase 29: _Sensory Expansion & Self-Falsification_. The current PnL on live testnet is not yet positive — which is the reason Phase 29 exists. The fixes under way:
+
+- Backtest framework revival — so every change can be measured instead of hoped.
+- Funding-rate and open-interest divergence as a seventh Evidence Engine sub-score.
+- Regime-aware dynamic Chandelier exits to repair payoff-ratio asymmetry.
+- Conditional drawdown-at-risk circuit breaker to stop death-by-thousand-cuts.
+- MADAM sampling + voting to correct the martingale bias of naïve debate averaging.
+
+The graduated autonomy ladder (L0 → L5) is designed for exactly this stage. L0 trades at a 3% Kelly fraction while the organism learns its priors. Each promotion is gated on sustained Sharpe, maximum-drawdown bounds, and minimum time at level. No shortcut exists.
+
+This is a research platform with live trading loops — not a finished product. Everything is open source, every phase is documented, every metric is honest. The public roadmap lives in [docs/ROADMAP.md](docs/ROADMAP.md); what has shipped lives in [docs/CHANGELOG.md](docs/CHANGELOG.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing requirements, and code style.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE) — the same license as Freqtrade.
+HydraQuant is licensed under the GNU General Public License v3.0. This matches the license of the underlying freqtrade execution framework.
 
-You are free to use, modify, and distribute this software under the terms of GPL v3. Modified versions must be marked as changed and distributed under the same license.
+## Acknowledgments
 
----
+HydraQuant delegates exchange integration, order management, and candle streaming to [freqtrade](https://github.com/freqtrade/freqtrade) (GPL v3). Everything above that layer — the cognitive pipeline, the organism, the routing, the sizing, the risk engine — is HydraQuant's own work.
 
 <p align="center">
-  <img src="docs/assets/hydraquant-logo.png" alt="HydraQuant Logo" width="120">
-  <br>
-  <strong>HydraQuant</strong> &mdash; Cut one head, two more shall take its place.
-  <br>
-  <sub>Built with Freqtrade | Powered by Evidence | Alive with Neural Organism</sub>
+  <img src="docs/assets/hydraquant-logo.png" alt="HydraQuant" width="120">
 </p>

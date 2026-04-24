@@ -1619,4 +1619,4 @@ Bu altyapı ZATEN VAR:
 - `constitution.py` — unbreakable safety limits
 
 Gerçek paraya geçişte tek yapılacak: confidence threshold'u yükseltmek ve shadow tier'ı aktif etmek.
-Kod değişikliği minimal — `AIFreqtradeSizer.custom_stake_amount()`'da confidence < 0.50 → return 0 (shadow log).
+Kod değişikliği minimal — `HydraSizer.custom_stake_amount()`'da confidence < 0.50 → return 0 (shadow log).

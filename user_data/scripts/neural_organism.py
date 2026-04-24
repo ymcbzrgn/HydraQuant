@@ -202,7 +202,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "risk.weekly_win_mult":         {"organ": "risk", "default": 1.1,  "min": 1.0,  "max": 1.3},
     "risk.weekly_loss_mult":        {"organ": "risk", "default": 0.8,  "min": 0.5,  "max": 0.95},
 
-    # ─── ORGAN: strategy_stoploss (8 params) — AIFreqtradeSizer.py:862-917 ───
+    # ─── ORGAN: strategy_stoploss (8 params) — HydraSizer.py:862-917 ───
     "strategy.stoploss_floor":        {"organ": "strategy_stoploss", "default": -0.15, "min": -0.30, "max": -0.05},
     "strategy.chandelier_high_conf":  {"organ": "strategy_stoploss", "default": 0.80, "min": 0.65, "max": 0.90},
     "strategy.chandelier_med_conf":   {"organ": "strategy_stoploss", "default": 0.60, "min": 0.45, "max": 0.75},
@@ -212,7 +212,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.breakeven_long":        {"organ": "strategy_stoploss", "default": 0.998, "min": 0.990, "max": 1.000},
     "strategy.breakeven_short":       {"organ": "strategy_stoploss", "default": 1.002, "min": 1.000, "max": 1.010},
 
-    # ─── ORGAN: strategy_leverage (8 params) — AIFreqtradeSizer.py:1396-1438 ───
+    # ─── ORGAN: strategy_leverage (8 params) — HydraSizer.py:1396-1438 ───
     "strategy.leverage_max":          {"organ": "strategy_leverage", "default": 3.0, "min": 1.0, "max": 5.0},
     "strategy.leverage_ranging_max":  {"organ": "strategy_leverage", "default": 2.0, "min": 1.0, "max": 3.0},
     "strategy.leverage_bear_max":     {"organ": "strategy_leverage", "default": 1.5, "min": 1.0, "max": 2.5},
@@ -222,7 +222,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.leverage_mult_high":    {"organ": "strategy_leverage", "default": 1.0, "min": 0.7, "max": 1.0},
     "strategy.leverage_mult_low":     {"organ": "strategy_leverage", "default": 0.5, "min": 0.3, "max": 0.8},
 
-    # ─── ORGAN: strategy_exit (8 params) — AIFreqtradeSizer.py:1449-1498 ───
+    # ─── ORGAN: strategy_exit (8 params) — HydraSizer.py:1449-1498 ───
     "strategy.stale_trade_hours":     {"organ": "strategy_exit", "default": 8,    "min": 4,    "max": 24},
     "strategy.stale_flat_pct":        {"organ": "strategy_exit", "default": 0.005, "min": 0.001, "max": 0.02},
     "strategy.flip_exit_conf":        {"organ": "strategy_exit", "default": 0.55, "min": 0.40, "max": 0.70},
@@ -232,14 +232,14 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.first_hour_min":        {"organ": "strategy_exit", "default": -0.03, "min": -0.07, "max": -0.01},
     "strategy.max_equity_loss":       {"organ": "strategy_exit", "default": 0.15, "min": 0.05, "max": 0.25},
 
-    # ─── ORGAN: strategy_roi (5 params) — AIFreqtradeSizer.py:44-49 ───
+    # ─── ORGAN: strategy_roi (5 params) — HydraSizer.py:44-49 ───
     "strategy.roi_0":    {"organ": "strategy_roi", "default": 0.15,  "min": 0.08,  "max": 0.30},
     "strategy.roi_60":   {"organ": "strategy_roi", "default": 0.05,  "min": 0.02,  "max": 0.10},
     "strategy.roi_120":  {"organ": "strategy_roi", "default": 0.03,  "min": 0.01,  "max": 0.08},
     "strategy.roi_360":  {"organ": "strategy_roi", "default": 0.015, "min": 0.005, "max": 0.05},
     "strategy.roi_720":  {"organ": "strategy_roi", "default": 0.005, "min": 0.001, "max": 0.02},
 
-    # ─── ORGAN: strategy_protection (6 params) — AIFreqtradeSizer.py:1357-1376 ───
+    # ─── ORGAN: strategy_protection (6 params) — HydraSizer.py:1357-1376 ───
     "strategy.cooldown_candles":      {"organ": "strategy_protection", "default": 1,   "min": 1,   "max": 5},
     "strategy.stoploss_guard_lookback": {"organ": "strategy_protection", "default": 48, "min": 12,  "max": 96},
     "strategy.stoploss_guard_limit":  {"organ": "strategy_protection", "default": 6,   "min": 2,   "max": 12},
@@ -247,7 +247,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.maxdd_limit":           {"organ": "strategy_protection", "default": 20,  "min": 5,   "max": 50},
     "strategy.maxdd_threshold":       {"organ": "strategy_protection", "default": 0.50, "min": 0.20, "max": 0.80},
 
-    # ─── ORGAN: strategy_funding (2 params) — AIFreqtradeSizer.py:1066-1067 ───
+    # ─── ORGAN: strategy_funding (2 params) — HydraSizer.py:1066-1067 ───
     "strategy.extreme_funding":       {"organ": "strategy_funding", "default": 0.0005, "min": 0.0002, "max": 0.002},
     "strategy.funding_cap_mult":      {"organ": "strategy_funding", "default": 0.5,  "min": 0.2,  "max": 0.8},
 
@@ -365,7 +365,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "opp.funding.ls_unbalanced":      {"organ": "opp_funding", "default": 25, "min": 10, "max": 40},
     "opp.funding.ls_skewed":          {"organ": "opp_funding", "default": 10, "min": 3,  "max": 18},
 
-    # ─── ORGAN: strategy_trailing (~6 params) — AIFreqtradeSizer.py:912-918 ───
+    # ─── ORGAN: strategy_trailing (~6 params) — HydraSizer.py:912-918 ───
     "strategy.trailing_pnl_high":     {"organ": "strategy_trailing", "default": 0.06, "min": 0.04, "max": 0.15},
     "strategy.trailing_pnl_med":      {"organ": "strategy_trailing", "default": 0.03, "min": 0.02, "max": 0.08},
     "strategy.trailing_pnl_low":      {"organ": "strategy_trailing", "default": 0.01, "min": 0.005, "max": 0.04},
@@ -373,7 +373,7 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.trailing_atr_med":      {"organ": "strategy_trailing", "default": 1.3, "min": 0.8, "max": 2.2},
     "strategy.trailing_atr_low":      {"organ": "strategy_trailing", "default": 1.6, "min": 1.0, "max": 2.8},
 
-    # ─── ORGAN: strategy_dca (~8 params) — AIFreqtradeSizer.py:1620-1685 ───
+    # ─── ORGAN: strategy_dca (~8 params) — HydraSizer.py:1620-1685 ───
     "strategy.dca_max_entries":       {"organ": "strategy_dca", "default": 4, "min": 1, "max": 8},
     "strategy.dca_wait_hours":        {"organ": "strategy_dca", "default": 0.5, "min": 0.1, "max": 4.0},
     "strategy.dca_lock1_pnl":         {"organ": "strategy_dca", "default": 0.02, "min": 0.01, "max": 0.10},
@@ -1533,7 +1533,7 @@ class NeuroEvolution:
 
 class NeuralOrganism:
     """
-    The living organism. Coordinates all 14 subsystems.
+    The living organism. Coordinates all 17 subsystems.
     ALL consumer files call get_param() to read adaptive parameter values.
     """
 
@@ -1575,7 +1575,7 @@ class NeuralOrganism:
         self._load_hormones()
         self._load_amygdala()
         logger.info(f"[NeuralOrganism] Initialized: {len(self._neurons)} neurons, "
-                    f"{len(PARAM_REGISTRY)} params × {len(REGIMES)} regimes, 14 subsystems")
+                    f"{len(PARAM_REGISTRY)} params × {len(REGIMES)} regimes, 17 subsystems")
 
     # ─── SQLite Setup ───
 

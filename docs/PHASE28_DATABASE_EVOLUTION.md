@@ -165,7 +165,7 @@
 | # | Gap | Ciddiyet | Detay |
 |---|-----|----------|-------|
 | **G1** | CatBoost training pipeline SIFIR | KRITIK | catboost_model.py yok, training script yok, model dosyasi yok. triple_perception.py her cagrildiginda "No pre-trained CatBoost model yet" logu basiyor, CatBoost branch dead code |
-| **G2** | sizing_multiplier ASLA kullanilmiyor | KRITIK | OOD+CQR+DeepEnsemble+Chronos pipeline sizing_multiplier hesapliyor (AIFreqtradeSizer L836,L851) ama custom_stake_amount() (L1096-1200) HICBIR ZAMAN okumuyor. Tum uncertainty-based sizing isi COPE ATILIYOR |
+| **G2** | sizing_multiplier ASLA kullanilmiyor | KRITIK | OOD+CQR+DeepEnsemble+Chronos pipeline sizing_multiplier hesapliyor (HydraSizer L836,L851) ama custom_stake_amount() (L1096-1200) HICBIR ZAMAN okumuyor. Tum uncertainty-based sizing isi COPE ATILIYOR |
 | **G3** | neural_organism.py pheromone = SIFIR | YUKSEK | 2186 satirlik organizma pheromone_field'dan habersiz. Zero import, zero read, zero write |
 | **G4** | evidence_engine.py pheromone = SIFIR | YUKSEK | Planlanan kopru: perception deposits → EE reads → rag_graph benefits. EE'de sifir pheromone kodu |
 | **G5** | 9/10 Phase 26 modulu test = SIFIR | YUKSEK | 3170 satir kod, sadece chart_features icin 23 test. Geri kalan 9 modul SIFIR test |
@@ -223,7 +223,7 @@
 | 0D | `requirements-phase28.txt` | Yeni dosya | `lancedb`, `grafeo`, `duckdb`, `zvec` + versiyonlar |
 | 0E | **requirements-phase26.txt → install akisina bagla** | Dockerfile + setup | Mevcut dosya var ama hicbir yere referans yok. Dockerfile.ai'ye `-r requirements-phase26.txt` ekle |
 | 0F | **Sprint 2 yeni tablolari db.py'ye ekle** | `db.py` | causal_discoveries, rl_replay_buffer, rl_checkpoints, world_model_states, world_model_rollouts, dream_scenarios, organ_performance_history, hormone_history, self_model_profile, counterfactual_results |
-| 0G | **sizing_multiplier → custom_stake_amount() BAGLANTISI** | `AIFreqtradeSizer.py` | KRITIK: L1096-1200'de sizing_multiplier okunmali. Dual-Axis calibration sonucu trade size'i etkilemeli |
+| 0G | **sizing_multiplier → custom_stake_amount() BAGLANTISI** | `HydraSizer.py` | KRITIK: L1096-1200'de sizing_multiplier okunmali. Dual-Axis calibration sonucu trade size'i etkilemeli |
 | 0H | **Phase 26 modul testleri** | `tests/test_phase26_*.py` | 9 moduldaki SIFIR testi duzelt: triple_perception, ttm, chronos, ood, conformal, deep_ensemble, dual_axis, pheromone, interoception |
 
 ### Sprint 28.1: ChromaDB → LanceDB Gocu + RAG Entegrasyonu (2-3 gun)

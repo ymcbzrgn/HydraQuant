@@ -14,7 +14,7 @@ Extends organism_audit with rich provenance data.
 Enables post-hoc analysis: "What went wrong in trade #42?"
 
 Integration:
-  - Called by: AIFreqtradeSizer at confirm_trade_entry
+  - Called by: HydraSizer at confirm_trade_entry
   - Reads from: all active modules (pheromone field, trinity, lifecycle)
   - Writes to: organism_audit (event_type='decision_contract')
 """

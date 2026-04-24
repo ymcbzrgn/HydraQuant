@@ -244,12 +244,19 @@ def get_connection():
         _pool.release(conn)
 
 
-def execute_with_retry(sql: str, params=None, max_retries: int = 3, commit: bool = True):
-    """Execute SQL with retry on 'database is locked'."""
+def execute_with_retry(sql: str, params=None, max_retries: int = 3, commit: bool = True, db_path: str = None):
+    """Execute SQL with retry on 'database is locked'.
+
+    If db_path is provided, uses get_db_connection(db_path) (respects the caller's
+    DB path — needed for tests that use tmp_path, and for any module that persists
+    its own data to a scoped DB). Otherwise uses the default pooled connection.
+    """
+    import contextlib
     last_error = None
     for attempt in range(max_retries):
         try:
-            with get_connection() as conn:
+            conn_ctx = get_db_connection(db_path) if db_path else get_connection()
+            with conn_ctx as conn:
                 cursor = conn.execute(sql, params or ())
                 if commit:
                     conn.commit()

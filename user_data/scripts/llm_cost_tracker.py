@@ -120,7 +120,8 @@ class LLMCostTracker:
                    (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair),
-                max_retries=5
+                max_retries=5,
+                db_path=self.db_path,
             )
         except Exception as e:
             logger.error(f"Error logging LLM call: {e}")

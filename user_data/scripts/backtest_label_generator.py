@@ -21,7 +21,7 @@ Usage:
     python backtest_label_generator.py --enrich-live        # Add live trades to training set
     python backtest_label_generator.py --run-backtest       # Run fresh backtest first, then generate
 
-Output: backtest_training_data table in ai_data.sqlite
+Output: backtest_training_data table (see ai_config for path)
 """
 
 import os
@@ -445,7 +445,7 @@ class BacktestLabelGenerator:
                     round(pnl, 4), duration_hours,
                     "live", label, label_name,
                     json.dumps(features), len(features),
-                    "live", "AIFreqtradeSizer",
+                    "live", "HydraSizer",
                     row["regime"], "1h"
                 ))
 
@@ -489,8 +489,8 @@ class BacktestLabelGenerator:
                           strategy: str = "SampleStrategy") -> bool:
         """Run a fresh backtest to generate more trade data.
 
-        Uses SampleStrategy (simple RSI+EMA) instead of AIFreqtradeSizer
-        because AIFreqtradeSizer depends on RAG/LLM which don't work in backtest.
+        Uses SampleStrategy (simple RSI+EMA) instead of HydraSizer
+        because HydraSizer depends on RAG/LLM which don't work in backtest.
         This generates more diverse trades for CatBoost training.
         """
         freqtrade_bin = os.path.join(BASE_DIR, "..", ".venv", "bin", "freqtrade")
@@ -673,7 +673,7 @@ class BacktestLabelGenerator:
                     round(pnl, 4), None,
                     "shadow", label, label_name,
                     json.dumps(features), len(features),
-                    "shadow", "AIFreqtradeSizer",
+                    "shadow", "HydraSizer",
                     row["regime"] or "_global", "1h",
                 ))
 

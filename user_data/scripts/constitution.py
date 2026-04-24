@@ -26,7 +26,7 @@ Override hierarchy (top overrides bottom, NEVER reverse):
   5. Individual neurons (fine-tune within RL policy)
 
 Integration:
-  - Called by AIFreqtradeSizer before every trade
+  - Called by HydraSizer before every trade
   - Called by scheduler before every module execution
   - Logs violations to organism_audit table
 """

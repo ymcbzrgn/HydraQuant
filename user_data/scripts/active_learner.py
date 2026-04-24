@@ -14,7 +14,7 @@ Integration:
   - Reads from conformal_calibrator.py — uncertainty per pair/regime
   - Reads from rl_environment.py — available pairs from config
   - Writes suggestions to pheromone_field for strategy consumption
-  - Used by AIFreqtradeSizer for trade selection
+  - Used by HydraSizer for trade selection
 
 Reference: Information-theoretic active learning for trading (novel)
 """

@@ -1,5 +1,5 @@
 # AI Core Dependencies
-# chromadb==1.5.4  # DEPRECATED Phase 28: replaced by LanceDB
+chromadb==1.5.4  # Legacy — kept for migrate_chroma_to_lance.py (one-time migration tool)
 lancedb>=0.30.0
 sqlite-vec==0.1.6
 sentence-transformers==5.2.3
@@ -47,3 +47,6 @@ pytrends==4.9.2
 # API Server
 fastapi==0.111.0
 uvicorn==0.29.0
+
+# scipy — used by ood_detector.py (chi-squared, Mahalanobis)
+scipy==1.14.1

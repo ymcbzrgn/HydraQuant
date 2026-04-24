@@ -2092,7 +2092,7 @@ def get_trading_signal(pair: str, technical_data: dict = None) -> dict:
         except Exception:
             pass
 
-    # Phase 26: Triple Perception runs in strategy (AIFreqtradeSizer.populate_entry_trend)
+    # Phase 26: Triple Perception runs in strategy (HydraSizer.populate_entry_trend)
     # and deposits results to pheromone_field (SIGNAL_PREDICTION, SIGNAL_UNCERTAINTY).
     # Phase 28: Evidence Engine now reads these pheromone deposits and adjusts confidence.
     # Flow: Strategy→TriplePerception→PheromoneField→EvidenceEngine→rag_graph

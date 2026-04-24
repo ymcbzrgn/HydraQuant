@@ -140,7 +140,7 @@ Always end with:
 # PROJECT CONTEXT
 
 This is HydraQuant, an AI-augmented crypto trading engine layered on top of upstream `freqtrade`.
-- `freqtrade-strategies/user_data/strategies/AIFreqtradeSizer.py` — the main Freqtrade integration point; batches pair requests, calls the local signal service over HTTP, and wires in risk sizing, autonomy, Telegram, and forgone-P&L tracking.
+- `user_data/strategies/HydraSizer.py` — the main Freqtrade integration point; batches pair requests, calls the local signal service over HTTP, and wires in risk sizing, autonomy, Telegram, and forgone-P&L tracking.
 - `user_data/scripts/evidence_engine.py` — the primary LLM-free signal path; evidence-first scoring with 6 sub-scores and DB-backed fallbacks.
 - `user_data/scripts/rag_graph.py` — the signal orchestration service; keeps module-level singletons, exposes `/signal/{pair}` GET/POST plus health endpoints, and owns the main retrieval/LLM path.
 - `user_data/scripts/llm_router.py` — multi-key Gemini primary with non-Gemini failover layers including Groq, Cerebras, DeepSeek, SambaNova, Mistral, and OpenRouter.
