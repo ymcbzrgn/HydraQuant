@@ -80,11 +80,18 @@ def test_llm_router_has_lock():
 # ============================================================
 # Test 3: Position Sizer Confidence Curve
 # ============================================================
-def test_position_sizer_confidence_curve():
+def test_position_sizer_confidence_curve(monkeypatch):
     """Confidence^exponent * max_risk should be the stake fraction.
     Phase 27 Task 1: pair is REQUIRED (Prensip 0 — no global Kelly).
     NOTE: _p() overrides constructor args from the NeuralOrganism registry,
-    so we force sizer.exponent / sizer.max_risk explicitly after construction."""
+    so we force sizer.exponent / sizer.max_risk explicitly after construction.
+    FIX-5 (2026-04-25 audit): RISK_ENVELOPE_DISABLED=1 disables dynamic
+    envelope so this static-value test stays deterministic."""
+    monkeypatch.setenv("RISK_ENVELOPE_DISABLED", "1")
+    # Reset envelope singleton so the env-var takes effect
+    import risk_envelope as _re
+    _re._instance = None
+
     from position_sizer import PositionSizer
 
     sizer = PositionSizer(max_portfolio_risk_per_trade=0.05, confidence_exponent=2.0)
@@ -645,19 +652,29 @@ def test_bayesian_kelly_update(tmp_db):
 # ============================================================
 # Test 28: Bayesian Kelly Fraction calculation
 # ============================================================
-def test_bayesian_kelly_fraction(tmp_db):
+def test_bayesian_kelly_fraction(tmp_db, monkeypatch):
     """f* = (b*p - q)/b capped at sizing.kelly_cap — per-pair (Phase 27 Task 1).
     Uses set_pair_stats() instead of direct attribute assignment since
     BayesianKelly is now stateless (DB is source of truth, Prensip 0).
 
     The kelly_cap is read from NeuralOrganism adaptive params (default 0.25 but
     can drift). We assert behavior: winning pair → hit the cap, losing pair → 0,
-    per-pair isolation intact."""
+    per-pair isolation intact.
+
+    FIX-5 (2026-04-25 audit): RISK_ENVELOPE_DISABLED=1 forces the disabled
+    envelope state with kelly_cap=0.25 so this static-cap test stays valid."""
+    monkeypatch.setenv("RISK_ENVELOPE_DISABLED", "1")
+    import risk_envelope as _re
+    _re._instance = None
+
     from position_sizer import BayesianKelly
-    from neural_organism import _p
 
     bk = BayesianKelly(db_path=tmp_db)
-    kelly_cap = _p("sizing.kelly_cap", 0.25)
+    # FIX-5 (2026-04-25 audit): with envelope DISABLED the cap is the
+    # static fallback 0.25. The previous _p() lookup picked up an
+    # adaptively-drifted NeuralOrganism value (0.26) which no longer
+    # matches what kelly_fraction() returns when envelope is the source.
+    kelly_cap = 0.25
     pair_win = "WIN/USDT:USDT"
     pair_loss = "LOSS/USDT:USDT"
 

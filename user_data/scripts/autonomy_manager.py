@@ -195,6 +195,37 @@ class AutonomyManager:
 
         return False
 
+    def maybe_promote(self) -> bool:
+        """RE-2 (2026-04-25): public promote wrapper for RiskEnvelope.
+
+        Checks the existing PROMOTION_CRITERIA AND requires the rolling
+        confidence_score (passed by caller via update_metrics() previously)
+        to be sustained. The asymmetric philosophy: PROMOTE slow.
+
+        Returns True if promotion occurred.
+        """
+        if self.current_level >= 5:
+            return False
+        old_level = self.current_level
+        self._promote()
+        return self.current_level > old_level
+
+    def demote(self, reason: str = "envelope_demote") -> bool:
+        """RE-2 (2026-04-25): public demote wrapper for RiskEnvelope.
+
+        DEMOTE fast — bypasses the existing weekly-loss criteria when
+        the envelope's confidence score has collapsed. Logs the reason
+        for telemetry. Cannot demote below L0.
+
+        Returns True if demotion occurred.
+        """
+        if self.current_level <= 0:
+            return False
+        old_level = self.current_level
+        logger.warning(f"[Autonomy] envelope-driven demote: {reason}")
+        self._demote()
+        return self.current_level < old_level
+
     def _promote(self):
         """Promote to next autonomy level (with DB-level guard against duplicates)."""
         # Re-read DB level to prevent stale-instance duplicate promotions

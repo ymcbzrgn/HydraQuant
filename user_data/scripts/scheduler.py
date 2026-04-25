@@ -415,6 +415,20 @@ class PipelineScheduler:
             id='counterfactual_to_kelly',
             name='Counterfactual Results → Shadow Kelly',
             max_instances=1, replace_existing=True)
+
+        # RE-5 (2026-04-25): RiskEnvelope sensor vote update — every 5 min.
+        # 5-sensor demote vote + graduated decay state machine. This is
+        # the heart of the autonomous risk-tier mechanism: when 3+ sensors
+        # alarm, decay multiplier starts shrinking the entire envelope.
+        self.scheduler.add_job(self._risk_envelope_sensor_tick, 'interval', minutes=5,
+            id='risk_envelope_sensor',
+            name='Risk Envelope Sensor Vote + Decay State',
+            max_instances=1, replace_existing=True)
+        # Hourly: confidence score recompute + autonomy promote/demote evaluation
+        self.scheduler.add_job(self._risk_envelope_promote_tick, 'interval', minutes=60,
+            id='risk_envelope_promote',
+            name='Risk Envelope Confidence + Autonomy Promote/Demote',
+            max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_habit_check, 'cron', hour=5, minute=15,
             id='organism_habits', name='Neural Organism Habit Consolidation', max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_sleep, 'cron', day_of_week='sun', hour=3, minute=30,
@@ -1882,6 +1896,144 @@ class PipelineScheduler:
             logger.info(f"[Scheduler:Organism] NeuroEvolution tournament completed")
         except Exception as e:
             logger.error(f"[Scheduler:Organism] NeuroEvolution failed: {e}")
+
+    def _risk_envelope_sensor_tick(self):
+        """RE-5 (2026-04-25): every 5 min — update RiskEnvelope sensor
+        vote + decay state. When 3+ sensors alarm, decay multiplier
+        starts shrinking the envelope; clean ticks slowly recover.
+        """
+        try:
+            from risk_envelope import get_risk_envelope
+            envelope = get_risk_envelope()
+            telemetry = envelope.update_sensor_state()
+            if telemetry["transition"] != "stable":
+                logger.warning(
+                    f"[RiskEnvelope] tick — votes={telemetry['votes_count']}/5 "
+                    f"decay={telemetry['decay_multiplier']:.2f} "
+                    f"transition={telemetry['transition']} "
+                    f"breakdown={telemetry['votes_breakdown']}"
+                )
+            else:
+                # Stable — debug-level only to keep INFO log clean
+                logger.debug(
+                    f"[RiskEnvelope] tick — votes={telemetry['votes_count']}/5 "
+                    f"decay={telemetry['decay_multiplier']:.2f}"
+                )
+        except Exception as e:
+            logger.error(f"[RiskEnvelope] sensor tick failed: {e}")
+
+    def _risk_envelope_promote_tick(self):
+        """RE-5 (2026-04-25): hourly confidence + autonomy promote/demote.
+
+        - Computes continuous confidence score (Sharpe + winrate + PF + DD + health)
+        - Persists score for telemetry
+        - Asymmetric: 3:1 (slow promote, fast demote)
+            * confidence > 0.70 sustained 30 days → promote
+            * confidence < 0.30 single day → demote
+        """
+        try:
+            from risk_envelope import get_risk_envelope
+            from autonomy_manager import AutonomyManager
+            envelope = get_risk_envelope()
+            confidence = envelope.get_continuous_confidence_score()
+            current_state = envelope.compute()
+
+            logger.info(
+                f"[RiskEnvelope] confidence={confidence:.3f} "
+                f"L{current_state.autonomy_level} "
+                f"lev={current_state.leverage_max:.1f}x "
+                f"risk={current_state.risk_per_trade*100:.1f}% "
+                f"kelly_cap={current_state.kelly_cap*100:.0f}% "
+                f"sl={current_state.sl_base_pct*100:.1f}% "
+                f"votes={current_state.sensor_votes}/5 "
+                f"decay={current_state.decay_multiplier:.2f}"
+            )
+
+            # Asymmetric promote/demote evaluation
+            from db import get_db_connection
+            am = AutonomyManager()
+            current_level = am.get_level()
+
+            with get_db_connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS confidence_history (
+                        timestamp TEXT PRIMARY KEY,
+                        score REAL,
+                        autonomy_level INTEGER
+                    )
+                """)
+                conn.execute(
+                    "INSERT OR REPLACE INTO confidence_history (timestamp, score, autonomy_level) "
+                    "VALUES (datetime('now'), ?, ?)",
+                    (confidence, current_level),
+                )
+                # Asymmetric demote: confidence < 0.30 over last 24h average → demote
+                row_dem = conn.execute("""
+                    SELECT AVG(score) AS avg_score, COUNT(*) AS n
+                      FROM confidence_history
+                     WHERE timestamp >= datetime('now', '-24 hours')
+                """).fetchone()
+                # Asymmetric promote: confidence > 0.70 sustained 30 days
+                row_prom = conn.execute("""
+                    SELECT AVG(score) AS avg_score, MIN(score) AS min_score, COUNT(*) AS n
+                      FROM confidence_history
+                     WHERE timestamp >= datetime('now', '-30 days')
+                """).fetchone()
+                conn.commit()
+
+            avg_24h = float(row_dem["avg_score"] or 0.5) if row_dem else 0.5
+            n_24h = int(row_dem["n"] or 0) if row_dem else 0
+
+            avg_30d = float(row_prom["avg_score"] or 0.5) if row_prom else 0.5
+            min_30d = float(row_prom["min_score"] or 0.5) if row_prom else 0.5
+            n_30d = int(row_prom["n"] or 0) if row_prom else 0
+
+            # FIX-1 (2026-04-25 audit): require ≥20 REAL trades in last 30d
+            # before allowing demote. Prevents bootstrap-demote loop where
+            # n<5 → confidence=0.50 (now neutral) but auto-demote could
+            # still fire if real history is shallow.
+            n_real_trades_30d = 0
+            try:
+                trades_db = os.path.join(os.path.dirname(__file__), "..", "tradesv3.sqlite")
+                if os.path.exists(trades_db):
+                    import sqlite3 as _sq
+                    _tconn = _sq.connect(trades_db)
+                    _tconn.row_factory = _sq.Row
+                    _trow = _tconn.execute("""
+                        SELECT COUNT(*) AS n FROM trades
+                         WHERE close_date >= datetime('now', '-30 days')
+                           AND is_open = 0
+                    """).fetchone()
+                    _tconn.close()
+                    n_real_trades_30d = int(_trow["n"] or 0) if _trow else 0
+            except Exception:
+                pass
+
+            # Demote: 24h average < 0.30 with at least 6 hourly samples
+            # AND at least 20 real trades over 30d (audit FIX-1).
+            if avg_24h < 0.30 and n_24h >= 6 and current_level > 0 and n_real_trades_30d >= 20:
+                try:
+                    am.demote(reason=f"confidence_24h={avg_24h:.3f}<0.30")
+                    logger.warning(
+                        f"[RiskEnvelope] AUTONOMY DEMOTE L{current_level}→L{current_level-1} "
+                        f"reason=avg_confidence_24h={avg_24h:.3f}<0.30"
+                    )
+                except Exception as e:
+                    logger.debug(f"[RiskEnvelope] demote failed: {e}")
+            # Promote: 30d AVG > 0.70 AND 30d MIN > 0.50 AND at least 200 hourly samples
+            elif (avg_30d > 0.70 and min_30d > 0.50 and n_30d >= 200
+                  and current_level < 5):
+                # Also check existing AutonomyManager criteria (trades count, sharpe, dd)
+                try:
+                    if am.maybe_promote():
+                        logger.info(
+                            f"[RiskEnvelope] AUTONOMY PROMOTE L{current_level}→L{current_level+1} "
+                            f"reason=avg_30d={avg_30d:.3f}, min_30d={min_30d:.3f}"
+                        )
+                except Exception as e:
+                    logger.debug(f"[RiskEnvelope] promote failed: {e}")
+        except Exception as e:
+            logger.error(f"[RiskEnvelope] promote tick failed: {e}")
 
     def _counterfactual_to_kelly_tick(self):
         """T8 (2026-04-25): backfill bayesian_kelly_shadow from
@@ -3547,6 +3699,12 @@ class PipelineScheduler:
         # T8: counterfactual → shadow Kelly drain. Daily off-peak job;
         # safe to run during sleep (single-table read+update).
         'counterfactual_to_kelly',
+        # RE-5 (2026-04-25): RiskEnvelope sensor + promote ticks. Critical
+        # safety — these MUST keep running during sleep. The 5-min sensor
+        # tick is the only thing that triggers graduated decay during a
+        # brownout. Sleep mode without these = blind organism.
+        'risk_envelope_sensor',
+        'risk_envelope_promote',
     }
 
     # Additional whitelist items during DEEP_SLEEP (absolute minimum set).

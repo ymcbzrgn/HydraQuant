@@ -324,7 +324,15 @@ class BayesianKelly:
             b_ratio = 1.5  # pre-trade default, keeps fraction positive for p > 0.4
         b_ratio = max(b_ratio, 0.01)
         f = (b_ratio * p - q) / b_ratio
-        cap = _p("sizing.kelly_cap", 0.25)
+        # RE-4 (2026-04-25): Kelly cap is now envelope-driven. L0 → 0.10,
+        # L5 → 0.65, modulated by hormonal × decay. Static fallback to the
+        # PARAM_REGISTRY value preserves backward compat when envelope module
+        # is unavailable (e.g. early init or test env).
+        try:
+            from risk_envelope import get_risk_envelope
+            cap = float(get_risk_envelope().get_kelly_cap())
+        except Exception:
+            cap = _p("sizing.kelly_cap", 0.25)
         return max(0.0, min(f, cap))
 
     # ─── E1 7-Step Per-Pair Pipeline ───────────────────────────────────────
@@ -456,15 +464,21 @@ class PositionSizer:
         self.bayesian_kelly = BayesianKelly()
 
     def _effective_max_risk(self, pair: str, regime: str = "_global") -> float:
+        # RE-4 (2026-04-25): max_risk is now envelope-driven. The static
+        # field `self.max_risk` survives as a hyperopt knob and as a hard
+        # ceiling — envelope can only LOWER it, never raise above it.
+        try:
+            from risk_envelope import get_risk_envelope
+            envelope_risk = float(get_risk_envelope().get_risk_per_trade())
+            effective_max_risk = min(self.max_risk * 2.0, envelope_risk)  # envelope can go up to 2× hyperopt baseline
+        except Exception:
+            effective_max_risk = self.max_risk
+
         kelly_autonomy = self.autonomy.get_kelly_fraction()
         kelly_bayesian = self.bayesian_kelly.kelly_fraction(pair, regime)
         # Mega Sprint 2026-04-23 (B.2): Kelly floor lifted from 0.5% → 1.5%.
-        # The old floor produced stakes so small that exchange min_stake
-        # promoted them back into real $5+ orders every time, which then
-        # got canceled by the shadow/MinStakeGuard fallback. 1.5% keeps the
-        # organism in the game while confidence/CAAT still scale above it.
         floor = float(_p("sizing.kelly_floor_fraction", 0.015))
-        return min(self.max_risk, kelly_autonomy, max(kelly_bayesian, floor))
+        return min(effective_max_risk, kelly_autonomy, max(kelly_bayesian, floor))
 
     def calculate_stake_fraction(self, confidence: float,
                                  pair: Optional[str] = None,

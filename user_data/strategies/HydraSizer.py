@@ -1686,15 +1686,26 @@ class HydraSizer(IStrategy):
           - Palazzi (2025) Journal of Futures Markets
           - LuxAlgo (2024): 2.0-2.5x ATR optimal for 1H crypto
         """
+        # RE-3 (2026-04-25): SL fallback now envelope-driven. L0 → 15% (wide),
+        # L5 → 5% (tight). Under panic decay the SL widens to give the trade
+        # more room rather than panic-exit. The static `self.stoploss` is
+        # the FreqTrade-level kill switch (-15%) — never violated.
+        try:
+            from risk_envelope import get_risk_envelope
+            envelope_sl = -float(get_risk_envelope().get_sl_base_pct())
+            sl_fallback = max(self.stoploss, envelope_sl)  # closer-to-zero wins (less negative)
+        except Exception:
+            sl_fallback = self.stoploss
+
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if dataframe is None or len(dataframe) < 2:
-            return self.stoploss
+            return sl_fallback
 
         last_candle = dataframe.iloc[-1].squeeze()
 
         atr = last_candle.get('atr')
         if not atr or atr != atr or current_rate <= 0:  # NaN check + sanity
-            return self.stoploss
+            return sl_fallback
 
         atr = float(atr)
 
@@ -2416,7 +2427,15 @@ class HydraSizer(IStrategy):
             # this gate on every BTC signal (1498 SKIPs in 42h). A 6x
             # tolerance lets a healthy Kelly still take the stake while the
             # autonomy/constitution caps keep the absolute size bounded.
-            tolerance = float(_np("sizing.min_stake_lift_tolerance", 6.0))
+            # RE-3 (2026-04-25): stake-lift tolerance is now envelope-driven.
+            # L0 → 3x (conservative), L5 → 10x (high autonomy). Under decay
+            # the tolerance shrinks so borderline trades route to SHADOW
+            # rather than getting force-lifted.
+            try:
+                from risk_envelope import get_risk_envelope
+                tolerance = float(get_risk_envelope().get_stake_lift_tolerance())
+            except Exception:
+                tolerance = float(_np("sizing.min_stake_lift_tolerance", 6.0))
             if forced_ratio > tolerance:
                 try:
                     ai_dec = ai_decision if 'ai_decision' in locals() else {}
@@ -3069,13 +3088,29 @@ class HydraSizer(IStrategy):
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str,
                  side: str, **kwargs) -> float:
-        """Regime-aware + confidence-based dynamic leverage (Phase 23)."""
+        """Regime-aware + confidence-based dynamic leverage.
+
+        RE-3 (2026-04-25): leverage_max is now sourced from RiskEnvelope
+        (autonomy-tier × hormonal × decay) instead of static
+        `self.leverage_max.value`. The static parameter remains as a
+        FreqTrade hyperopt knob for backtesting; live trading uses the
+        envelope. L0 → 2x, L5 → 10x; under panic → halved.
+        """
         ai = self.ai_signal_cache.get(pair, {})
         confidence = ai.get('confidence', 0.0)
 
+        # RE-3: dynamic envelope-driven leverage cap
+        try:
+            from risk_envelope import get_risk_envelope
+            envelope_lev_max = float(get_risk_envelope().get_leverage_max())
+        except Exception:
+            envelope_lev_max = float(self.leverage_max.value)
+        # Combine envelope cap with the static hyperopt parameter — the tighter wins.
+        effective_lev_ceiling = min(envelope_lev_max, float(self.leverage_max.value) * 3.0)
+
         # Regime-aware max leverage cap (OMEGA-inspired but safer)
-        regime_max = self.leverage_max.value  # default 3.0
-        atr_safe_max = self.leverage_max.value  # ATR safety cap (calculated below)
+        regime_max = effective_lev_ceiling
+        atr_safe_max = effective_lev_ceiling  # ATR safety cap (calculated below)
         try:
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             if dataframe is not None and len(dataframe) > 0:
@@ -3084,11 +3119,11 @@ class HydraSizer(IStrategy):
                 ema200 = last.get('ema_200')
                 price = float(last.get('close', 0))
                 if adx > 25 and ema200 and price > float(ema200):
-                    regime_max = self.leverage_max.value       # trending_bull → full leverage
+                    regime_max = effective_lev_ceiling       # trending_bull → full leverage
                 elif adx < 20:
-                    regime_max = min(2.0, self.leverage_max.value)  # ranging → cap 2x
+                    regime_max = min(2.0, effective_lev_ceiling)  # ranging → cap 2x
                 else:
-                    regime_max = min(1.5, self.leverage_max.value)  # bear/volatile → cap 1.5x
+                    regime_max = min(1.5, effective_lev_ceiling)  # bear/volatile → cap 1.5x
 
                 # ATR-based leverage cap: keep max equity loss <= 15%
                 # Chandelier Exit multiplier is sourced from PARAM_REGISTRY so
