@@ -155,11 +155,24 @@ class ForgonePnLEngine:
 
         For BULL signals: pnl = ((exit - entry) / entry) * 100
         For BEAR signals: pnl = ((entry - exit) / entry) * 100
+
+        LOOP-2 (2026-04-25): forgone outcomes now feed `bayesian_kelly_shadow`
+        as counterfactual evidence. This closes the learning loop the audit
+        flagged: 400+ forgone observations were sitting in the table with no
+        downstream consumer. Now every resolved forgone trade updates the
+        shadow Kelly posterior — pair-level edge estimation gets ~20× more
+        data than the actual-trade Kelly.
         """
         try:
             with self._get_db_connection() as conn:
                 c = conn.cursor()
-                c.execute("SELECT pair, signal_type, entry_price FROM forgone_profit WHERE id = ?", (forgone_id,))
+                # Pull regime too if the column exists (Phase 27 Fix 6 added it)
+                cols = [r[1] for r in c.execute("PRAGMA table_info(forgone_profit)").fetchall()]
+                has_regime = "regime" in cols
+                if has_regime:
+                    c.execute("SELECT pair, signal_type, entry_price, regime FROM forgone_profit WHERE id = ?", (forgone_id,))
+                else:
+                    c.execute("SELECT pair, signal_type, entry_price FROM forgone_profit WHERE id = ?", (forgone_id,))
                 row = c.fetchone()
 
                 if not row:
@@ -168,6 +181,9 @@ class ForgonePnLEngine:
 
                 entry_price = row['entry_price']
                 signal_type = row['signal_type']
+                regime = row['regime'] if has_regime else "_global"
+                if not regime:
+                    regime = "_global"
 
                 if signal_type == "BULL":
                     pnl = ((exit_price - entry_price) / entry_price) * 100
@@ -182,6 +198,26 @@ class ForgonePnLEngine:
                     WHERE id = ?
                 ''', (exit_price, round(pnl, 4), datetime.now(tz=timezone.utc).isoformat(), forgone_id))
                 conn.commit()
+
+            # LOOP-2: feed shadow Kelly. 'won' = forgone trade WOULD have been profitable.
+            # Pass our own db_path so the engine and shadow Kelly always
+            # write to the same database (critical for tests that use a
+            # temp DB; in prod they coincide via AI_DB_PATH default).
+            try:
+                from position_sizer import get_shadow_kelly
+                shadow = get_shadow_kelly(db_path=self.db_path)
+                shadow.update(
+                    won=(pnl > 0),
+                    pnl_pct=float(pnl),
+                    pair=row['pair'],
+                    regime=regime,
+                )
+                logger.info(
+                    f"[Loop-2:ShadowKelly] {row['pair']}/{regime} ← forgone "
+                    f"{signal_type} pnl={pnl:.2f}% won={pnl > 0}"
+                )
+            except Exception as kelly_e:
+                logger.warning(f"[Loop-2:ShadowKelly] update failed for {row['pair']}: {kelly_e}")
 
             logger.info(f"[Forgone P&L] Resolved ID {forgone_id}: {signal_type} on {row['pair']} "
                         f"Entry=${entry_price:.2f} Exit=${exit_price:.2f} -> PnL={pnl:.2f}%")

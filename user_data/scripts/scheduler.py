@@ -399,6 +399,22 @@ class PipelineScheduler:
             id='organism_hormone_refresh',
             name='Neural Organism Hormone Refresh (sensor-driven)',
             max_instances=1, replace_existing=True)
+        # LOOP-3 (2026-04-25): hourly outcome backfill. Daily-only would
+        # leave the latest 24h decisions blind during the highest-velocity
+        # learning window. Hourly catches the t+4h horizon as soon as the
+        # window expires.
+        self.scheduler.add_job(self._decisions_outcome_backfill_tick, 'interval', minutes=60,
+            id='decisions_outcome_backfill',
+            name='AI Decisions Outcome Backfill (counterfactual)',
+            max_instances=1, replace_existing=True)
+
+        # T8 (2026-04-25): daily 02:45 UTC counterfactual → shadow Kelly.
+        # Drains 32K+ counterfactual_results rows into per-pair Beta
+        # posteriors. Idempotent via `consumed_by_kelly` column.
+        self.scheduler.add_job(self._counterfactual_to_kelly_tick, 'cron', hour=2, minute=45,
+            id='counterfactual_to_kelly',
+            name='Counterfactual Results → Shadow Kelly',
+            max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_habit_check, 'cron', hour=5, minute=15,
             id='organism_habits', name='Neural Organism Habit Consolidation', max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_sleep, 'cron', day_of_week='sun', hour=3, minute=30,
@@ -1808,26 +1824,164 @@ class PipelineScheduler:
             logger.error(f"[Scheduler:Organism] Sleep consolidation failed: {e}")
 
     def _organism_dmn(self):
-        """Daily 04:00: Default Mode Network — idle background processing."""
+        """Daily 04:00: Default Mode Network — idle background processing.
+
+        T12 (2026-04-25): synapse_candidates discovered by DMN are now
+        propagated to the live SynapseNetwork via
+        `organism.adopt_synapse_discoveries()`. Previously the count was
+        logged and the list was discarded — the connectivity graph stayed
+        static and the brain never grew new edges.
+        """
         try:
             from neural_organism import get_organism
             organism = get_organism()
             result = organism.dmn.run_idle_cycle(organism._neurons, organism.hippocampus)
-            logger.info(f"[Scheduler:Organism] DMN idle: {len(result.get('counterfactuals', []))} counterfactuals, "
-                       f"{len(result.get('discoveries', []))} synapse candidates")
+            n_cf = len(result.get('counterfactuals', []))
+            discoveries = result.get('discoveries', []) or []
+            n_added = organism.adopt_synapse_discoveries(discoveries)
+            logger.info(
+                f"[Scheduler:Organism] DMN idle: {n_cf} counterfactuals, "
+                f"{len(discoveries)} synapse candidates → {n_added} adopted"
+            )
         except Exception as e:
             logger.error(f"[Scheduler:Organism] DMN failed: {e}")
 
     def _organism_evolution(self):
-        """Weekly Sunday 04:00: NeuroEvolution — population tournament."""
+        """Weekly Sunday 04:00: NeuroEvolution — population tournament.
+
+        T15 (2026-04-25): after the population tournament, also load the
+        architecture_evolver's saved best genome from disk and blend it
+        into the live organism via `adopt_genome()`. Previously
+        `genome_best.json` was saved weekly but never loaded — the
+        architectural search was decorative.
+        """
         try:
             from neural_organism import get_organism
             organism = get_organism()
             organism.evolution.run_tournament(organism._neurons, organism._cumulative_pnl)
+
+            # T15: read the architecture-evolver's saved genome and adopt
+            try:
+                import json as _json
+                import os as _os
+                genome_path = _os.path.join(
+                    _os.path.dirname(__file__), "..", "models", "genome_best.json"
+                )
+                if _os.path.exists(genome_path):
+                    with open(genome_path, "r") as fh:
+                        genome = _json.load(fh)
+                    moved = organism.adopt_genome(genome, blend_ratio=0.20)
+                    logger.info(
+                        f"[T15:GenomeAdopt] architecture_evolver genome blended "
+                        f"({moved} neurons moved)"
+                    )
+            except Exception as _ge:
+                logger.debug(f"[T15:GenomeAdopt] skipped: {_ge}")
+
             organism._persist_batch(list(organism._neurons.values()))
             logger.info(f"[Scheduler:Organism] NeuroEvolution tournament completed")
         except Exception as e:
             logger.error(f"[Scheduler:Organism] NeuroEvolution failed: {e}")
+
+    def _counterfactual_to_kelly_tick(self):
+        """T8 (2026-04-25): backfill bayesian_kelly_shadow from
+        counterfactual_results.
+
+        32K+ counterfactual rows were sitting in DB with no consumer.
+        Each row is a hypothetical alternate-decision PnL outcome.
+        Treating them as forgone observations (the trade we DIDN'T take)
+        feeds shadow Kelly per pair — same loop as forgone_pnl but
+        fed by the counterfactual_engine pipeline instead of human-
+        rejected signals. Dramatically expands per-pair evidence base.
+
+        Cron: daily 02:45 UTC (off-peak). Idempotent via
+        `consumed_by_kelly` flag added on first run.
+        """
+        try:
+            from db import get_db_connection
+            from position_sizer import get_shadow_kelly
+            shadow = get_shadow_kelly()
+            with get_db_connection() as conn:
+                # Idempotency column — add if missing
+                cols = [r[1] for r in conn.execute(
+                    "PRAGMA table_info(counterfactual_results)"
+                ).fetchall()]
+                if "consumed_by_kelly" not in cols:
+                    try:
+                        conn.execute(
+                            "ALTER TABLE counterfactual_results "
+                            "ADD COLUMN consumed_by_kelly INTEGER DEFAULT 0"
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+
+                # FIX-B1 (2026-04-25): real schema is
+                # `counterfactual_outcome_pnl` (not `counterfactual_pnl`)
+                # and there is NO `pair` column — it's per-intervention,
+                # not per-pair. We JOIN ai_decisions via original_trade_id
+                # to recover the pair. Audit caught all three column errors.
+                rows = conn.execute("""
+                    SELECT cr.id, cr.regime, cr.counterfactual_outcome_pnl AS pnl,
+                           ad.pair AS pair
+                      FROM counterfactual_results cr
+                      LEFT JOIN ai_decisions ad ON ad.id = cr.original_trade_id
+                     WHERE COALESCE(cr.consumed_by_kelly, 0) = 0
+                       AND cr.counterfactual_outcome_pnl IS NOT NULL
+                       AND ad.pair IS NOT NULL
+                     ORDER BY cr.id ASC LIMIT 5000
+                """).fetchall()
+
+            if not rows:
+                logger.info("[T8:CounterfactualKelly] no fresh rows to consume")
+                return
+
+            # FIX-B1: batch UPDATE via transaction so we don't pay
+            # per-row commit cost (audit flagged 5000 round-trips).
+            consumed_ids: list[int] = []
+            consumed = 0
+            for row in rows:
+                try:
+                    pair = row["pair"]
+                    regime = row["regime"] or "_global"
+                    pnl = float(row["pnl"])
+                    if not pair:
+                        continue
+                    shadow.update(
+                        won=(pnl > 0),
+                        pnl_pct=pnl,
+                        pair=pair,
+                        regime=regime,
+                    )
+                    consumed_ids.append(int(row["id"]))
+                    consumed += 1
+                except Exception:
+                    continue
+
+            # Single batched UPDATE for all consumed IDs.
+            if consumed_ids:
+                try:
+                    with get_db_connection() as conn3:
+                        # Chunk to avoid SQLite's parameter limit (~999).
+                        for i in range(0, len(consumed_ids), 500):
+                            chunk = consumed_ids[i:i + 500]
+                            placeholders = ",".join("?" for _ in chunk)
+                            conn3.execute(
+                                f"UPDATE counterfactual_results "
+                                f"SET consumed_by_kelly = 1 "
+                                f"WHERE id IN ({placeholders})",
+                                chunk,
+                            )
+                        conn3.commit()
+                except Exception as _ue:
+                    logger.warning(f"[T8:CounterfactualKelly] batch update failed: {_ue}")
+
+            logger.info(
+                f"[T8:CounterfactualKelly] consumed {consumed}/{len(rows)} rows "
+                f"into bayesian_kelly_shadow"
+            )
+        except Exception as e:
+            logger.warning(f"[T8:CounterfactualKelly] tick failed: {e}")
 
     def _organism_cerebellum(self):
         """Daily 00:10: Log cerebellum best trading hours."""
@@ -1938,18 +2092,147 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
 
+    def _decisions_outcome_backfill_tick(self):
+        """LOOP-3 (2026-04-25): backfill ai_decisions.outcome_pnl for any
+        decision older than 4h whose outcome was never written.
+
+        Audit found 84% of decisions had NULL outcome_pnl — the system
+        literally could not see the consequences of its own predictions,
+        so RAG, agent_pool, and the calibrator had no learning signal.
+
+        Backfill source: Freqtrade's OHLCV feather files at
+        `user_data/data/bybit/futures/<symbol>-1h-futures.feather`. We
+        compute entry_close at the decision candle and exit_close at
+        decision_ts + 4h, then sign by signal direction.
+
+        Runs daily at 00:30 UTC (off-peak) plus opportunistically when
+        the first cycle ticks (so prod gets coverage immediately after
+        deploy without waiting until midnight).
+        """
+        try:
+            import os
+            import pandas as pd
+            from db import get_db_connection
+
+            data_root = os.path.join(os.path.dirname(__file__), "..", "data", "bybit", "futures")
+
+            with get_db_connection() as conn:
+                rows = conn.execute("""
+                    SELECT id, timestamp, pair, signal_type, confidence
+                    FROM ai_decisions
+                    WHERE outcome_pnl IS NULL
+                      AND timestamp < datetime('now', '-4 hours')
+                      AND timestamp >= datetime('now', '-30 days')
+                    ORDER BY timestamp DESC LIMIT 500
+                """).fetchall()
+            if not rows:
+                logger.info("[Loop-3:Backfill] No decisions need backfill")
+                return
+
+            cache: dict = {}
+            updated = 0
+            skipped_no_data = 0
+            skipped_neutral = 0
+            for row in rows:
+                try:
+                    pair = row["pair"]
+                    sig = (row["signal_type"] or "").upper()
+                    if sig in ("NEUTRAL", "ABSTAIN", ""):
+                        # NEUTRAL signals never traded → outcome_pnl=0 by definition
+                        skipped_neutral += 1
+                        # Still write 0.0 so backfill_pct goes up — agent
+                        # pool can use this to learn "I called NEUTRAL,
+                        # actual price moved X — was my abstention right?"
+                        with get_db_connection() as conn2:
+                            conn2.execute(
+                                "UPDATE ai_decisions SET outcome_pnl = 0.0, "
+                                "outcome_duration = 14400 WHERE id = ?",
+                                (row["id"],),
+                            )
+                            conn2.commit()
+                        updated += 1
+                        continue
+
+                    file_sym = pair.replace("/", "_").replace(":", "_")
+                    fpath = os.path.join(data_root, f"{file_sym}-1h-futures.feather")
+                    if pair not in cache:
+                        if not os.path.exists(fpath):
+                            cache[pair] = None
+                        else:
+                            try:
+                                cache[pair] = pd.read_feather(fpath)
+                            except Exception:
+                                cache[pair] = None
+                    df = cache[pair]
+                    if df is None or len(df) < 2:
+                        skipped_no_data += 1
+                        continue
+
+                    decision_ts = pd.Timestamp(row["timestamp"], tz="UTC")
+                    exit_ts = decision_ts + pd.Timedelta(hours=4)
+
+                    # Find nearest candles
+                    if "date" in df.columns:
+                        ts_col = df["date"]
+                    else:
+                        ts_col = df.iloc[:, 0]
+
+                    entry_idx = (ts_col - decision_ts).abs().idxmin()
+                    exit_idx = (ts_col - exit_ts).abs().idxmin()
+                    entry_close = float(df.iloc[entry_idx]["close"])
+                    exit_close = float(df.iloc[exit_idx]["close"])
+                    if entry_close <= 0:
+                        skipped_no_data += 1
+                        continue
+
+                    raw_pct = ((exit_close - entry_close) / entry_close) * 100.0
+                    if sig in ("BULLISH", "BULL", "LONG"):
+                        outcome_pct = raw_pct
+                    elif sig in ("BEARISH", "BEAR", "SHORT"):
+                        outcome_pct = -raw_pct
+                    else:
+                        outcome_pct = 0.0
+
+                    with get_db_connection() as conn3:
+                        conn3.execute(
+                            "UPDATE ai_decisions SET outcome_pnl = ?, "
+                            "outcome_duration = 14400 WHERE id = ?",
+                            (round(outcome_pct, 4), row["id"]),
+                        )
+                        conn3.commit()
+                    updated += 1
+                except Exception as e:
+                    logger.debug(f"[Loop-3:Backfill] row #{row['id']} skipped: {e}")
+                    continue
+
+            logger.info(
+                f"[Loop-3:Backfill] {updated}/{len(rows)} decisions filled "
+                f"(neutral_zero={skipped_neutral}, no_data={skipped_no_data})"
+            )
+        except Exception as e:
+            logger.warning(f"[Loop-3:Backfill] tick failed: {e}")
+
     def _shadow_kelly_divergence_tick(self):
-        """Every 30min: inspect shadow-Kelly posterior per pair. When the
-        posterior winrate collapses (<25% with enough samples) the sensor
-        bridges deposit a stress pheromone the organism will read via
-        aggregate_sensor_stress(). Gives the organism awareness of
-        systematic signal-quality decay WITHOUT having to trade those
-        pairs — prior to this the 40+ shadow pairs with 7-21% winrate
-        were invisible to every downstream consumer.
+        """Every 30min: per-pair shadow Kelly → entry-gate pheromones.
+
+        LOOP-1 (2026-04-25): the previous tick collapsed all per-pair shadow
+        evidence into a single global "sensor_stress" deposit that just
+        nudged cortisol downward — pair-level information was destroyed.
+        Now we publish a separate `shadow_score::PAIR` pheromone per pair,
+        carrying the Beta posterior mean (or Thompson sample) of the
+        forgone-counterfactual win rate. HydraSizer.populate_entry_trend
+        reads it and SKIPs entry on pairs with shadow_score < 0.30 — i.e.
+        pairs where the forgone evidence says the strategy would lose more
+        often than win, regardless of the current confidence.
+
+        Backward compat: still emits the legacy shadow_divergence stress
+        pheromone for the four pathological cases (shadow_wr<25%, n>=5).
         """
         try:
             from db import get_db_connection
             from sensor_bridges import record_shadow_divergence
+            from pheromone_field import get_pheromone_field
+            pfield = get_pheromone_field()
             with get_db_connection() as conn:
                 rows = conn.execute(
                     """SELECT s.pair,
@@ -1962,6 +2245,11 @@ class PipelineScheduler:
                      ORDER BY s.updated_at DESC LIMIT 100"""
                 ).fetchall()
             fired = 0
+            published = 0
+            try:
+                import numpy as _np
+            except Exception:
+                _np = None
             for row in rows:
                 try:
                     s_alpha = float(row["s_alpha"]); s_beta = float(row["s_beta"])
@@ -1974,6 +2262,34 @@ class PipelineScheduler:
                         la = float(row["l_alpha"]); lb = float(row["l_beta"])
                         if la + lb > 0:
                             real_wr = la / (la + lb)
+
+                    # LOOP-1: per-pair score pheromone. Use Thompson sample
+                    # of the Beta posterior so the gate explores when the
+                    # posterior is uncertain (small n) and exploits when it
+                    # converges. Falls back to mean if numpy is unavailable.
+                    if _np is not None:
+                        ts_score = float(_np.random.beta(max(s_alpha, 0.5),
+                                                          max(s_beta, 0.5)))
+                    else:
+                        ts_score = shadow_wr
+                    pfield.deposit(
+                        "shadow_kelly", f"shadow_score::{row['pair']}",
+                        {
+                            "intensity": 1.0 - ts_score,  # high intensity = bad
+                            "score": ts_score,            # Thompson sample
+                            "shadow_wr": shadow_wr,        # posterior mean
+                            "real_wr": real_wr,
+                            "n_shadow": int(row["s_n"]),
+                            "alpha": s_alpha, "beta": s_beta,
+                        },
+                        # 35-min half_life so the score stays fresh between
+                        # 30-min ticks; a recovering pair re-publishes a
+                        # better sample on the next tick.
+                        half_life=2100.0,
+                    )
+                    published += 1
+
+                    # Legacy stress signal (still fires for catastrophic pairs)
                     if shadow_wr < 0.25 and int(row["s_n"]) >= 5:
                         record_shadow_divergence(
                             pair=row["pair"],
@@ -1984,8 +2300,10 @@ class PipelineScheduler:
                         fired += 1
                 except Exception:
                     continue
-            if fired:
-                logger.info(f"[SensorBridges:Shadow] {fired} divergence deposits emitted")
+            logger.info(
+                f"[Loop-1:ShadowKelly] published {published} per-pair scores, "
+                f"{fired} legacy divergence deposits"
+            )
         except Exception as e:
             logger.debug(f"[SensorBridges:Shadow] tick failed: {e}")
 
@@ -3219,6 +3537,16 @@ class PipelineScheduler:
         'organism_hormone_refresh',
         # Daily eviction is safe to run during sleep (single-table DELETE).
         'embedding_cache_evict',
+        # LOOP-3 (2026-04-25): outcome backfill is the learning gradient
+        # for RAG / agent_pool / calibrator — must keep running during sleep
+        # so the morning decisions have fresh evidence to learn from.
+        'decisions_outcome_backfill',
+        # LOOP-1 publishes per-pair shadow scores every 30 min. Sleep
+        # mode would silence the gate consumers — keep producer alive.
+        'shadow_kelly_divergence',
+        # T8: counterfactual → shadow Kelly drain. Daily off-peak job;
+        # safe to run during sleep (single-table read+update).
+        'counterfactual_to_kelly',
     }
 
     # Additional whitelist items during DEEP_SLEEP (absolute minimum set).

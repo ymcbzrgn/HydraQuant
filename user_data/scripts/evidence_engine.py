@@ -1143,6 +1143,152 @@ class EvidenceEngine:
                 f"no usable signal, caller should fall through"
             )
 
+        # ═════════════════════════════════════════════════════════════
+        # DEAD-INTEL EVIDENCE BOOSTERS (sprint 2026-04-25)
+        # 4 producers were depositing rich data with no consumer:
+        #   T7  contrarian_signal (MirrorNeurons)
+        #   T10 sequence_patterns (Trade-as-Language)
+        #   T11 gnn_attention_patterns (GNN organism)
+        #   T21 multimodal_fusion (multimodal_encoder pheromone)
+        # Each adjusts confidence by a small bounded amount. Cumulative
+        # effect bounded by post-clamp `confidence = max(min, min(max))`.
+        # ═════════════════════════════════════════════════════════════
+        evidence_boost_log: dict = {}
+
+        # T7 — MirrorNeurons contrarian signal
+        # FIX-B5 (2026-04-25): real key is `long_short_ratio` (not `ls_ratio`)
+        # AND crowd_dir uses LONG/SHORT vocabulary while signal uses
+        # BULLISH/BEARISH — must normalize before compare.
+        try:
+            from neural_organism import get_organism as _go_t7
+            _derivs = gather.derivatives or {}
+            crowd = _go_t7().mirror.analyze_crowd(
+                funding_rate=float(_derivs.get("funding_rate", 0.0)),
+                ls_ratio=float(_derivs.get("long_short_ratio", 1.0)),
+            )
+            contrarian = float(crowd.get("contrarian_signal", 0.0))
+            crowd_dir = crowd.get("direction", "NEUTRAL")
+            # Normalize crowd direction to evidence_engine vocabulary.
+            crowd_norm = {
+                "LONG": "BULLISH", "SHORT": "BEARISH"
+            }.get(crowd_dir, crowd_dir)
+            if abs(contrarian) > 0.60:
+                # Crowd disagrees with our signal AND contrarian is strong
+                # → we are aligned with the contrarian view → boost.
+                # Crowd agrees AND contrarian is strong → fade (crowded trade).
+                if crowd_norm != signal and signal != "NEUTRAL":
+                    confidence *= 1.08
+                    evidence_boost_log["contrarian_align"] = 1.08
+                elif crowd_norm == signal and signal != "NEUTRAL":
+                    confidence *= 0.92
+                    evidence_boost_log["crowded_trade"] = 0.92
+        except Exception as _t7_e:
+            logger.debug(f"[EvidenceEngine:T7] failed: {_t7_e}")
+
+        # T10 — Trade-as-Language sequence patterns
+        # FIX-B2 (2026-04-25): real schema has `occurrences`,
+        # `chi2_score`, `p_value`, `next_outcome_distribution` (JSON).
+        # No `win_rate` / `n_observed`. We compute win_rate from the
+        # JSON distribution at read time.
+        try:
+            import json as _json_t10
+            from db import get_db_connection
+            with get_db_connection() as _conn_t10:
+                rows = _conn_t10.execute(
+                    "SELECT pattern, occurrences, chi2_score, p_value, "
+                    "       next_outcome_distribution "
+                    "  FROM sequence_patterns "
+                    " WHERE regime IN (?, '_any') AND occurrences >= 5 "
+                    " ORDER BY chi2_score DESC LIMIT 10",
+                    (regime,),
+                ).fetchall()
+            if rows:
+                # Parse each pattern's outcome distribution to extract
+                # observed win rate. Distribution is a JSON dict like
+                # {"WIN": 7, "LOSS": 3} or {"BULL": 0.7, "BEAR": 0.3}.
+                top_wr = None
+                for r in rows:
+                    try:
+                        dist = _json_t10.loads(r["next_outcome_distribution"] or "{}")
+                        if not isinstance(dist, dict) or not dist:
+                            continue
+                        total = sum(float(v) for v in dist.values())
+                        if total <= 0:
+                            continue
+                        wins = sum(float(v) for k, v in dist.items()
+                                   if str(k).upper() in ("WIN", "WINS", "BULL", "BULLISH", "LONG", "1"))
+                        wr = wins / total
+                        if top_wr is None or wr > top_wr:
+                            top_wr = wr
+                    except Exception:
+                        continue
+                if top_wr is not None:
+                    if top_wr >= 0.65:
+                        confidence *= 1.05
+                        evidence_boost_log["seq_pattern_top"] = round(top_wr, 3)
+                    elif top_wr <= 0.35 and signal != "NEUTRAL":
+                        confidence *= 0.92
+                        evidence_boost_log["seq_pattern_loser"] = round(top_wr, 3)
+        except Exception as _t10_e:
+            logger.debug(f"[EvidenceEngine:T10] failed: {_t10_e}")
+
+        # T11 — GNN attention patterns
+        # FIX-B3 (2026-04-25): real columns are `attention`, `source_var`,
+        # `target_var`, `discovered_at` — not the names the original
+        # consumer used. The table is causal-graph-level (variable→variable
+        # attention), not per-pair. We use it as a regime-quality proxy:
+        # if the average attention over last 7d is high relative to the
+        # full history, the model has confident causal patterns → boost.
+        try:
+            from db import get_db_connection
+            with get_db_connection() as _conn_t11:
+                recent = _conn_t11.execute(
+                    "SELECT AVG(attention) AS avg_recent, COUNT(*) AS n "
+                    "  FROM gnn_attention_patterns "
+                    " WHERE discovered_at >= datetime('now','-7 days')"
+                ).fetchone()
+                allhist = _conn_t11.execute(
+                    "SELECT AVG(attention) AS avg_all "
+                    "  FROM gnn_attention_patterns"
+                ).fetchone()
+            if recent is not None and recent["n"] is not None and recent["n"] > 0:
+                avg_recent = float(recent["avg_recent"] or 0.0)
+                avg_all = float((allhist["avg_all"] if allhist else 0.0) or 0.0)
+                if avg_all > 0:
+                    ratio = avg_recent / avg_all
+                    if ratio > 1.20:
+                        confidence += 0.04
+                        evidence_boost_log["gnn_strong_attention"] = round(ratio, 3)
+                    elif ratio < 0.80:
+                        confidence -= 0.02
+                        evidence_boost_log["gnn_weak_attention"] = round(ratio, 3)
+        except Exception as _t11_e:
+            logger.debug(f"[EvidenceEngine:T11] failed: {_t11_e}")
+
+        # T21 — Multimodal fusion confidence factor
+        # FIX-B6 (2026-04-25): producer payload only has `embedding`, `dim`,
+        # `modalities_available`, `timestamp`. Use modalities_available as
+        # the confidence proxy: when 5+ of 6 modalities are present, the
+        # fusion is rich enough to trust.
+        try:
+            from pheromone_field import get_pheromone_field as _gpf_t21
+            mf = _gpf_t21().read("multimodal_fusion", source="multimodal_encoder")
+            if isinstance(mf, dict):
+                mods = int(mf.get("modalities_available", 0) or 0)
+                if mods >= 5:
+                    confidence *= 1.04
+                    evidence_boost_log["multimodal_rich"] = mods
+                elif mods <= 1:
+                    confidence *= 0.97
+                    evidence_boost_log["multimodal_poor"] = mods
+        except Exception as _t21_e:
+            logger.debug(f"[EvidenceEngine:T21] failed: {_t21_e}")
+
+        # Final clamp after boosters
+        confidence = max(0.05, min(0.95, confidence))
+        if evidence_boost_log:
+            logger.info(f"[EvidenceEngine:DeadIntelBoost] {pair}: {evidence_boost_log}")
+
         # Build human-readable reasoning
         reasoning = self._build_reasoning(pair, scores, contradictions, signal, confidence,
                                           regime, raw_score, max_cap, evidence_count, weights,

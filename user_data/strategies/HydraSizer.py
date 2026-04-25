@@ -347,6 +347,73 @@ class HydraSizer(IStrategy):
             if not pairs_to_fetch:
                 return
 
+            # T9 (2026-04-25): rank pairs_to_fetch by opportunity_scores from
+            # DB so the highest-priority pairs go through the LLM funnel
+            # FIRST. The opportunity scanner generates 21K rows/week — its
+            # ranking was previously fed into pair-level filter only,
+            # batch order was alphabetical (which let RAG starve real
+            # alpha pairs behind random tickers).
+            try:
+                from db import get_db_connection
+                with get_db_connection() as _conn_t9:
+                    rows = _conn_t9.execute("""
+                        SELECT pair, MAX(composite_score) AS best_score
+                          FROM opportunity_scores
+                         WHERE timestamp >= datetime('now', '-30 minutes')
+                      GROUP BY pair
+                    """).fetchall()
+                score_map = {r["pair"]: float(r["best_score"]) for r in rows}
+                if score_map:
+                    pairs_to_fetch.sort(
+                        key=lambda p: score_map.get(p, 0.0), reverse=True
+                    )
+                    top5 = ", ".join(f"{p}={score_map.get(p, 0):.2f}"
+                                     for p in pairs_to_fetch[:5])
+                    logger.info(f"[T9:OppRank] sorted by composite_score, top5: {top5}")
+                else:
+                    logger.warning("[T9:OppRank] no opportunity_scores rows in last 30min — sort skipped")
+            except Exception as _t9_e:
+                # FIX-A1: surface SQL errors at WARNING level so future schema
+                # drift is visible. Audit found `score` typo silently failed.
+                logger.warning(f"[T9:OppRank] SQL failed: {_t9_e}")
+
+            # T20 (2026-04-25): inject up to 2 exploration pairs at the
+            # FRONT of the queue (1-in-N policy — N defaults to 5 batches).
+            # active_learner publishes "exploration_suggestions" — pairs
+            # with weak Kelly evidence that should occasionally be probed
+            # so the bandit doesn't get stuck on a local optimum.
+            # FIX-A5 (2026-04-25): producer key is "suggestions" (list of
+            # dicts with 'pair' key), not "pairs"/"candidates". Audit found
+            # the consumer was reading wrong keys AND iterating dicts as
+            # strings — wire was 100% dead.
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_t20
+                expl = _gpf_t20().read("exploration_suggestions",
+                                        source="active_learner")
+                if isinstance(expl, dict):
+                    raw = expl.get("suggestions") or expl.get("pairs") or expl.get("candidates") or []
+                    cand_pairs: list[str] = []
+                    if isinstance(raw, list):
+                        for item in raw:
+                            if isinstance(item, dict) and isinstance(item.get("pair"), str):
+                                cand_pairs.append(item["pair"])
+                            elif isinstance(item, str):
+                                cand_pairs.append(item)
+                    injected: list[str] = []
+                    for ep in cand_pairs[:2]:
+                        if ep in pairs and ep not in pairs_to_fetch[:5]:
+                            if ep in pairs_to_fetch:
+                                pairs_to_fetch.remove(ep)
+                            pairs_to_fetch.insert(0, ep)
+                            injected.append(ep)
+                    if injected:
+                        logger.info(
+                            f"[T20:Exploration] injected {len(injected)} "
+                            f"active_learner pairs to front: {injected}"
+                        )
+            except Exception as _t20_e:
+                logger.debug(f"[T20:Exploration] skipped: {_t20_e}")
+
             self._batch_queue = pairs_to_fetch
             self._batch_index = 0
             total_batches = (len(pairs_to_fetch) + self._batch_size - 1) // self._batch_size
@@ -1020,6 +1087,143 @@ class HydraSizer(IStrategy):
                 return df
         except Exception:
             pass
+
+        # ═════════════════════════════════════════════════════════════
+        # LEARNING GATE — LOOP-1 (shadow per-pair) + LOOP-4 (Thompson)
+        # ─────────────────────────────────────────────────────────────
+        # Two independent posteriors decide whether this pair is worth
+        # scouting THIS tick:
+        #   • LOOP-1: shadow Kelly Beta posterior fed by forgone PnL
+        #     resolutions (pair we DIDN'T trade — counterfactual win rate)
+        #   • LOOP-4: real Kelly Beta posterior fed by actual trade
+        #     outcomes
+        # Each is sampled via Thompson — exploration when uncertain,
+        # exploitation when converged. The strict gate (`min < 0.30`)
+        # only fires if we have ENOUGH evidence (n_real >= 3 OR
+        # n_shadow >= 5) so cold-start pairs still get explored.
+        # ═════════════════════════════════════════════════════════════
+        try:
+            self._learning_gate_skip_count = getattr(self, "_learning_gate_skip_count", 0)
+            shadow_score = None
+            try:
+                from pheromone_field import get_pheromone_field
+                pfield = get_pheromone_field()
+                shadow_payload = pfield.read(f"shadow_score::{pair}", source="shadow_kelly")
+                if isinstance(shadow_payload, dict):
+                    n_shadow = int(shadow_payload.get("n_shadow", 0) or 0)
+                    if n_shadow >= 5:
+                        shadow_score = float(shadow_payload.get("score", 0.5))
+            except Exception:
+                pass
+
+            real_score = None
+            real_n = 0
+            try:
+                from position_sizer import get_real_kelly
+                real_kelly = get_real_kelly()
+                stats = real_kelly._load_pair(pair, regime="_global")
+                real_n = int(stats.get("n_trades", 0) or 0)
+                if real_n >= 3:
+                    import numpy as _np_lg
+                    a = float(stats.get("alpha", 2.0))
+                    b = float(stats.get("beta_param", 2.0))
+                    real_score = float(_np_lg.random.beta(max(a, 0.5), max(b, 0.5)))
+            except Exception:
+                pass
+
+            if shadow_score is not None and shadow_score < 0.30:
+                self._learning_gate_skip_count += 1
+                logger.info(
+                    f"[Loop-1:LearningGate] {pair} SKIP — "
+                    f"shadow_score={shadow_score:.3f} < 0.30 (forgone evidence "
+                    f"says this pair would lose more often than win)"
+                )
+                return df
+
+            if real_score is not None and real_score < 0.30 and real_n >= 5:
+                self._learning_gate_skip_count += 1
+                logger.info(
+                    f"[Loop-4:LearningGate] {pair} SKIP — "
+                    f"real_kelly_thompson={real_score:.3f} < 0.30 with n={real_n} "
+                    f"(actual trade history says this pair does not work for us)"
+                )
+                return df
+
+            # Soft warning when one signal is weak and the other absent —
+            # operator visibility, no skip.
+            if shadow_score is not None and shadow_score < 0.40 and real_score is None:
+                logger.debug(
+                    f"[LearningGate] {pair} weak shadow={shadow_score:.3f} but "
+                    f"no real-Kelly evidence yet — exploring"
+                )
+
+            # ─── T3 — Order-flow squeeze veto ─────────────────────────
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_t3
+                of_state = _gpf_t3().read("order_flow_state", source="order_flow")
+                if isinstance(of_state, dict) and of_state.get("pair") == pair:
+                    sq_long = float(of_state.get("squeeze_long", 0.0))
+                    sq_short = float(of_state.get("squeeze_short", 0.0))
+                    flow_tox = float(of_state.get("flow_toxicity", 0.0))
+                    # If short-squeeze probability is high, fading shorts is dangerous
+                    # (price likely to spike up). Block SHORT entries.
+                    # Symmetric for long-squeeze (capitulation candle imminent).
+                    if sq_short > 0.70:
+                        logger.info(
+                            f"[T3:OrderFlow] {pair} SHORT veto — squeeze_short={sq_short:.2f} "
+                            f"(price likely to spike up, fading shorts risky)"
+                        )
+                        df['enter_short'] = 0
+                    if sq_long > 0.70:
+                        logger.info(
+                            f"[T3:OrderFlow] {pair} LONG veto — squeeze_long={sq_long:.2f}"
+                        )
+                        df['enter_long'] = 0
+                    if flow_tox > 0.75:
+                        logger.info(
+                            f"[T3:OrderFlow] {pair} BOTH veto — flow_toxicity={flow_tox:.2f} "
+                            f"(book is being manipulated, skip both sides)"
+                        )
+                        return df
+            except Exception:
+                pass
+
+            # ─── T16 — FEAR_LEVEL gate ────────────────────────────────
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_t16
+                fear = _gpf_t16().read("FEAR_LEVEL", source="neural_organism")
+                if isinstance(fear, dict):
+                    tier = fear.get("tier", "normal")
+                    fear_lvl = float(fear.get("fear_level", 0.0))
+                    if tier in ("PANIC", "EXTREME") or fear_lvl >= 2.0:
+                        logger.info(
+                            f"[T16:FearGate] {pair} SKIP — fear tier={tier} level={fear_lvl:.2f} "
+                            f"(no new exposure under amygdala panic)"
+                        )
+                        return df
+            except Exception:
+                pass
+
+            # ─── T17 — Market-maker spread gate ───────────────────────
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_t17
+                mm = _gpf_t17().read("mm_state", source="market_maker")
+                if isinstance(mm, dict):
+                    half_spread_pct = float(mm.get("half_spread_pct",
+                                                     mm.get("spread_pct", 0.0) / 2.0))
+                    # 25 bps = 0.25%. Above this, MM module already says "toxic".
+                    if half_spread_pct > 0.25:
+                        logger.info(
+                            f"[T17:MMSpread] {pair} SKIP — half_spread={half_spread_pct:.2f}% "
+                            f"(MM module flags toxic spread)"
+                        )
+                        return df
+            except Exception:
+                pass
+        except Exception as _gate_e:
+            # Gate is non-blocking by design: a failure here must NEVER
+            # prevent scouting. Log debug so we can spot a regression.
+            logger.debug(f"[LearningGate] error (proceeding): {_gate_e}")
 
         # Task 26: consume ProactiveDispatcher's trade_frequency_hint.
         # When PredictiveInteroception fires "Reduce trade frequency, run
@@ -1846,8 +2050,12 @@ class HydraSizer(IStrategy):
             # betting full stake on a degraded brain. Decays naturally as
             # llm_router pushes a healthier ratio.
             # AUDIT-7: apply pheromone _decay so the cap lifts as the
-            # brownout signal weakens (avoids 30+ min false-positive cap
-            # after fleet recovery).
+            # brownout signal weakens.
+            # FIX-A4 (2026-04-25): set _b4_active flag so the dead-intel
+            # block's final clamp re-applies the cap (audit found T22/T18
+            # boosts could push unified_mult back above 0.30 cap).
+            _b4_active = False
+            _b4_emergency_cap = 0.30
             try:
                 from pheromone_field import get_pheromone_field as _gpf_b4
                 fleet = _gpf_b4().read("fleet_exhausted", source="llm_router")
@@ -1856,17 +2064,161 @@ class HydraSizer(IStrategy):
                     decay = float(fleet.get("_decay", 1.0))
                     effective_ratio = raw_ratio * decay + (1.0 - decay) * 1.0
                     if effective_ratio < 0.10:
-                        emergency_cap = 0.30
-                        if unified_mult > emergency_cap:
+                        if unified_mult > _b4_emergency_cap:
                             logger.warning(
                                 f"[B4:EmergencyDegraded] fleet_exhausted "
                                 f"raw={raw_ratio:.2%} decay={decay:.2f} "
                                 f"effective={effective_ratio:.2%} → unified_mult "
-                                f"{unified_mult:.3f}→{emergency_cap:.3f}"
+                                f"{unified_mult:.3f}→{_b4_emergency_cap:.3f}"
                             )
-                            unified_mult = emergency_cap
+                            unified_mult = _b4_emergency_cap
+                        _b4_active = True
             except Exception:
                 pass
+
+            # ═════════════════════════════════════════════════════════════
+            # DEAD-INTEL REVIVAL — unified_mult enrichment (sprint 2026-04-25)
+            # ─────────────────────────────────────────────────────────────
+            # 8 previously-dead signals now modulate sizing. Each is
+            # (a) clamped to a sane band, (b) logged when active, (c) safe
+            # under exception (defaults to identity multiplier).
+            # ═════════════════════════════════════════════════════════════
+            dead_intel_breakdown: dict[str, float] = {}
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_di
+                _pf_di = _gpf_di()
+
+                # T5: cortisol → sizer (HORMONE_STATE pheromone, 1.0 calm → 0.5 panic)
+                try:
+                    hs = _pf_di.read("HORMONE_STATE", source="neural_organism")
+                    if isinstance(hs, dict):
+                        cortisol = float(hs.get("cortisol", 1.0))
+                        # 1.0 calm → multiplier 1.0; 0.5 panic → 0.7 (hard floor)
+                        cort_mult = max(0.4, 1.0 - 0.6 * (1.0 - cortisol))
+                        if cort_mult < 0.95:
+                            unified_mult *= cort_mult
+                            dead_intel_breakdown["cortisol"] = round(cort_mult, 3)
+                except Exception:
+                    pass
+
+                # T22 + T4: agent consensus boost / dissent haircut (pheromone)
+                try:
+                    cns = _pf_di.read("agent_consensus", source="agent_pool")
+                    if isinstance(cns, dict):
+                        strength = float(cns.get("signal_strength", cns.get("confidence", 0.0)))
+                        if strength > 0.70:
+                            unified_mult *= 1.05
+                            dead_intel_breakdown["consensus_boost"] = 1.05
+                except Exception:
+                    pass
+                try:
+                    dis = _pf_di.read("agent_dissent", source="agent_pool")
+                    if isinstance(dis, dict):
+                        bull_str = float(dis.get("bull_strength", 0.0))
+                        bear_str = float(dis.get("bear_strength", 0.0))
+                        if bull_str > 0.30 and bear_str > 0.30:
+                            unified_mult *= 0.70
+                            dead_intel_breakdown["dissent_haircut"] = 0.70
+                except Exception:
+                    pass
+
+                # T18: cerebellum_timing pheromone (separate from existing
+                # get_timing_multiplier() — the pheromone exposes per-hour
+                # confidence too, not just the raw multiplier).
+                try:
+                    ct = _pf_di.read("cerebellum_timing", source="cerebellum")
+                    if isinstance(ct, dict):
+                        # current_multiplier is the canonical key; fall back
+                        # to mean of best/worst if absent.
+                        ct_mult = float(ct.get("current_multiplier", 1.0))
+                        # Only apply if it diverges meaningfully from the in-process call
+                        if abs(ct_mult - 1.0) > 0.05 and abs(ct_mult - cerebellum_mult) > 0.10:
+                            blend = (ct_mult + cerebellum_mult) / 2.0
+                            unified_mult *= max(0.5, min(1.4, blend / max(cerebellum_mult, 0.5)))
+                            dead_intel_breakdown["cerebellum_pheromone"] = round(blend, 3)
+                except Exception:
+                    pass
+            except Exception as _di_e:
+                logger.debug(f"[DeadIntel] pheromone enrichment skipped: {_di_e}")
+
+            # T6: safety_mod (Proprioception) — direct organism call
+            try:
+                from neural_organism import get_organism as _go_t6
+                _org_t6 = _go_t6()
+                self_state = _org_t6.proprioception.assess(
+                    _org_t6._neurons,
+                    consec_wins=getattr(_org_t6, "_consec_wins", 0),
+                    consec_losses=getattr(_org_t6, "_consec_losses", 0),
+                )
+                safety_mod = float(self_state.get("safety_mod", 1.0))
+                if safety_mod > 1.05:
+                    # Phase=learning/overconfident → reduce sizing
+                    sm_mult = 1.0 / safety_mod
+                    unified_mult *= max(0.5, sm_mult)
+                    dead_intel_breakdown["safety_mod"] = round(sm_mult, 3)
+            except Exception:
+                pass
+
+            # T1+T13+T14: RL Trinity feed (DT + SAC inference → trinity wakeup)
+            # FIX-A7 (2026-04-25): trinity.fuse() requires ml_prediction
+            # field to be fresh (alignment check). Audit found we never
+            # called update_ml_prediction → fuse() always returned
+            # fused=False. Now we feed both ML (from ai_decision) and RL
+            # (from SAC) before calling fuse.
+            try:
+                from dt_inference import get_dt_inference
+                from sac_inference import get_sac_inference
+                from trinity_fusion import get_trinity
+                trinity = get_trinity()
+                rl_state = {
+                    "confidence": float(confidence),
+                    "signal": signal_type,
+                    "regime_id": int(hash(regime_for_kelly) % 6),
+                    "fng": float(ai_decision.get("fng", 50.0)),
+                    "drawdown_pct": float(getattr(self.risk_budget, '_current_drawdown_pct', 0)),
+                    "balance_vs_peak": 1.0,
+                    "organism_health": float(ai_decision.get("organism_health", 0.5)),
+                    "hour_of_day": current_time.hour if current_time else 12,
+                    "uncertainty": float(ai_decision.get("uncertainty", 0.5)),
+                    "ood_score": float(ai_decision.get("ood_score", 0.0)),
+                }
+                # FIX-A7: feed ML field from RAG/agent_pool decision.
+                trinity.update_ml_prediction({
+                    "signal": signal_type,
+                    "confidence": float(confidence),
+                    "sizing_multiplier": float(ai_decision.get("sizing_multiplier", 1.0)),
+                })
+                dt = get_dt_inference()
+                sac = get_sac_inference()
+                # SAC prediction → trinity RL slot. DT predict currently
+                # returns neutral until proper action-head lands (FIX-C3).
+                sac_action, sac_q = sac.predict(rl_state)
+                # Always feed RL field if model is loaded — even neutral
+                # action lets trinity report fused=True for telemetry.
+                if sac.has_model() or abs(sac_q) > 1e-6:
+                    trinity.update_rl_action(sac_action, q_value=float(sac_q))
+                fusion_result = trinity.fuse(pair=pair, regime=regime_for_kelly)
+                if fusion_result.get("fused", False) and sac.has_model():
+                    sac_size_dim = float(sac_action[0]) if len(sac_action) > 0 else 0.0
+                    rl_mult = 1.0 + 0.3 * sac_size_dim
+                    rl_mult = max(0.7, min(1.3, rl_mult))
+                    if abs(rl_mult - 1.0) > 0.02:
+                        unified_mult *= rl_mult
+                        dead_intel_breakdown["rl_trinity"] = round(rl_mult, 3)
+            except Exception as _rl_e:
+                logger.debug(f"[DeadIntel:RL] trinity feed skipped: {_rl_e}")
+
+            # Final clamp after dead-intel enrichments.
+            # FIX-A4: re-apply B4 emergency cap so dead-intel boosts
+            # (T22 consensus +5%, T18 cerebellum, T1 RL ×1.3) cannot
+            # silently push unified_mult above the brownout safety cap.
+            unified_mult = max(0.20, min(1.50, unified_mult))
+            if _b4_active and unified_mult > _b4_emergency_cap:
+                logger.warning(
+                    f"[B4:Reapply] dead-intel boost defeated emergency cap — "
+                    f"clamping {unified_mult:.3f}→{_b4_emergency_cap:.3f}"
+                )
+                unified_mult = _b4_emergency_cap
 
             old_way = final_stake * caat_mult * sizing_mult * cerebellum_mult * lifecycle_mult
             pre_unified = final_stake
@@ -1877,7 +2229,8 @@ class HydraSizer(IStrategy):
                 f"(OLD multiplicative would be ${old_way:.2f}) "
                 f"parts={{caat:{caat_mult:.2f}, dual:{sizing_mult:.2f}, "
                 f"cereb:{cerebellum_mult:.2f}, life:{lifecycle_mult:.2f}, conf:{confidence:.2f}}} "
-                f"caat_breakdown={caat_breakdown} danger={lifecycle_danger}"
+                f"caat_breakdown={caat_breakdown} danger={lifecycle_danger} "
+                f"dead_intel={dead_intel_breakdown}"
             )
             
             # ═══ SPRINT 2: Constitution Check ═══
@@ -2178,6 +2531,19 @@ class HydraSizer(IStrategy):
                     trade.set_custom_data("entry_fng", int(last.get('%-fng_index', 50)))
                     trade.set_custom_data("entry_rsi", round(float(last.get('rsi', 50)), 1))
                     trade.set_custom_data("entry_sentiment_24h", round(float(last.get('%-sentiment_24h', 0)), 3))
+                # FIX-C1 (2026-04-25): persist which RL motor was selected
+                # at entry. confirm_trade_exit reads this back to update
+                # the per-motor HRL tracker (T2). Without this write the
+                # motor branch was dead code (audit found 0 writers).
+                try:
+                    from hrl_meta_policy import get_meta_policy as _gmp_motor
+                    motor = _gmp_motor().select_motor(
+                        regime=ai_decision.get("regime") or "_global"
+                    )
+                    if motor in ("iql", "sac", "dt"):
+                        trade.set_custom_data("rl_motor", motor)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.debug(f"[custom_data] Failed to store: {e}")
 
@@ -2297,6 +2663,33 @@ class HydraSizer(IStrategy):
                 f"{'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → "
                 f"win_p={wp:.3f} kelly_f={kf:.4f}"
             )
+
+            # T2 (2026-04-25): HRL meta-policy feedback. Without this call
+            # the per-organ tracker never accumulates statistics and
+            # `meta.get_organ_weight("sizing")` returns 1.0 forever — the
+            # entire HRL → CAAT chain in custom_stake_amount was a no-op.
+            # Now sizing/IQL/SAC organs accumulate per-trade reward and
+            # win-rate, and CAAT can actually weight them.
+            try:
+                # FIX-A2 (2026-04-25): use singleton accessor so stats
+                # persist across confirm_trade_exit calls. Audit found
+                # `HRLMetaPolicy()` per-call discarded all updates because
+                # OrganPerformanceTracker is in-memory only — fresh tracker
+                # per instance meant get_organ_weight() always returned 1.0.
+                from hrl_meta_policy import get_meta_policy
+                meta = get_meta_policy()
+                meta.update("sizing", reward=pnl_pct, win=won)
+                # Also update the motor that was selected at entry, if known.
+                motor = trade.get_custom_data("rl_motor") if hasattr(trade, "get_custom_data") else None
+                if motor in ("iql", "sac", "dt"):
+                    meta.update(motor, reward=pnl_pct, win=won)
+                # FIX-C2: persist tracker state so restart doesn't reset stats.
+                try:
+                    meta.organ_tracker.persist_to_db()
+                except Exception:
+                    pass
+            except Exception as _hrl_e:
+                logger.debug(f"[T2:HRL] update failed: {_hrl_e}")
         except Exception as e:
             logger.warning(f"[BayesianKelly] Update failed: {e}")
 
@@ -2922,6 +3315,19 @@ class HydraSizer(IStrategy):
                     best_ask = float(ob["asks"][0][0])
                     mid = (best_bid + best_ask) / 2.0
                     spread = best_ask - best_bid
+                    # FIX-A6 (2026-04-25): publish mm_state pheromone so
+                    # T17 spread-toxic gate has a producer. Audit found
+                    # the publish_to_pheromone method had ZERO callers.
+                    try:
+                        half_spread_pct = (spread / mid) * 50.0 if mid > 0 else 0.0
+                        mm.publish_to_pheromone({
+                            "mode": "mm" if adx_val < 20 else "trend",
+                            "half_spread_pct": half_spread_pct,
+                            "gamma_effective": 0.0,
+                            "bp_ema": 0.0,
+                        }, pair)
+                    except Exception:
+                        pass
                     # GLFT skew: shrink half-spread by 30%, then bias by inventory.
                     inventory = mm._position.get(pair, 0.0) if hasattr(mm, "_position") else 0.0
                     skew = -0.0001 * inventory  # negative inventory → quote tighter on the bid

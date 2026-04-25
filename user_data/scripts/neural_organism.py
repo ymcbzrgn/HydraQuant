@@ -2004,10 +2004,21 @@ class NeuralOrganism:
         fear_response = (self.amygdala.process_loss(pnl_pct) if not won
                          else {"fear_level": 0, "learning_mult": 1.0, "sizing_mult": 1.0, "tier": "normal"})
 
-        # Phase 28: Deposit fear level to pheromone field
+        # Phase 28: Deposit fear level to pheromone field.
+        # FIX-A3 (2026-04-25): deposit DICT instead of scalar so
+        # consumers (HydraSizer T16 fear gate) can read tier + level.
+        # Audit found scalar deposit + dict consumer = silent dead wire.
         try:
-            _pfield.deposit("neural_organism", "FEAR_LEVEL",
-                            fear_response.get("fear_level", 0.0), half_life=300)
+            _pfield.deposit(
+                "neural_organism", "FEAR_LEVEL",
+                {
+                    "fear_level": float(fear_response.get("fear_level", 0.0)),
+                    "tier": str(fear_response.get("tier", "normal")),
+                    "sizing_mult": float(fear_response.get("sizing_mult", 1.0)),
+                    "intensity": float(fear_response.get("fear_level", 0.0)) / 3.0,
+                },
+                half_life=300,
+            )
         except Exception:
             pass
 
@@ -2167,6 +2178,147 @@ class NeuralOrganism:
         except Exception:
             pass
         return out
+
+    # ─── T15 — Architecture genome adoption ───
+
+    def adopt_genome(self, genome: dict, blend_ratio: float = 0.20) -> int:
+        """Blend live neuron values toward a saved architecture-evolver genome.
+
+        T15 (2026-04-25): architecture_evolver.py:343 saves
+        `models/genome_best.json` weekly. FIX-B4 (2026-04-25): the saved
+        genome shape is `{organs: {organ_name: {sub_organs, neuron_count}},
+        connections: [...], meta: {...}, fitness, generation}` — there is
+        NO `params` dict mapping pid→value (audit caught this). This
+        method now translates organ-level statistics into neuron-level
+        targets:
+          - For each organ in the genome, scale all live neurons of that
+            organ toward the genome's `neuron_count` and `sub_organs`
+            indirectly via a target of `default_val * (1 + organ_strength)`
+          - Direct `params` shape is also accepted (backward compat).
+
+        Returns count of neurons moved. Logs detailed breakdown.
+        """
+        if not isinstance(genome, dict):
+            return 0
+        moved = 0
+
+        # Path A: direct params dict (test fixture / future format)
+        params = genome.get("params")
+        if isinstance(params, dict) and params:
+            for (pid, regime), neuron in self._neurons.items():
+                key = f"{pid}:{regime}"
+                target = params.get(key)
+                if target is None and regime == "_global":
+                    target = params.get(pid)
+                if target is None:
+                    continue
+                try:
+                    target_val = float(target)
+                except (TypeError, ValueError):
+                    continue
+                if neuron.frozen:
+                    continue
+                old = neuron.current_val
+                blended = old * (1.0 - blend_ratio) + target_val * blend_ratio
+                neuron.current_val = max(neuron.min_bound, min(neuron.max_bound, blended))
+                if abs(neuron.current_val - old) > 1e-6:
+                    moved += 1
+
+        # Path B: architecture_evolver real shape — organs dict
+        organs = genome.get("organs")
+        if isinstance(organs, dict) and organs and moved == 0:
+            # For each organ in genome, compute a target multiplier from its
+            # `active`/`sub_organs`/`neuron_count` heuristics. Active+rich
+            # organs pull live neurons UP toward defaults (recovering from
+            # any drift); inactive/lean organs pull DOWN.
+            for organ_name, organ_cfg in organs.items():
+                if not isinstance(organ_cfg, dict):
+                    continue
+                active = bool(organ_cfg.get("active", True))
+                sub_organs = int(organ_cfg.get("sub_organs", 1) or 1)
+                neuron_count = int(organ_cfg.get("neuron_count", 1) or 1)
+                # Strength heuristic: more sub_organs + neurons + active → +
+                strength = (
+                    (1.0 if active else 0.5)
+                    * min(2.0, sub_organs / 2.0)
+                    * min(2.0, neuron_count / 4.0)
+                )
+                multiplier = max(0.5, min(1.5, 0.5 + 0.5 * strength))
+                for (pid, regime), neuron in self._neurons.items():
+                    if neuron.organ != organ_name or neuron.frozen:
+                        continue
+                    target_val = neuron.default_val * multiplier
+                    target_val = max(neuron.min_bound, min(neuron.max_bound, target_val))
+                    old = neuron.current_val
+                    blended = old * (1.0 - blend_ratio) + target_val * blend_ratio
+                    neuron.current_val = max(neuron.min_bound, min(neuron.max_bound, blended))
+                    if abs(neuron.current_val - old) > 1e-6:
+                        moved += 1
+
+        if moved:
+            logger.info(
+                f"[NeuralOrganism:AdoptGenome] {moved} neurons blended "
+                f"{blend_ratio:.0%} toward genome (fitness={genome.get('fitness', 'n/a')}, "
+                f"shape={'params' if params else 'organs' if organs else 'unknown'})"
+            )
+        return moved
+
+    # ─── T12 — DMN synapse discovery propagation ───
+
+    def adopt_synapse_discoveries(self, discoveries: list) -> int:
+        """Take DMN's synapse_candidates list and add valid ones to the
+        live SynapseNetwork edges.
+
+        T12 (2026-04-25): DefaultModeNetwork.run_idle_cycle returns a
+        `synapse_candidates` list of (source, target, co_activity) tuples.
+        scheduler._organism_dmn used to log `len(...)` and discard the
+        list — the organism's connectivity graph was therefore static.
+        Now valid candidates (co_activity > 0.05, source/target exist as
+        neurons, edge not already in SEED_SYNAPSES) get added to
+        `self.synapses._edges` so propagation actually walks them.
+        """
+        if not discoveries:
+            return 0
+        added = 0
+        existing_edges = {(src, tgt)
+                          for src, edges in self.synapses._edges.items()
+                          for tgt, _, _ in edges}
+        organ_keys_global = {(pid, "_global") for (pid, _) in self._neurons.keys()}
+        valid_pids = {pid for (pid, _) in self._neurons.keys()}
+        for cand in discoveries:
+            try:
+                if isinstance(cand, dict):
+                    src = cand.get("source") or cand.get("src")
+                    tgt = cand.get("target") or cand.get("tgt")
+                    co = float(cand.get("co_activity", cand.get("weight", 0.0)))
+                    stype = cand.get("type", "excitatory")
+                elif isinstance(cand, (tuple, list)) and len(cand) >= 3:
+                    src, tgt, co = cand[0], cand[1], float(cand[2])
+                    stype = cand[3] if len(cand) > 3 else "excitatory"
+                else:
+                    continue
+                # FIX-B7 (2026-04-25): producer floor is theta_m > 0.01,
+                # so co_activity = min(t1.theta_m, t2.theta_m) ≥ 0.01.
+                # Original consumer floor 0.05 was 5× stricter → all
+                # discoveries rejected. Align at 0.012 (slight margin
+                # above producer floor) so genuine candidates pass.
+                if co < 0.012 or not src or not tgt:
+                    continue
+                if src not in valid_pids or tgt not in valid_pids:
+                    continue
+                if (src, tgt) in existing_edges:
+                    continue
+                weight = max(0.05, min(0.6, co))
+                self.synapses._edges.setdefault(src, []).append((tgt, weight, stype))
+                existing_edges.add((src, tgt))
+                added += 1
+            except Exception:
+                continue
+        if added:
+            logger.info(
+                f"[NeuralOrganism:AdoptSynapses] {added} new synapse edges from DMN discoveries"
+            )
+        return added
 
     # ─── DECAY — Hourly metabolic decay ───
 

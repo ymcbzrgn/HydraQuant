@@ -292,6 +292,15 @@ class OrderFlowAnalyzer:
         elif abs(result["cvd_slope"]) < 0.1:
             result["aggression_state"] = "balanced"
 
+        # FIX-A6 (2026-04-25): publish to pheromone field so HydraSizer's
+        # T3 squeeze gate can read order_flow_state. Audit found that
+        # publish_to_pheromone existed but had ZERO callers — the entire
+        # squeeze veto path was a phantom-consumer.
+        try:
+            self.publish_to_pheromone(result, pair)
+        except Exception:
+            pass
+
         return result
 
     def _compute_cvd(self, pair: str, trades: List[Dict]) -> Dict:

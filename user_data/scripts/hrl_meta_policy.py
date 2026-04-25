@@ -92,6 +92,14 @@ class OrganPerformanceTracker:
             "last_activated": None,
             "win_rate": 0.5,
         } for organ in ORGANS}
+        # FIX-C2 (2026-04-25): restore persisted state on init so freqtrade
+        # restart doesn't reset all activation_count/win_rate to zero. Audit
+        # found get_organ_weight returns 1.0 until n_activations>=5 — without
+        # persistence the 5-trade ramp restarts every deploy.
+        try:
+            self._restore_from_db()
+        except Exception as e:
+            logger.debug(f"[OrganTracker] restore failed: {e}")
 
     def update(self, organ_name: str, reward: float, win: bool):
         """Update organ performance after its action is applied."""
@@ -107,6 +115,78 @@ class OrganPerformanceTracker:
         m["activation_count"] += 1
         m["last_activated"] = datetime.utcnow().isoformat()
         m["win_rate"] = (m["win_rate"] * 0.95 + (1.0 if win else 0.0) * 0.05)
+
+    def persist_to_db(self) -> None:
+        """Write current per-organ metrics to hrl_organ_metrics table.
+        FIX-C2 (2026-04-25): closes the persistence gap audit identified.
+        """
+        try:
+            from db import get_db_connection
+            import json as _json
+            with get_db_connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS hrl_organ_metrics (
+                        organ_name TEXT PRIMARY KEY,
+                        avg_reward REAL,
+                        win_rate REAL,
+                        activation_count INTEGER,
+                        last_activated TEXT,
+                        recent_pnl_json TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                for name, m in self._metrics.items():
+                    conn.execute("""
+                        INSERT INTO hrl_organ_metrics
+                            (organ_name, avg_reward, win_rate, activation_count,
+                             last_activated, recent_pnl_json, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                        ON CONFLICT(organ_name) DO UPDATE SET
+                            avg_reward = excluded.avg_reward,
+                            win_rate = excluded.win_rate,
+                            activation_count = excluded.activation_count,
+                            last_activated = excluded.last_activated,
+                            recent_pnl_json = excluded.recent_pnl_json,
+                            updated_at = excluded.updated_at
+                    """, (name, float(m.get("avg_reward", 0.0)),
+                          float(m.get("win_rate", 0.5)),
+                          int(m.get("activation_count", 0)),
+                          m.get("last_activated"),
+                          _json.dumps(m.get("recent_pnl", []))))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"[OrganTracker] persist failed: {e}")
+
+    def _restore_from_db(self) -> None:
+        try:
+            from db import get_db_connection
+            import json as _json
+            with get_db_connection() as conn:
+                rows = conn.execute("""
+                    SELECT organ_name, avg_reward, win_rate, activation_count,
+                           last_activated, recent_pnl_json
+                      FROM hrl_organ_metrics
+                """).fetchall()
+            restored = 0
+            for row in rows:
+                name = row["organ_name"]
+                if name not in self._metrics:
+                    continue
+                m = self._metrics[name]
+                m["avg_reward"] = float(row["avg_reward"] or 0.0)
+                m["win_rate"] = float(row["win_rate"] or 0.5)
+                m["activation_count"] = int(row["activation_count"] or 0)
+                m["last_activated"] = row["last_activated"]
+                try:
+                    m["recent_pnl"] = list(_json.loads(row["recent_pnl_json"] or "[]"))
+                except Exception:
+                    m["recent_pnl"] = []
+                restored += 1
+            if restored:
+                logger.info(f"[OrganTracker] restored {restored} organ metrics from DB")
+        except Exception:
+            # Table doesn't exist yet — first run. Will be created on first persist.
+            pass
 
     def get_state_vector(self) -> np.ndarray:
         """Get organ performance as state vector (N_ORGANS × 4)."""
@@ -417,19 +497,46 @@ class HRLMetaPolicy:
         so sizing can respect "is the IQL motor or SAC motor in charge right
         now?" decisions. Returns 1.0 (neutral) when the organ is unknown or
         the policy hasn't trained yet.
+
+        T2 fix (2026-04-25): the previous version read `metric["mean"]`
+        which never existed (OrganPerformanceTracker only writes
+        `avg_reward` and `win_rate`). So this method permanently
+        returned 1.0 even after thousands of updates — the entire
+        meta-policy chain was a no-op. Now we blend win_rate (0..1
+        baseline 0.5) and avg_reward to a [0.5, 1.5] weight.
         """
         try:
             stats = self.organ_tracker.get_metrics() if hasattr(self.organ_tracker, "get_metrics") else {}
             if organ_name in stats:
                 metric = stats[organ_name]
                 if isinstance(metric, dict):
-                    val = float(metric.get("mean", 1.0))
+                    win_rate = float(metric.get("win_rate", 0.5))
+                    avg_reward = float(metric.get("avg_reward", 0.0))
+                    n = int(metric.get("activation_count", 0) or 0)
+                    if n < 5:
+                        return 1.0  # not enough evidence yet
+                    # win_rate=0.5 baseline → 1.0; 0.7 → 1.4; 0.3 → 0.6
+                    wr_weight = 1.0 + (win_rate - 0.5) * 2.0
+                    # avg_reward additive: +5% pnl → +0.05 boost
+                    rw_weight = 1.0 + max(-0.5, min(0.5, avg_reward))
+                    blended = 0.6 * wr_weight + 0.4 * rw_weight
+                    return max(0.5, min(1.5, blended))
                 else:
                     val = float(metric)
                 return max(0.5, min(1.5, val))
         except Exception:
             pass
         return 1.0
+
+    # T2 (2026-04-25): instance-level update() so callers can write
+    # `meta.update("sizing", pnl, won)` instead of poking the inner
+    # tracker. Closes the feedback loop: HydraSizer.confirm_trade_exit
+    # calls this; get_organ_weight starts returning real values.
+    def update(self, organ_name: str, reward: float, win: bool) -> None:
+        try:
+            self.organ_tracker.update(organ_name, reward=reward, win=win)
+        except Exception as e:
+            logger.debug(f"[HRL] update failed for {organ_name}: {e}")
 
     # ─── Phase 27 Item 11: motor selector — IQL vs SAC ──
     def select_motor(self, regime: Optional[str] = None) -> str:

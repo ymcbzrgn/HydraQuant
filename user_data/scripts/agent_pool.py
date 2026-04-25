@@ -605,6 +605,25 @@ class AgentPool:
         except Exception:
             pass
 
+        # T19 (2026-04-25): RAG cache dead bypass. When the semantic cache
+        # has hit_rate <5% on >=50 events, scheduler deposits
+        # `rag_cache_dead`. Combined with any LLM degradation we should
+        # skip MADAM and let the technical fallback drive — running the
+        # full debate without retrieval cache is just expensive noise.
+        try:
+            from pheromone_field import get_pheromone_field as _gpf_t19
+            cache_dead = _gpf_t19().read("rag_cache_dead", source="cache_health")
+            if isinstance(cache_dead, dict):
+                hr = float(cache_dead.get("hit_rate", 1.0))
+                if hr < 0.05:
+                    logger.warning(
+                        f"[T19:CacheDead] MADAM bypass — RAG cache hit_rate={hr:.1%} "
+                        f"(retrieval is broken, debate adds noise)"
+                    )
+                    return None
+        except Exception:
+            pass
+
         llm_to_use = llm or self._llm
         if not llm_to_use:
             logger.warning(
