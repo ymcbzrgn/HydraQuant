@@ -382,9 +382,16 @@ class PheromoneField:
 
     # ─── Maintenance ────────────────────────────────────────────────────────
 
-    def cleanup(self) -> int:
+    def cleanup(self, max_idle_seconds: Optional[float] = None) -> int:
         """Remove trails whose latest deposit is fully decayed.
-        Called periodically by scheduler."""
+
+        Called periodically by scheduler. When `max_idle_seconds` is
+        provided, also evict any trail whose latest deposit is older
+        than that wall-clock window — this is the adaptive path the
+        scheduler exercises under memory pressure (drops trail age cap
+        from default 300s to 60s when memory_pressure > 0.7) so the
+        field's footprint shrinks alongside the rest of the organism.
+        """
         now = time.monotonic()
         dead_keys = []
         for compound_key, trail in self._field.items():
@@ -395,6 +402,9 @@ class PheromoneField:
             age = now - pheromone.deposited_at
             decay = 0.5 ** (age / max(pheromone.half_life, 0.1))
             if decay < 0.001:  # <0.1% strength → dead
+                dead_keys.append(compound_key)
+                continue
+            if max_idle_seconds is not None and age > max_idle_seconds:
                 dead_keys.append(compound_key)
 
         for key in dead_keys:
@@ -476,12 +486,16 @@ class PheromoneField:
         """Best-effort scalar extraction for integral / LIF math.
 
         Numbers → themselves. Dicts → look up common fields
-        (value, confidence, score, level, strength). Sequences → length. Else 0.
+        (value, confidence, score, level, strength, intensity). Sequences → length.
+        Else 0. The "intensity" key matches the convention used by the
+        sensor_bridges afferent producers — without it the LIF accumulator
+        for all four exogenous sensors silently saturated at TAU_MIN, so
+        aggregate_sensor_stress reported ~0.001 instead of the true value.
         """
         if isinstance(value, (int, float)):
             return float(value)
         if isinstance(value, dict):
-            for key in ("value", "confidence", "score", "level", "strength"):
+            for key in ("value", "confidence", "score", "level", "strength", "intensity"):
                 if key in value:
                     try:
                         return float(value[key])

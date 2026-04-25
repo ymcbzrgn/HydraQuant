@@ -568,12 +568,42 @@ class AgentPool:
     # ═══════════════════════════════════════════════════════════
 
     def run_debate(self, pair: str, evidence_factsheet: str, regime: str,
-                   tech_data: dict, llm=None) -> Dict[str, Any]:
+                   tech_data: dict, llm=None) -> Optional[Dict[str, Any]]:
         """
         Run multi-round debate among selected agents.
         Returns: {signal, confidence, reasoning, agent_votes, source}
         """
         from langchain_core.messages import HumanMessage, SystemMessage
+
+        # B3 (2026-04-25): tier suspend when LLM fleet is exhausted.
+        # The 79-slot fleet observed sustained ratio<0.10 for 11.5h post-
+        # deploy. Continuing MADAM debate under that load just multiplies
+        # the failure rate (each agent retries the same dead slots). Skip
+        # to caller fallback — coordinator + EE remain — and let the
+        # llm_router cooldown jitter (B2) recover the fleet without our
+        # help. Cuts LLM call volume ~50% during a brownout.
+        # AUDIT-7 (2026-04-25): apply pheromone _decay so a recovered fleet
+        # re-opens the gate within a single half-life instead of waiting
+        # for the trail to fully decay.
+        try:
+            from pheromone_field import get_pheromone_field
+            fleet = get_pheromone_field().read("fleet_exhausted", source="llm_router")
+            if isinstance(fleet, dict):
+                raw_ratio = float(fleet.get("ratio", 0.0))
+                decay = float(fleet.get("_decay", 1.0))
+                # As the trail decays, the EFFECTIVE brownout signal weakens.
+                # ratio scaled toward 1.0 (healthy) by (1-decay).
+                effective_ratio = raw_ratio * decay + (1.0 - decay) * 1.0
+                if effective_ratio < 0.10:
+                    logger.warning(
+                        f"[AgentPool:Debate] fleet_exhausted "
+                        f"(raw={raw_ratio:.2%} decay={decay:.2f} "
+                        f"effective={effective_ratio:.2%}) — "
+                        f"skipping MADAM debate, returning None for caller fallback"
+                    )
+                    return None
+        except Exception:
+            pass
 
         llm_to_use = llm or self._llm
         if not llm_to_use:

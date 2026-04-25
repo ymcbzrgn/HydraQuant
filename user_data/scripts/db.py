@@ -453,7 +453,15 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS embedding_cache (
             text_hash TEXT PRIMARY KEY, text_content TEXT NOT NULL,
             gemini_embedding BLOB, bge_embedding BLOB,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        # AUDIT-9 (2026-04-25): true LRU needs last_used_at, refreshed on
+        # every cache HIT (not just on miss INSERT). Idempotent migration
+        # adds the column for DBs created before this change.
+        try:
+            c.execute("ALTER TABLE embedding_cache ADD COLUMN last_used_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         c.execute('''CREATE VIRTUAL TABLE IF NOT EXISTS bm25_index USING fts5(
             doc_id UNINDEXED, content, tokenize = 'porter unicode61')''')

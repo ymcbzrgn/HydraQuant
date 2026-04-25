@@ -325,6 +325,17 @@ class DualEmbeddingPipeline:
                 if row and row['gemini_embedding'] and row['bge_embedding']:
                     gemini_emb = json.loads(row['gemini_embedding'])
                     bge_emb = json.loads(row['bge_embedding'])
+                    # AUDIT-9 (2026-04-25): refresh last_used_at on hit so
+                    # the daily LRU eviction (scheduler._embedding_cache_evict)
+                    # ranks by actual access recency, not first-mint time.
+                    try:
+                        cursor.execute(
+                            "UPDATE embedding_cache SET last_used_at = CURRENT_TIMESTAMP WHERE text_hash = ?",
+                            (text_hash,),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
                     return {
                         "gemini": gemini_emb,
                         "bge": bge_emb,

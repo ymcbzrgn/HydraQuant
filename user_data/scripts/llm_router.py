@@ -533,10 +533,19 @@ class ModelSlot:
         except Exception:
             pass
 
-        self.penalty_until = time.time() + penalty
+        # B2 (2026-04-25): jitter the penalty expiry by up to 30% so
+        # synchronized cooldowns don't all expire at the same instant
+        # and stampede the next request. Without this, 79-slot brownouts
+        # observed in prod were self-synchronizing — every slot tried at
+        # `now + penalty` simultaneously, all hit Gemini 503 again, all
+        # got re-penalized for the same fresh window.
+        import random as _random
+        jitter = _random.uniform(0.0, max(0.0, penalty) * 0.3)
+        self.penalty_until = time.time() + penalty + jitter
         if penalty >= 60:
             logger.warning(f"[Penalize] {self.model_name} penalized {penalty:.0f}s "
-                           f"(type={error_type}, backoff_level={self.backoff_level})")
+                           f"(+{jitter:.1f}s jitter, type={error_type}, "
+                           f"backoff_level={self.backoff_level})")
 
         # EK Sprint 2026-04-23 (EK.2.6): failures feed LinUCB with reward=0
         # so the bandit learns to avoid slots/contexts where this model fails.
@@ -884,6 +893,18 @@ class LLMRouter:
         except Exception as e:
             logger.debug(f"[LinUCB:Persist] startup restore failed: {e}")
 
+        # AUDIT-5 (2026-04-25): start fleet observability daemon. Logs
+        # fleet_health() every 60s and deposits a "llm_fleet_state"
+        # pheromone (separate from the brownout-only "fleet_exhausted"
+        # trail). Without this, fleet_health() was dead code; now the
+        # /api/ai dashboard + grep workflow + downstream consumers
+        # always see a live snapshot.
+        self._fleet_observer_thread: Optional[threading.Thread] = None
+        try:
+            self._start_fleet_observer()
+        except Exception as e:
+            logger.debug(f"[FleetObserver] failed to start: {e}")
+
     # ── Model Discovery (unchanged from Phase 5.3) ────────────────────
 
     @staticmethod
@@ -1006,6 +1027,123 @@ class LLMRouter:
             return 3.0 - (2.0 * (total_calls - 500) / 1500.0)
         return 0.5
 
+    def _start_fleet_observer(self) -> None:
+        """Daemon thread that ticks fleet_health every 60s, logs the
+        snapshot, and deposits an "llm_fleet_state" pheromone so external
+        observers + dashboards can read it without grepping logs.
+        """
+        if self._fleet_observer_thread is not None and self._fleet_observer_thread.is_alive():
+            return
+
+        def _loop():
+            while True:
+                try:
+                    time.sleep(60.0)
+                    snap = self.fleet_health()
+                    logger.info(
+                        f"[FleetObserver] avail={snap['available']}/{snap['total']} "
+                        f"ratio={snap['ratio']:.2%} "
+                        f"penalty={snap['penalty']} rpm={snap['rpm_limited']} "
+                        f"dead={snap['dead']} "
+                        f"gemini_circuit={'OPEN' if snap['gemini_circuit_open'] else 'closed'}"
+                    )
+                    try:
+                        from pheromone_field import get_pheromone_field
+                        get_pheromone_field().deposit(
+                            "llm_router",
+                            "llm_fleet_state",
+                            {
+                                "intensity": 1.0 - snap["ratio"],
+                                "ratio": snap["ratio"],
+                                "available": snap["available"],
+                                "total": snap["total"],
+                                "penalty": snap["penalty"],
+                                "rpm_limited": snap["rpm_limited"],
+                                "dead": snap["dead"],
+                            },
+                            half_life=120.0,
+                        )
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.debug(f"[FleetObserver] tick error: {e}")
+
+        self._fleet_observer_thread = threading.Thread(
+            target=_loop, name="llm-fleet-observer", daemon=True
+        )
+        self._fleet_observer_thread.start()
+        logger.info("[FleetObserver] started (60s cadence)")
+
+    def fleet_health(self) -> Dict[str, Any]:
+        """Return fleet availability snapshot.
+
+        ratio = available / total. The 79-slot fleet observed ratio < 0.05
+        for 11.5h post-deploy as Gemini and Groq cascaded into 503/penalty
+        loops simultaneously. Downstream consumers (agent_pool, HydraSizer)
+        read the `fleet_exhausted` pheromone deposited by `_select_slots`
+        when this ratio is critical.
+        """
+        now = time.time()
+        circuit_open = False
+        try:
+            circuit_open = self.gemini_circuit.is_open()
+        except Exception:
+            pass
+        avail = 0
+        penalty = 0
+        rpm = 0
+        dead = 0
+        for s in self.slots:
+            try:
+                if s.is_available(now, estimated_tokens=0):
+                    avail += 1
+                    continue
+                if s.disabled:
+                    dead += 1
+                elif now < s.penalty_until:
+                    penalty += 1
+                else:
+                    rpm += 1
+            except Exception:
+                continue
+        total = max(1, len(self.slots))
+        return {
+            "ratio": round(avail / total, 4),
+            "available": avail,
+            "penalty": penalty,
+            "rpm_limited": rpm,
+            "dead": dead,
+            "total": total,
+            "gemini_circuit_open": circuit_open,
+        }
+
+    def _deposit_fleet_health(self, avail: int, total: int,
+                              reason: str = "low_ratio") -> None:
+        """Publish fleet_exhausted pheromone for downstream consumers.
+
+        AUDIT-7 (2026-04-25): half_life dropped 300s → 60s. The previous
+        300s window kept the gate firing for ~30 min after fleet recovery
+        because the LIF accumulator saturated at TAU_MAX during a sustained
+        brownout. With 60s half_life + the same `_select_slots` call rate,
+        the trail re-saturates within a tick when the brownout persists,
+        but recovers in <2 min once the fleet heals. Consumers also now
+        decay-correct (read multiplied by _decay), but the shorter window
+        is the load-bearing fix.
+        """
+        ratio = avail / max(1, total)
+        try:
+            from pheromone_field import get_pheromone_field
+            pfield = get_pheromone_field()
+            pfield.deposit(
+                "llm_router", "fleet_exhausted",
+                {"intensity": 1.0 - ratio, "ratio": ratio,
+                 "available": avail, "total": total, "reason": reason},
+                half_life=60.0,
+                metadata={"reason": reason},
+            )
+        except Exception:
+            pass
+
     def _select_slots(self, priority: Optional[str] = None,
                       estimated_tokens: int = 0,
                       task_context: Optional[Dict[str, Any]] = None) -> List[ModelSlot]:
@@ -1054,7 +1192,18 @@ class LLMRouter:
             logger.error(f"[SelectSlots] All {len(self.slots)} slots exhausted "
                          f"(penalty={skipped_penalty}, rpm_limit={skipped_rpm}, "
                          f"circuit={'OPEN' if circuit_open else 'closed'})")
+            self._deposit_fleet_health(0, len(self.slots), reason="all_exhausted")
             raise ValueError("All providers exhausted (all slots penalized or rate-limited).")
+
+        # B1 (2026-04-25): publish fleet health pheromone whenever the
+        # available ratio drops below 10%. Consumers (agent_pool tier
+        # suspend, HydraSizer emergency degraded mode) read this trail
+        # and skip MADAM debate / cap sizing without grepping logs.
+        total_slots = max(1, len(self.slots))
+        ratio = len(eligible) / total_slots
+        if ratio < 0.10:
+            self._deposit_fleet_health(len(eligible), total_slots,
+                                       reason="low_ratio")
 
         from ai_config import get_flag
         lat_enabled = get_flag("llm_router_latency_weight_enabled", True)

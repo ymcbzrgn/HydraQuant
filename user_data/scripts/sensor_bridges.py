@@ -47,11 +47,13 @@ SOURCE_LIQUIDITY = "liquidity_sensor"
 SOURCE_EXCHANGE = "exchange_sensor"
 SOURCE_DATA = "data_freshness_sensor"
 SOURCE_SHADOW = "shadow_kelly_sensor"
+SOURCE_MEMORY = "memory_pressure_sensor"
 
 SIG_EMPTY_ORDERBOOK = "empty_orderbook"
 SIG_WS_DISCONNECT = "ws_disconnect"
 SIG_DATA_STARVATION = "data_starvation"
 SIG_SHADOW_DIVERGENCE = "shadow_divergence"
+SIG_MEMORY_STRESS = "memory_stress"
 
 
 def _safe_deposit(source: str, sig: str, value: Any, half_life: float,
@@ -178,11 +180,21 @@ _SENSOR_CAPS: Dict[Tuple[str, str], float] = {
 }
 _FIELD_TAU_MAX = 10.0  # pheromone_field.PheromoneField.TAU_MAX
 
+# Memory pressure intentionally LIVES OUTSIDE _SENSOR_CAPS. Hormones.compute()
+# weights memory more heavily (cap 0.40) than the exogenous sensor_stress
+# aggregate (cap 0.30); blending memory into _SENSOR_CAPS as well would
+# double-count it (audit 2026-04-25 caught this — a saturated memory trail
+# was contributing 0.49 instead of the design 0.40). aggregate_memory_stress
+# reads the trail directly via _MEMORY_KEY.
+_MEMORY_KEY: Tuple[str, str] = (SOURCE_MEMORY, SIG_MEMORY_STRESS)
+
 
 def aggregate_sensor_stress() -> float:
     """Return a [0..1] exogenous stress scalar built from the decayed
-    trails of all four sensors. Safe to call from any hot path — never
-    raises, returns 0.0 when the field is unavailable or cold.
+    trails of the four EXOGENOUS sensor channels (orderbook, ws, data,
+    shadow). Memory pressure is its own dedicated channel — see
+    aggregate_memory_stress(). Safe to call from any hot path —
+    never raises, returns 0.0 when the field is unavailable or cold.
 
     Semantics: 0.0 = no exogenous pain, 1.0 = all sensors saturated.
     Feeds into neural_organism.Hormones.compute() as `sensor_stress`.
@@ -199,23 +211,52 @@ def aggregate_sensor_stress() -> float:
     return min(1.0, max(0.0, total))
 
 
+def aggregate_memory_stress() -> float:
+    """Return a [0..1] memory-only stress scalar.
+
+    The most recent memory_sensor deposit carries `intensity ∈ [0,1]` in
+    its payload; we read the LIF accumulated magnitude (already MMAS-clamped
+    by pheromone_field) and normalise the same way aggregate_sensor_stress
+    does — so a saturated memory trail returns ~1.0 and a quiet one 0.0.
+
+    This is intentionally a separate channel from aggregate_sensor_stress:
+    Hormones.compute() weights memory pressure more heavily (cap 0.4 vs
+    sensor_stress cap 0.3) because RAM/swap saturation is an existential
+    organism state, not a transient external irritation.
+    """
+    raw = _safe_read_float(SOURCE_MEMORY, SIG_MEMORY_STRESS)
+    if raw is None or raw <= 0:
+        return 0.0
+    return min(1.0, max(0.0, raw / _FIELD_TAU_MAX))
+
+
 def active_sensor_count() -> int:
     """Number of sensors currently carrying a non-zero pheromone trail.
-    Drives the dynamic `active_sources` kwarg that used to be hardcoded
-    at 4 in HydraSizer — lets the organism notice when data channels go
-    dark.
+
+    Counts all 5 channels: 4 exogenous (orderbook, ws, data, shadow)
+    plus the memory homeostasis channel. NOTE: a sensor "firing" here
+    means its PAIN signal is active (orderbook empty, ws dropped, etc.),
+    not "the channel is healthy". Callers that map this to info_q should
+    interpret high counts as DEGRADED state, not as more data feeds.
     """
     count = 0
     for (src, sig) in _SENSOR_CAPS.keys():
         raw = _safe_read_float(src, sig)
         if raw is not None and raw > 0:
             count += 1
+    # Memory channel is not in _SENSOR_CAPS but is a 5th afferent.
+    raw_mem = _safe_read_float(SOURCE_MEMORY, SIG_MEMORY_STRESS)
+    if raw_mem is not None and raw_mem > 0:
+        count += 1
     return count
 
 
 def snapshot() -> Dict[str, Any]:
     """Introspection helper for the /api/ai endpoints + daily postmortem."""
-    out: Dict[str, Any] = {"sensor_stress": aggregate_sensor_stress()}
+    out: Dict[str, Any] = {
+        "sensor_stress": aggregate_sensor_stress(),
+        "memory_stress": aggregate_memory_stress(),
+    }
     for (src, sig), cap in _SENSOR_CAPS.items():
         raw = _safe_read_float(src, sig)
         out[f"{src}.{sig}"] = {
@@ -223,6 +264,14 @@ def snapshot() -> Dict[str, Any]:
             "cap": cap,
             "contribution": cap * min(1.0, (raw or 0.0) / _FIELD_TAU_MAX),
         }
+    # Memory channel — separate cap (0.40 in Hormones.compute), not in
+    # _SENSOR_CAPS to avoid double-counting.
+    raw_mem = _safe_read_float(SOURCE_MEMORY, SIG_MEMORY_STRESS)
+    out[f"{SOURCE_MEMORY}.{SIG_MEMORY_STRESS}"] = {
+        "accumulated": raw_mem,
+        "cap": 0.40,
+        "contribution": 0.40 * min(1.0, (raw_mem or 0.0) / _FIELD_TAU_MAX),
+    }
     return out
 
 

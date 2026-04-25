@@ -677,11 +677,19 @@ class Hormones:
         # so "peak cortisol memory" means the LOW we hit — we clamp downward.
         self._trough_cortisol: float = 1.0
         self._trough_cortisol_time: Optional[datetime] = None
+        # AUDIT-8 (2026-04-25): compute() is now invoked from TWO threads:
+        # update_cycle (strategy thread, on trade exit) and refresh_hormones
+        # (APScheduler thread, every 5 min). The read-modify-write of
+        # _trough_cortisol/_trough_cortisol_time is non-atomic. With the
+        # lock the worst case is a brief contention; without it, two
+        # concurrent computes can mutually clobber the trough state.
+        self._compute_lock = threading.Lock()
 
     def compute(self, fng: Optional[int] = None, drawdown_pct: float = 0.0,
                 consec_wins: int = 0, consec_losses: int = 0,
                 active_sources: int = 4, balance_vs_peak: float = 1.0,
-                sensor_stress: float = 0.0) -> dict:
+                sensor_stress: float = 0.0,
+                memory_pressure: float = 0.0) -> dict:
         """Recompute all hormone levels from raw inputs + allostatic anticipation.
 
         `sensor_stress` is the exogenous pain channel aggregated by
@@ -690,7 +698,30 @@ class Hormones:
         collapse. Before this existed the organism could not feel organ
         ischemia; cortisol stayed at 1.0 (calm) while ICP's orderbook was
         empty 18,768 times in 17h.
+
+        `memory_pressure` is the internal homeostasis channel from
+        memory_sensor: RAM/swap saturation + glibc heap fragmentation. It
+        gets a stronger weight (cap 0.40 vs sensor_stress cap 0.30) because
+        memory exhaustion is an existential organism state, not a transient
+        external irritation. Production observed swap=2.0Gi/2.0Gi (100%) for
+        11.5h while cortisol stayed calm — restart was the only escape.
+        With this wiring the organism throttles itself before swap fills.
         """
+        with self._compute_lock:
+            return self._compute_locked(
+                fng=fng, drawdown_pct=drawdown_pct,
+                consec_wins=consec_wins, consec_losses=consec_losses,
+                active_sources=active_sources,
+                balance_vs_peak=balance_vs_peak,
+                sensor_stress=sensor_stress,
+                memory_pressure=memory_pressure,
+            )
+
+    def _compute_locked(self, fng=None, drawdown_pct=0.0,
+                        consec_wins=0, consec_losses=0,
+                        active_sources=4, balance_vs_peak=1.0,
+                        sensor_stress=0.0, memory_pressure=0.0) -> dict:
+        """Lock-protected body of compute() — see compute() docstring."""
         # Market Stress: 0 (calm) → 1 (panic)
         stress = 0.0
         if fng is not None and fng < 20:
@@ -704,9 +735,19 @@ class Hormones:
         # leaving room for real endogenous signal on top.
         if sensor_stress > 0:
             stress += min(0.3, max(0.0, float(sensor_stress)) * 0.30)
+        # Internal homeostasis — memory pressure has a higher cap because
+        # swap saturation is a louder existential signal than orderbook
+        # flicker. Drives cortisol DOWN (canonical 1.0=calm) → defensive
+        # sizing kicks in via hormonal_scalar before swap fills further.
+        if memory_pressure > 0:
+            stress += min(0.4, max(0.0, float(memory_pressure)) * 0.40)
         stress = min(1.0, max(0.0, stress))
 
         health = max(0.0, min(1.0, balance_vs_peak))
+        # info_q normalisation divisor (7.0) sets the max realistic
+        # info quality at active_sources=7, leaving headroom above the
+        # 5-channel baseline. With 5 healthy channels max info_q≈0.71
+        # → serotonin baseline ≈ 0.86. Tuning constant — change with care.
         info_q = max(0.1, min(1.0, active_sources / 7.0))
 
         self._stress = stress
@@ -1858,7 +1899,8 @@ class NeuralOrganism:
                      fng: Optional[int] = None, adx: float = 20,
                      funding_rate: float = 0, active_sources: Optional[int] = None,
                      balance_vs_peak: float = 1.0, ls_ratio: float = 1.0,
-                     sensor_stress: Optional[float] = None):
+                     sensor_stress: Optional[float] = None,
+                     memory_pressure: Optional[float] = None):
         """
         Full 16-step neural update cycle. Called from confirm_trade_exit.
         Phase 25: expanded from 10 to 16 steps with all brain subsystems.
@@ -1919,23 +1961,33 @@ class NeuralOrganism:
                 sensor_stress = float(aggregate_sensor_stress())
             except Exception:
                 sensor_stress = 0.0
+        if memory_pressure is None:
+            try:
+                from sensor_bridges import aggregate_memory_stress
+                memory_pressure = float(aggregate_memory_stress())
+            except Exception:
+                memory_pressure = 0.0
         effective_active = active_sources
         if effective_active is None:
             try:
                 from sensor_bridges import active_sensor_count
-                # Base 4 (legacy) minus dark channels (each missing sensor
-                # removes one, clamped non-negative). active_sensor_count
-                # returns how many sensors are FIRING — they subtract from
-                # "healthy" baseline of 4 feeds.
+                # Base 5 (4 exogenous + 1 memory) minus the count of FIRING
+                # sensors. Sensors only fire on PAIN events (empty orderbook,
+                # ws disconnect, data starvation, shadow-Kelly collapse,
+                # memory pressure) — a quiet trail means the organ is HEALTHY,
+                # not dead. So subtracting firing-count from the healthy
+                # baseline yields effective_active = healthy channel count
+                # (high → high info_q → calm serotonin).
                 firing = int(active_sensor_count())
-                effective_active = max(1, 4 - firing)
+                effective_active = max(1, 5 - firing)
             except Exception:
-                effective_active = 4
+                effective_active = 5
         self.hormones.compute(
             fng=fng, drawdown_pct=0, consec_wins=self._consec_wins,
             consec_losses=self._consec_losses, active_sources=effective_active,
             balance_vs_peak=balance_vs_peak,
-            sensor_stress=sensor_stress)
+            sensor_stress=sensor_stress,
+            memory_pressure=memory_pressure)
 
         # Phase 28: Deposit hormone state to pheromone field
         try:
@@ -2063,6 +2115,58 @@ class NeuralOrganism:
             scale = target / total
             for _, n in organ_neurons:
                 n.current_val = max(n.min_bound, min(n.max_bound, n.current_val * scale))
+
+    # ─── HORMONE REFRESH — Sensor-driven, no trade required ───
+
+    def refresh_hormones(self) -> dict:
+        """Recompute hormones from current sensor + organism state.
+
+        Without this, Hormones.compute() only fired on trade exits.
+        Memory pressure / orderbook ischemia / shadow-Kelly collapse
+        could persist for hours between trades and the organism would
+        not feel them — cortisol stayed at 1.0 (calm) while the body
+        was actively swapping. The scheduler ticks this every 5 min so
+        the homeostasis loop closes regardless of trade cadence.
+        """
+        sensor_stress = 0.0
+        memory_pressure = 0.0
+        active_sources = 5
+        try:
+            from sensor_bridges import (
+                aggregate_sensor_stress,
+                aggregate_memory_stress,
+                active_sensor_count,
+            )
+            sensor_stress = float(aggregate_sensor_stress())
+            memory_pressure = float(aggregate_memory_stress())
+            firing = int(active_sensor_count())
+            active_sources = max(1, 5 - firing)
+        except Exception:
+            pass
+
+        # AUDIT-3 (2026-04-25): drawdown_pct=0 to match update_cycle's
+        # behavior. The previous `max(0, -self._cumulative_pnl)` used a
+        # running-SUM as drawdown, so a few losing trades summing to -25
+        # would saturate stress at 0.30 every refresh AND oscillate against
+        # update_cycle's drawdown=0 every trade exit. The organism's true
+        # drawdown signal flows through the `_trough_cortisol` hysteresis
+        # in Hormones.compute (Phase 27 Fix 7) — refresh stays neutral on
+        # this axis and lets sensor_stress + memory_pressure drive cortisol.
+        out = self.hormones.compute(
+            fng=None,
+            drawdown_pct=0.0,
+            consec_wins=self._consec_wins,
+            consec_losses=self._consec_losses,
+            active_sources=active_sources,
+            balance_vs_peak=1.0,
+            sensor_stress=sensor_stress,
+            memory_pressure=memory_pressure,
+        )
+        try:
+            self._persist_hormones()
+        except Exception:
+            pass
+        return out
 
     # ─── DECAY — Hourly metabolic decay ───
 

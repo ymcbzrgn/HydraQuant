@@ -2450,6 +2450,63 @@ if __name__ == "__main__":
         gc_thread = threading.Thread(target=_gc_daemon, daemon=True)
         gc_thread.start()
 
+        # Cache health drain daemon — runs IN this process so the
+        # SemanticCache singleton it reads is the real one carrying live
+        # hit/miss counters. The scheduler used to drain its own (always-zero)
+        # SemanticCache instance because singletons don't span processes;
+        # cache_health_log accumulated 24h of zeros while RAG actually
+        # served cached responses. This thread fixes the cross-process
+        # observability hole — scheduler now reads the table read-only.
+        def _cache_health_drain_daemon():
+            import time as _time
+            try:
+                from db import execute_with_retry as _execute_with_retry
+            except Exception as e:
+                logger.warning(f"[CacheHealth:RAG] db import failed: {e}")
+                return
+            while True:
+                _time.sleep(600)
+                try:
+                    # AUDIT-4 (2026-04-25): peek-then-commit. The previous
+                    # `health_snapshot()` reset counters BEFORE the INSERT,
+                    # so a transient DB lock dropped the entire window's
+                    # counters silently — the same bug E1 was meant to fix.
+                    # Now we peek, persist, and only consume the window if
+                    # the INSERT succeeded.
+                    snap = _semantic_cache.health_peek()
+                    _execute_with_retry(
+                        """INSERT INTO cache_health_log
+                           (hits, misses, puts, rejects, invalidations,
+                            hit_rate, median_similarity, threshold)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            int(snap["hits"]), int(snap["misses"]),
+                            int(snap["puts"]), int(snap["rejects"]),
+                            int(snap["invalidations"]),
+                            float(snap["hit_rate"]),
+                            float(snap["median_similarity"]),
+                            float(snap["threshold"]),
+                        ),
+                        max_retries=3,
+                    )
+                    # INSERT succeeded — now safe to subtract the window.
+                    _semantic_cache.health_commit_reset(snap)
+                    logger.info(
+                        f"[CacheHealth:RAG] drain — hits={snap['hits']} "
+                        f"misses={snap['misses']} hit_rate={snap['hit_rate']:.2%} "
+                        f"med_sim={snap['median_similarity']:.3f} "
+                        f"puts={snap['puts']} rejects={snap['rejects']} "
+                        f"inv={snap['invalidations']}"
+                    )
+                except Exception as e:
+                    # NOTE: counters NOT reset on failure — next tick retries.
+                    logger.debug(f"[CacheHealth:RAG] drain failed (counters preserved): {e}")
+
+        cache_drain_thread = threading.Thread(
+            target=_cache_health_drain_daemon, name="cache-health-drain", daemon=True
+        )
+        cache_drain_thread.start()
+
         serve_app = FastAPI(title="RAG Signal Service")
         serve_app.add_middleware(
             CORSMiddleware,

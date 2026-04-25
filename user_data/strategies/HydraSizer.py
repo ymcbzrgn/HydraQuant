@@ -108,6 +108,20 @@ class HydraSizer(IStrategy):
         # could accumulate 10+ duplicate consumption rows in a few hours.
         self._pending_risk_consume: dict[str, tuple] = {}
 
+        # D2 (2026-04-25): (pair, side) → wallclock deadline for fill verification.
+        # confirm_trade_entry seeds this; bot_loop_start sweeps and reports
+        # fill_rate to PairCircuitBreaker, which flips chronic non-fillers
+        # (ICP/WIF/UNI/0G observed in prod) into a soft 30-min dormant.
+        # AUDIT-12: keyed by (pair, side) tuple so hedge mode (long+short
+        # on the same pair) can be correctly bookkept. Today the bot runs
+        # one-way mode so the side dimension is informational; if hedge
+        # mode is ever enabled, the sweep stays correct.
+        self._pending_fill_checks: dict[tuple[str, str], float] = {}
+
+        # C1 (2026-04-25): RAG /health probe cache so bot_loop_start
+        # doesn't hammer port 8891 once per tick. (probe_ts, healthy_bool).
+        self._rag_health_cache: tuple[float, bool] = (0.0, True)
+
         # Risk/Position Management Modules
         from risk_budget import RiskBudgetManager
         from position_sizer import BayesianKelly, PositionSizer
@@ -148,6 +162,62 @@ class HydraSizer(IStrategy):
 
         logger.info("HydraSizer initialized with MADAM-RAG, Forgone PNL, Risk Budget, Telegram & Staggered Batching.")
 
+    def _should_skip_batch(self, now_ts: float) -> str:
+        """C1+C3+C4 backpressure gate. Returns reason string when the
+        cycle's batch work should be skipped, or empty string to proceed.
+
+        Skip conditions:
+          - RAG /health unreachable / 5xx (60s probe cache so we don't
+            hammer port 8891 each tick)
+          - memory_pressure > 0.5 (cortisol drop is already shrinking
+            sizing, but pulling whole batches saves CPU + LLM tokens)
+          - llm_router fleet_exhausted (B1 deposit, ratio < 0.10)
+        """
+        # ── C1: RAG health probe (cached 60s) ─────────────────────────
+        try:
+            probe_ts, healthy = self._rag_health_cache
+            if (now_ts - probe_ts) > 60.0:
+                healthy = True
+                try:
+                    import urllib.request as _ur
+                    req = _ur.Request("http://127.0.0.1:8891/health")
+                    with _ur.urlopen(req, timeout=5) as resp:
+                        healthy = (200 <= resp.status < 500)
+                except Exception:
+                    healthy = False
+                self._rag_health_cache = (now_ts, healthy)
+            if not healthy:
+                return "rag_health_unreachable"
+        except Exception:
+            pass
+
+        # ── C3: memory pressure ───────────────────────────────────────
+        try:
+            from sensor_bridges import aggregate_memory_stress
+            pressure = float(aggregate_memory_stress())
+            if pressure > 0.5:
+                return f"memory_pressure={pressure:.2f}"
+        except Exception:
+            pass
+
+        # ── C4: LLM fleet exhausted ───────────────────────────────────
+        # AUDIT-7: apply pheromone _decay so the gate releases when the
+        # fleet recovers, instead of staying triggered for the full
+        # decay-to-zero window (~6 half-lives).
+        try:
+            from pheromone_field import get_pheromone_field
+            fleet = get_pheromone_field().read("fleet_exhausted", source="llm_router")
+            if isinstance(fleet, dict):
+                raw_ratio = float(fleet.get("ratio", 0.0))
+                decay = float(fleet.get("_decay", 1.0))
+                effective_ratio = raw_ratio * decay + (1.0 - decay) * 1.0
+                if effective_ratio < 0.10:
+                    return f"fleet_exhausted raw={raw_ratio:.2%} eff={effective_ratio:.2%}"
+        except Exception:
+            pass
+
+        return ""
+
     def bot_loop_start(self, current_time, **kwargs):
         """
         Phase 18: Staggered batch pre-fetch — 10 pairs per batch, 6 min apart.
@@ -158,6 +228,80 @@ class HydraSizer(IStrategy):
             return
 
         import time as _time
+
+        # D2 (2026-04-25): sweep fill-verification deadlines. Each
+        # confirm_trade_entry seeds a 10-min deadline; here we check
+        # whether an open trade actually exists for that pair (filled)
+        # or not (rejected/timed-out limit) and record the outcome to
+        # PairCircuitBreaker. Chronic non-fillers slide into 30-min
+        # soft dormant via record_order_attempt's threshold.
+        if self._pending_fill_checks:
+            try:
+                from pair_circuit import get_pair_circuit
+                circuit = get_pair_circuit()
+                # AUDIT-12 (2026-04-25): build a (pair, side)→amount map so
+                # hedge-mode (long + short on the same pair) does not get
+                # collapsed. `Trade.is_short` is the side discriminator;
+                # under one-way mode each pair has at most one open trade
+                # so the dimension is informational.
+                open_by_side: dict[tuple[str, str], float] = {}
+                try:
+                    for t in Trade.get_open_trades():
+                        try:
+                            amt = float(getattr(t, "amount", 0.0) or 0.0)
+                        except Exception:
+                            amt = 0.0
+                        side = "short" if getattr(t, "is_short", False) else "long"
+                        open_by_side[(t.pair, side)] = amt
+                except Exception:
+                    open_by_side = {}
+                # AUDIT-2/Critic: list-copy so we can safely pop while iterating.
+                expired = [(k, dl) for k, dl in list(self._pending_fill_checks.items())
+                           if _time.time() >= dl]
+                for key, deadline in expired:
+                    pair, side = key
+                    amt = open_by_side.get((pair, side), 0.0)
+                    filled = amt > 0
+                    age = max(0.0, _time.time() - (deadline - 600.0))
+                    try:
+                        circuit.record_order_attempt(pair, filled=filled, age_seconds=age)
+                    except Exception:
+                        pass
+                    self._pending_fill_checks.pop(key, None)
+                    # AUDIT-6: log rolling fill_rate so the operator sees
+                    # convergence toward the 20% dormant threshold.
+                    rolling_rate = None
+                    try:
+                        rolling_rate = circuit.get_fill_rate(pair)
+                    except Exception:
+                        pass
+                    if not filled:
+                        logger.warning(
+                            f"[D2:FillCheck] {pair}/{side} non-fill after {age:.0f}s — "
+                            f"recorded miss; rolling fill_rate_1h="
+                            f"{f'{rolling_rate:.0%}' if rolling_rate is not None else 'N/A'} "
+                            f"(circuit flips dormant at <20% with n>=5)"
+                        )
+                    elif rolling_rate is not None and rolling_rate < 0.5:
+                        logger.info(
+                            f"[D2:FillCheck] {pair}/{side} filled after {age:.0f}s "
+                            f"(rolling fill_rate_1h={rolling_rate:.0%})"
+                        )
+            except Exception as _fc_e:
+                logger.debug(f"[D2:FillCheck] sweep failed: {_fc_e}")
+
+        # C1+C3+C4 (2026-04-25): unified backpressure gate. D2 sweep
+        # above ALWAYS runs (it's pure observation, no exchange traffic).
+        # The heavy batch work below is skipped when the body is degraded:
+        #   - RAG /health 8891 down/5xx (C1)
+        #   - memory_pressure > 0.5 (C3)
+        #   - llm_router fleet_exhausted ratio < 0.10 (C4)
+        # The cycle keeps ticking; batches resume naturally when organs
+        # recover. No manual restart, no stuck queues.
+        skip_reason = self._should_skip_batch(_time.time())
+        if skip_reason:
+            logger.info(f"[BackpressureGate] heartbeat only — {skip_reason}")
+            return
 
         # Throttle: only process one batch per interval
         now = _time.time()
@@ -219,9 +363,22 @@ class HydraSizer(IStrategy):
         total_batches = (len(self._batch_queue) + self._batch_size - 1) // self._batch_size
         logger.warning(f"[bot_loop_start] Batch {batch_num}/{total_batches}: fetching {len(current_batch)} pairs...")
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import (
+            ThreadPoolExecutor,
+            wait,
+            ALL_COMPLETED,
+        )
 
         t0 = _time.time()
+        # C2 (2026-04-25): per-batch wallclock cap. The previous as_completed
+        # loop's per-future timeout=180s let a single hung pair stretch the
+        # batch to 3 minutes, and an entire batch could silently consume the
+        # cycle window. With wait(timeout=45) the slow pairs are simply
+        # cancelled — they reappear in the next batch as long as their RAG
+        # call eventually returns. The 2.5h bot_loop_start gap observed in
+        # prod traces back to exactly this pattern (a hung batch blocking
+        # subsequent batches via `_last_batch_time` interlock).
+        _BATCH_WALLCLOCK_S = 45.0
 
         def fetch_one(p):
             """Fetch signal for one pair via RAG service (Phase 17: POST with technical data).
@@ -248,7 +405,11 @@ class HydraSizer(IStrategy):
                     return p, sig  # NEUTRAL 0.0, won't be cached (see below)
 
                 _t = _time.time()
-                resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=120)
+                # AUDIT-1 (2026-04-25): inner timeout 120→40s. The outer
+                # batch wallclock is 45s; with inner=120 the executor.shutdown
+                # blocked the bot loop for up to 2 min per hung pair, defeating
+                # the wallclock cap that audit found to be a lie.
+                resp = session.post(f"{url}/signal/{p}", json={"technical_data": technical_data}, timeout=40)
                 lat = (_time.time() - _t) * 1000
                 logger.info(f"[RAG Latency] {p}: {lat:.0f}ms (status={resp.status_code})")
                 if resp.status_code == 200:
@@ -265,15 +426,44 @@ class HydraSizer(IStrategy):
             return p, sig
 
         results = {}
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # AUDIT-1 (2026-04-25): explicit executor lifecycle so the wallclock
+        # cap is real. `with ThreadPoolExecutor(...)` calls shutdown(wait=True)
+        # on __exit__, which BLOCKS until in-flight tasks finish (cancel() can
+        # only stop NOT-YET-STARTED tasks). Our max_workers=batch_size=5 means
+        # every task starts immediately, so cancel() always returned False
+        # and the inner 120s session.post stretched bot_loop_start to 2 min.
+        # shutdown(wait=False, cancel_futures=True) is the only way to make
+        # the wallclock cap honest. The inner session.post timeout was also
+        # tightened from 120s → 40s above so worker threads don't outlive
+        # the cycle gap by a wide margin.
+        executor = ThreadPoolExecutor(max_workers=5)
+        try:
             futures = {executor.submit(fetch_one, p): p for p in current_batch}
-            for future in as_completed(futures):
+            done, pending = wait(
+                futures.keys(),
+                timeout=_BATCH_WALLCLOCK_S,
+                return_when=ALL_COMPLETED,
+            )
+            for future in done:
                 try:
-                    pair, signal = future.result(timeout=180)  # 3min — let MADAM finish (quality > speed)
+                    pair, signal = future.result(timeout=0.1)
                     results[pair] = signal
                 except Exception as e:
                     pair = futures[future]
-                    logger.warning(f"[bot_loop_start] Timeout for {pair}: {e}")
+                    logger.warning(f"[bot_loop_start] Fetch error for {pair}: {e}")
+            for future in pending:
+                pair = futures[future]
+                future.cancel()  # may return False (task already started)
+                logger.warning(
+                    f"[bot_loop_start] Batch wallclock {_BATCH_WALLCLOCK_S:.0f}s — "
+                    f"{pair} abandoned (will retry next cycle; in-flight HTTP "
+                    f"call has its own 40s timeout)"
+                )
+        finally:
+            # cancel_futures=True (Python 3.9+) drops queued tasks instantly;
+            # any started task continues until its inner timeout but the bot
+            # loop is no longer blocked waiting for them.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         elapsed = _time.time() - t0
         dist = {}
@@ -1649,6 +1839,35 @@ class HydraSizer(IStrategy):
             # alert genuinely shrinks stake regardless of Kelly optimism.
             unified_mult = min(unified_mult, defensive_cap * 1.50)
 
+            # B4 (2026-04-25): emergency degraded mode. When llm_router
+            # publishes fleet_exhausted (available_ratio<0.10) the MADAM
+            # debate is being skipped (B3) and only the technical fallback
+            # is signing trades. Cap sizing at 30% so we keep flow without
+            # betting full stake on a degraded brain. Decays naturally as
+            # llm_router pushes a healthier ratio.
+            # AUDIT-7: apply pheromone _decay so the cap lifts as the
+            # brownout signal weakens (avoids 30+ min false-positive cap
+            # after fleet recovery).
+            try:
+                from pheromone_field import get_pheromone_field as _gpf_b4
+                fleet = _gpf_b4().read("fleet_exhausted", source="llm_router")
+                if isinstance(fleet, dict):
+                    raw_ratio = float(fleet.get("ratio", 0.0))
+                    decay = float(fleet.get("_decay", 1.0))
+                    effective_ratio = raw_ratio * decay + (1.0 - decay) * 1.0
+                    if effective_ratio < 0.10:
+                        emergency_cap = 0.30
+                        if unified_mult > emergency_cap:
+                            logger.warning(
+                                f"[B4:EmergencyDegraded] fleet_exhausted "
+                                f"raw={raw_ratio:.2%} decay={decay:.2f} "
+                                f"effective={effective_ratio:.2%} → unified_mult "
+                                f"{unified_mult:.3f}→{emergency_cap:.3f}"
+                            )
+                            unified_mult = emergency_cap
+            except Exception:
+                pass
+
             old_way = final_stake * caat_mult * sizing_mult * cerebellum_mult * lifecycle_mult
             pre_unified = final_stake
             final_stake = final_stake * unified_mult
@@ -1903,6 +2122,22 @@ class HydraSizer(IStrategy):
             f"rate={rate:.6f} stake=${amount*rate:.2f}"
         )
 
+        # D3 (2026-04-25): pair_circuit dormant gate at the last gate
+        # before order submission — closes the race where a pair flips
+        # dormant between populate_entry_trend (where the signal was
+        # approved) and order submission (e.g. fill_rate threshold trips
+        # mid-cycle). Without this the soft-dormant flip is racy and the
+        # same chronic non-filler can keep re-attempting once per cycle.
+        try:
+            from pair_circuit import get_pair_circuit
+            if get_pair_circuit().is_dormant(pair):
+                logger.warning(
+                    f"[D3:DormantGate] {pair} dormant at confirm — rejecting entry"
+                )
+                return False
+        except Exception:
+            pass
+
         # ═══ POST-QUANTIZATION NOTIONAL CHECK (Hummingbot BudgetChecker pattern) ═══
         # Freqtrade truncates amount in create_order() AFTER this callback.
         # But we can pre-check: if notional is borderline, exchange will reject.
@@ -1977,6 +2212,16 @@ class HydraSizer(IStrategy):
             logger.debug(
                 f"[RiskBudget] confirm consume failed: {_rb_commit_e}"
             )
+
+        # D2 (2026-04-25): seed a 10-min fill verification deadline.
+        # bot_loop_start sweeps these and reports fill outcome to
+        # PairCircuitBreaker so chronic limit-reject pairs flip dormant.
+        # AUDIT-12: key by (pair, side) so hedge-mode does not collide.
+        try:
+            import time as _tm_d2
+            self._pending_fill_checks[(pair, side)] = _tm_d2.time() + 600.0
+        except Exception:
+            pass
 
         # Phase 22: Notify via strategy message
         try:

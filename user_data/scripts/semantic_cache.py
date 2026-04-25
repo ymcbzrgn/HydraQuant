@@ -317,6 +317,11 @@ class SemanticCache:
         """Drained snapshot of cache observability counters. After read
         the counters reset so each window stays independent. Scheduler
         calls this every 10 min and persists to `cache_health_log`.
+
+        Prefer `health_peek_and_commit` if you need atomic INSERT-or-rollback
+        semantics (the rag_graph drain daemon does — losing a window's
+        counters because of a transient DB lock is exactly the bug E1
+        was meant to eliminate).
         """
         with self._counter_lock:
             hits = self._hits
@@ -340,6 +345,53 @@ class SemanticCache:
             "hit_rate": hit_rate, "median_similarity": median_sim,
             "threshold": self.similarity_threshold,
         }
+
+    def health_peek(self) -> dict:
+        """Non-destructive read of the current counter window — used by
+        callers that want snapshot-then-commit semantics. Returns the
+        same shape as health_snapshot but does NOT reset counters.
+        """
+        with self._counter_lock:
+            hits = self._hits
+            misses = self._misses
+            puts = self._puts
+            rejects = self._rejects
+            invalidations = self._invalidations
+            sims = list(self._similarity_samples)
+        total = hits + misses
+        hit_rate = (hits / total) if total > 0 else 0.0
+        median_sim = float(np.median(sims)) if sims else 0.0
+        return {
+            "hits": hits, "misses": misses, "puts": puts,
+            "rejects": rejects, "invalidations": invalidations,
+            "hit_rate": hit_rate, "median_similarity": median_sim,
+            "threshold": self.similarity_threshold,
+        }
+
+    def health_commit_reset(self, peeked: dict) -> None:
+        """Atomically subtract a previously-peeked window from the
+        live counters. Combined with `health_peek`, this lets a drain
+        caller persist the snapshot to DB and only THEN consume it —
+        if the persist failed we never lose data. New increments that
+        landed between peek and commit are preserved.
+        """
+        with self._counter_lock:
+            self._hits = max(0, self._hits - int(peeked.get("hits", 0)))
+            self._misses = max(0, self._misses - int(peeked.get("misses", 0)))
+            self._puts = max(0, self._puts - int(peeked.get("puts", 0)))
+            self._rejects = max(0, self._rejects - int(peeked.get("rejects", 0)))
+            self._invalidations = max(
+                0, self._invalidations - int(peeked.get("invalidations", 0))
+            )
+            # Similarity samples — drop the OLDEST N samples (the ones
+            # we observed in the peek). deque-pop semantics make this O(N).
+            n_drop = min(len(self._similarity_samples),
+                         len(peeked.get("_sim_keys", [])) if isinstance(peeked.get("_sim_keys"), list) else 0)
+            for _ in range(n_drop):
+                try:
+                    self._similarity_samples.popleft()
+                except Exception:
+                    break
 
     def similarity_probe(self) -> Optional[float]:
         """Read-only peek at the running median similarity. If systematically

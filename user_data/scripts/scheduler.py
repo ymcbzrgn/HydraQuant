@@ -202,6 +202,17 @@ class PipelineScheduler:
             replace_existing=True
         )
 
+        # Daily 04:15 UTC: cap embedding_cache at 10K rows (LRU-ish by
+        # created_at). 75K → 10K = ~70MB RAM relief in the AI DB cache.
+        self.scheduler.add_job(
+            self._embedding_cache_evict,
+            'cron', hour=4, minute=15,
+            id='embedding_cache_evict',
+            name='Embedding Cache LRU Eviction',
+            max_instances=1,
+            replace_existing=True
+        )
+
         # Daily 23:55 UTC: Send daily Telegram summary
         self.scheduler.add_job(
             self._send_daily_summary,
@@ -364,12 +375,16 @@ class PipelineScheduler:
             replace_existing=True
         )
 
-        # Memory management: gc.collect + memory logging every hour
+        # Memory homeostasis groom: sample memory_sensor every 5 min + LIF
+        # deposit, then run light gc.collect every tick. Every 6th tick
+        # (~30 min) OR when pressure>0.5, run heavy gc.collect(2) + glibc
+        # malloc_trim to defrag the heap. Cadence is fixed at 5 min so the
+        # afferent channel stays warm; heavy work is gated by pressure.
         self.scheduler.add_job(
             self._memory_cleanup,
-            'interval', minutes=60,
+            'interval', minutes=5,
             id='memory_cleanup',
-            name='GC Collect + Memory Log',
+            name='Memory Groom (sensor + GC + malloc_trim)',
             max_instances=1,
             replace_existing=True
         )
@@ -377,6 +392,13 @@ class PipelineScheduler:
         # Phase 24+25: Neural Organism — 6 jobs (hourly decay, daily habits, daily DMN+cerebellum, weekly sleep+evolution)
         self.scheduler.add_job(self._organism_hourly_decay, 'interval', minutes=60,
             id='organism_decay', name='Neural Organism Hourly Decay', max_instances=1, replace_existing=True)
+        # F3: 5-min hormone refresh — closes the homeostasis loop between
+        # trades. Without this, memory_pressure / sensor_stress could rise
+        # for hours and cortisol would stay at last-trade value.
+        self.scheduler.add_job(self._organism_hormone_refresh, 'interval', minutes=5,
+            id='organism_hormone_refresh',
+            name='Neural Organism Hormone Refresh (sensor-driven)',
+            max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_habit_check, 'cron', hour=5, minute=15,
             id='organism_habits', name='Neural Organism Habit Consolidation', max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._organism_sleep, 'cron', day_of_week='sun', hour=3, minute=30,
@@ -391,8 +413,13 @@ class PipelineScheduler:
         # Phase 26: Predictive Interoception + Pheromone cleanup
         self.scheduler.add_job(self._interoception_check, 'interval', minutes=15,
             id='interoception_check', name='Predictive Interoception Check', max_instances=1, replace_existing=True)
-        self.scheduler.add_job(self._pheromone_cleanup, 'interval', minutes=30,
-            id='pheromone_cleanup', name='Pheromone Field Cleanup', max_instances=1, replace_existing=True)
+        # Cadence dropped from 30 min → 5 min so trail compaction keeps up
+        # with the higher tick rate of the new sensors (memory groom + shadow
+        # Kelly + LLM penalties). Under memory pressure the cleanup also
+        # tightens its idle window from 300s to 60s — see _pheromone_cleanup.
+        self.scheduler.add_job(self._pheromone_cleanup, 'interval', minutes=5,
+            id='pheromone_cleanup', name='Pheromone Field Cleanup (adaptive)',
+            max_instances=1, replace_existing=True)
 
         # Sensor bridges (sensor_bridges.py) — afferent nerves translating
         # exteroceptive pain (shadow-Kelly posterior collapse, exchange WS
@@ -730,6 +757,50 @@ class PipelineScheduler:
 
         except Exception as e:
             logger.error(f"[Scheduler:Job] Cleanup failed: {e}")
+
+    def _embedding_cache_evict(self, keep_n: int = 10000):
+        """Daily 04:15 UTC: cap embedding_cache at keep_n most-recent rows.
+
+        Audit 2026-04-25 found embedding_cache had grown to 75K+ rows (~70MB)
+        with no eviction path. RSS pressure post-deploy traced ~5% of swap
+        usage to this single table.
+
+        AUDIT-9 (2026-04-25): rank by COALESCE(last_used_at, created_at)
+        so the LRU is REAL — a hot text accessed 1000× over months keeps
+        its embedding even though created_at is ancient. rag_embedding
+        refreshes last_used_at on every cache hit.
+        """
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM embedding_cache")
+            before = c.fetchone()[0]
+            if before <= keep_n:
+                conn.close()
+                logger.info(
+                    f"[Scheduler:Job] embedding_cache size {before} <= cap {keep_n}, skip"
+                )
+                return
+            c.execute(
+                """DELETE FROM embedding_cache
+                   WHERE text_hash NOT IN (
+                       SELECT text_hash FROM embedding_cache
+                       ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?
+                   )""",
+                (keep_n,),
+            )
+            deleted = c.rowcount
+            conn.commit()
+            c.execute("SELECT COUNT(*) FROM embedding_cache")
+            after = c.fetchone()[0]
+            conn.close()
+            logger.info(
+                f"[Scheduler:Job] embedding_cache eviction: {before} → {after} "
+                f"(deleted {deleted}, kept top {keep_n} by last_used_at)"
+            )
+        except Exception as e:
+            logger.error(f"[Scheduler:Job] embedding_cache eviction failed: {e}")
 
     def _cleanup_semantic_cache(self):
         """Job: Cleanup expired entries in semantic_cache."""
@@ -1363,21 +1434,86 @@ class PipelineScheduler:
             logger.error(f"[GraphRAG] Rebuild failed: {e}")
 
     def _memory_cleanup(self):
-        """Hourly: Force garbage collection and log memory usage.
-        Prevents slow memory leak from orphaned objects."""
+        """Memory homeostasis groom — runs every 5 min.
+
+        Steps every tick (cheap):
+          1. memory_sensor.tick() — sample RSS/swap/frag, deposit pheromone
+             so Hormones.compute() can drive cortisol DOWN under pressure.
+          2. gc.collect(0) — generation-0 sweep, very fast.
+
+        Steps every 6th tick (~30 min) OR whenever pressure score >= 0.5:
+          3. gc.collect(2) — full multi-generation sweep.
+          4. ctypes.CDLL("libc.so.6").malloc_trim(0) — release glibc heap
+             arenas back to the OS so RSS actually shrinks (gc alone does
+             not return memory; glibc retains it for future allocations).
+          5. pheromone deposit "memory_groom_completed" — telemetry trail
+             for downstream consumers (defensive_mode dispatcher etc.).
+
+        The 5-min sampling cadence is the load-bearing piece: without a
+        fresh pheromone the Hormones channel goes dark and cortisol drifts
+        back to 1.0 even though swap is full.
+        """
         import gc
-        collected = gc.collect()
+        # Persistent counter for cadence (instance attribute survives across ticks)
+        self._memory_groom_tick_count = getattr(self, '_memory_groom_tick_count', 0) + 1
+
+        # 1. Sample + deposit (always)
+        score = 0.0
+        snap_components: dict = {}
+        try:
+            from memory_sensor import tick as mem_tick
+            sample = mem_tick()
+            score = float(sample.get("score", 0.0))
+            snap_components = sample.get("components", {})
+        except Exception as e:
+            logger.debug(f"[Scheduler:Memory] sensor tick failed: {e}")
+
+        # 2. Light GC (always)
+        light_collected = gc.collect(0)
+
+        # 3-5. Heavy work (pressure-driven OR every 6th tick)
+        heavy = (score >= 0.5) or (self._memory_groom_tick_count % 6 == 0)
+        full_collected = 0
+        trimmed = False
+        if heavy:
+            full_collected = gc.collect(2)
+            try:
+                import ctypes
+                libc = ctypes.CDLL("libc.so.6")
+                # malloc_trim returns 1 if it released memory, 0 otherwise.
+                trimmed = bool(libc.malloc_trim(0))
+            except Exception as e:
+                logger.debug(f"[Scheduler:Memory] malloc_trim unavailable: {e}")
+            try:
+                from pheromone_field import get_pheromone_field
+                get_pheromone_field().deposit(
+                    "memory_groom",
+                    "memory_groom_completed",
+                    {"intensity": min(1.0, score), "trimmed": trimmed,
+                     "full_collected": full_collected, "tick": self._memory_groom_tick_count},
+                    half_life=300.0,
+                    metadata={"score": round(score, 3)},
+                )
+            except Exception:
+                pass
+
+        # Logging — RSS + threads + pressure score so the operator can grep.
         try:
             import psutil
             process = psutil.Process()
             mem_mb = process.memory_info().rss / 1024 / 1024
-            logger.info(f"[Scheduler:Memory] GC collected {collected} objects. "
-                       f"RSS={mem_mb:.0f}MB, threads={process.num_threads()}")
-        except ImportError:
-            import resource
-            mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            logger.info(f"[Scheduler:Memory] GC collected {collected} objects. "
-                       f"maxRSS={mem_kb/1024:.0f}MB")
+            logger.info(
+                f"[Scheduler:Memory] tick={self._memory_groom_tick_count} "
+                f"score={score:.3f} RSS={mem_mb:.0f}MB threads={process.num_threads()} "
+                f"gc0={light_collected} {'gc2=' + str(full_collected) + ' trim=' + str(trimmed) if heavy else ''} "
+                f"comp={snap_components}"
+            )
+        except Exception:
+            logger.info(
+                f"[Scheduler:Memory] tick={self._memory_groom_tick_count} "
+                f"score={score:.3f} gc0={light_collected} "
+                f"{'heavy gc2=' + str(full_collected) + ' trim=' + str(trimmed) if heavy else ''}"
+            )
 
     def get_job_info(self) -> list:
         """Return info about all scheduled jobs."""
@@ -1620,6 +1756,28 @@ class PipelineScheduler:
         except Exception as e:
             logger.error(f"[Scheduler:Organism] Decay failed: {e}")
 
+    def _organism_hormone_refresh(self):
+        """Every 5 min: refresh hormones from current sensor pheromones.
+
+        F3 (2026-04-25): Hormones.compute previously fired only on trade
+        exits — memory_pressure and sensor_stress could accumulate for
+        hours and cortisol stayed at the last-trade value. With this tick
+        the homeostasis loop closes regardless of trade cadence: memory
+        full → cortisol drops → hormonal_scalar drops → sizing shrinks
+        before the next trade even fires.
+        """
+        try:
+            from neural_organism import get_organism
+            organism = get_organism()
+            out = organism.refresh_hormones()
+            logger.info(
+                f"[Scheduler:Organism] hormone refresh — cortisol={out['cortisol']} "
+                f"dopamine={out['dopamine']} serotonin={out['serotonin']} "
+                f"_stress={out['_stress']}"
+            )
+        except Exception as e:
+            logger.error(f"[Scheduler:Organism] Hormone refresh failed: {e}")
+
     def _organism_habit_check(self):
         """Daily 05:15: Check all neurons for habit consolidation."""
         try:
@@ -1754,15 +1912,28 @@ class PipelineScheduler:
             logger.error(f"[Phase26:Interoception] Check failed: {e}")
 
     def _pheromone_cleanup(self):
-        """Every 30min: Clean up fully decayed pheromones."""
+        """Every 5 min: Clean up fully decayed pheromones with adaptive
+        max-idle. Under memory pressure (>0.7) the idle window tightens
+        from 300s → 60s so the field releases trails faster.
+        """
         try:
             from pheromone_field import get_pheromone_field
             field = get_pheromone_field()
-            cleaned = field.cleanup()
+
+            # Adaptive idle cap: pressure-driven
+            try:
+                from sensor_bridges import aggregate_memory_stress
+                pressure = float(aggregate_memory_stress())
+            except Exception:
+                pressure = 0.0
+            max_idle = 60.0 if pressure > 0.7 else 300.0
+
+            cleaned = field.cleanup(max_idle_seconds=max_idle)
             health = field.get_field_health()
             logger.debug(
-                f"[Phase26:Pheromone] Cleanup: {cleaned} removed, "
-                f"{health['active_signals']} active from {health['active_sources']}"
+                f"[Phase26:Pheromone] Cleanup: {cleaned} removed (idle_cap={max_idle:.0f}s "
+                f"pressure={pressure:.2f}), {health['active_signals']} active "
+                f"from {health['active_sources']}"
             )
         except Exception as e:
             logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
@@ -1979,43 +2150,54 @@ class PipelineScheduler:
             logger.debug(f"[RetrainDrain] tick failed: {e}")
 
     def _cache_health_drain_tick(self):
-        """Every 10min: drain semantic_cache's hit/miss counters into the
-        `cache_health_log` table. Turns the previously-silent cache into
-        an observable organ — a hit rate stuck near zero becomes a real
-        alert instead of sitting there as a 6,548-row dead column.
+        """Every 10 min: read-only telemetry of cache_health_log.
 
-        Task 22: use the singleton accessor so we read THE SAME instance
-        rag_graph publishes to. The prior implementation instantiated a
-        fresh SemanticCache() here, which meant health_snapshot() always
-        returned zeros and cache_health_log was a lie.
+        Task E (2026-04-25): the rag_graph process owns the actual
+        SemanticCache instance carrying live counters. Singletons don't
+        span processes — scheduler's own SemanticCache instance is empty
+        because it serves no requests. The drain is now performed by
+        rag_graph's _cache_health_drain_daemon (in-process), and this
+        scheduler tick just SELECTs the latest row for log/telemetry so
+        the operator can grep the scheduler unit and see whether the
+        RAG cache is healthy.
         """
         try:
-            from semantic_cache import get_semantic_cache
-            cache = get_semantic_cache()
-            snap = cache.health_snapshot()
-            from db import execute_with_retry
-            execute_with_retry(
-                """INSERT INTO cache_health_log
-                   (hits, misses, puts, rejects, invalidations,
-                    hit_rate, median_similarity, threshold)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    int(snap["hits"]), int(snap["misses"]),
-                    int(snap["puts"]), int(snap["rejects"]),
-                    int(snap["invalidations"]),
-                    float(snap["hit_rate"]),
-                    float(snap["median_similarity"]),
-                    float(snap["threshold"]),
-                ),
-                max_retries=3,
-            )
+            from db import get_db_connection
+            conn = get_db_connection()
+            row = conn.execute(
+                """SELECT hits, misses, puts, rejects, invalidations,
+                          hit_rate, median_similarity, threshold, timestamp
+                   FROM cache_health_log
+                   ORDER BY timestamp DESC LIMIT 1"""
+            ).fetchone()
+            conn.close()
+            if row is None:
+                logger.info("[CacheHealth] no rows yet — RAG drain may not have ticked")
+                return
             logger.info(
-                f"[CacheHealth] drain — hits={snap['hits']} misses={snap['misses']} "
-                f"hit_rate={snap['hit_rate']:.2%} med_sim={snap['median_similarity']:.3f} "
-                f"puts={snap['puts']} rejects={snap['rejects']} inv={snap['invalidations']}"
+                f"[CacheHealth] last_window — hits={row['hits']} misses={row['misses']} "
+                f"hit_rate={float(row['hit_rate']):.2%} "
+                f"med_sim={float(row['median_similarity']):.3f} "
+                f"puts={row['puts']} rejects={row['rejects']} "
+                f"inv={row['invalidations']} ts={row['timestamp']}"
             )
+            # Health pheromone — alert downstream when hit_rate is dead and
+            # the volume is meaningful. Lets dispatcher / HydraSizer notice
+            # the RAG layer is degraded without grepping logs.
+            try:
+                total = int(row['hits']) + int(row['misses'])
+                if total >= 50 and float(row['hit_rate']) < 0.05:
+                    from pheromone_field import get_pheromone_field
+                    get_pheromone_field().deposit(
+                        "cache_health", "rag_cache_dead",
+                        {"intensity": 1.0, "hit_rate": float(row['hit_rate']),
+                         "total": total, "ts": str(row['timestamp'])},
+                        half_life=1800.0,
+                    )
+            except Exception:
+                pass
         except Exception as e:
-            logger.debug(f"[CacheHealth] drain failed: {e}")
+            logger.debug(f"[CacheHealth] read failed: {e}")
 
     def _pair_circuit_revive_tick(self):
         """Every 5min: probe dormant pairs to see if their orderbooks have
@@ -3031,6 +3213,12 @@ class PipelineScheduler:
         'lifecycle_tick',      # Organism hourly heartbeat
         'interoception_check', # Organism health check
         'model_risk',          # Daily risk guard
+        # AUDIT-11 (2026-04-25): the homeostasis loop must NOT freeze
+        # during sleep — memory pressure / sensor stress accumulate fastest
+        # in low-activity windows, exactly when the bot is sleeping.
+        'organism_hormone_refresh',
+        # Daily eviction is safe to run during sleep (single-table DELETE).
+        'embedding_cache_evict',
     }
 
     # Additional whitelist items during DEEP_SLEEP (absolute minimum set).
