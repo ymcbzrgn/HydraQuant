@@ -297,6 +297,101 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "regime.protection_lb.high_vol":     {"organ": "regime", "default": 0.4, "min": 0.2, "max": 0.7},
     "regime.protection_lb.transitional": {"organ": "regime", "default": 0.7, "min": 0.5, "max": 1.0},
     "regime.protection_lb.illiquid":     {"organ": "regime", "default": 0.5, "min": 0.3, "max": 0.8},
+    # Sprint 2026-05-01 night — para makinesi: F&G contrarian bias.
+    # Buffett rule operationalized — boost contrarian trades at F&G
+    # extremes, penalize trend-chasing into the same extremes.
+    "envelope.fng_contrarian.extreme_low":  {"organ": "envelope", "default": 20.0, "min": 10.0, "max": 30.0},
+    "envelope.fng_contrarian.extreme_high": {"organ": "envelope", "default": 80.0, "min": 70.0, "max": 90.0},
+    "envelope.fng_contrarian.boost":        {"organ": "envelope", "default": 1.20, "min": 1.05, "max": 1.40},
+    "envelope.fng_contrarian.penalty":      {"organ": "envelope", "default": 0.85, "min": 0.60, "max": 0.95},
+    # Sprint 2026-05-01 night — para makinesi: volatility targeting.
+    # Renaissance-style portfolio-level vol target. Calm market → boost,
+    # chaotic market → cut. 20-trade rolling realized vol vs target.
+    "envelope.vol_target.daily_pct":  {"organ": "envelope", "default": 0.01, "min": 0.005, "max": 0.03},
+    "envelope.vol_target.min_scalar": {"organ": "envelope", "default": 0.5,  "min": 0.3,   "max": 0.8},
+    "envelope.vol_target.max_scalar": {"organ": "envelope", "default": 2.0,  "min": 1.2,   "max": 3.0},
+    # Multi-timeframe agreement — minimum count of higher TFs (4h, daily)
+    # that must align with the directional signal. 1 = at least one of
+    # the two higher TFs must agree, 2 = both must agree (strict).
+    "envelope.mtf.required_agreement": {"organ": "envelope", "default": 1, "min": 0, "max": 2},
+    # Winner pyramid — confidence boost threshold for adding stake to a
+    # WINNING position (opposite of legacy DCA-on-loser behavior).
+    "envelope.winner_pyramid.min_profit": {"organ": "envelope", "default": 0.02, "min": 0.005, "max": 0.05},
+    "envelope.winner_pyramid.min_conf":   {"organ": "envelope", "default": 0.65, "min": 0.50, "max": 0.85},
+    "envelope.winner_pyramid.add_pct":    {"organ": "envelope", "default": 0.5,  "min": 0.2,  "max": 1.0},
+    "envelope.winner_pyramid.conf_decay_tolerance": {"organ": "envelope", "default": 0.10, "min": 0.05, "max": 0.25},
+    # Walk-forward validation — daily check vs 30-day baseline. Trips a
+    # pheromone freeze that pauses CatBoost / OOD / Ensemble retrain.
+    "envelope.walk_forward.ret_drop_threshold": {"organ": "envelope", "default": 0.30, "min": 0.15, "max": 0.50},
+    "envelope.walk_forward.wr_drop_threshold":  {"organ": "envelope", "default": 0.15, "min": 0.05, "max": 0.30},
+    # Sprint 2026-05-02 — para makinesi II additions:
+    # FOMO Veto — distance-from-recent-low entry penalty
+    "envelope.fomo_veto.full_penalty_atr_mult": {"organ": "envelope", "default": 3.0, "min": 1.5, "max": 6.0},
+    "envelope.fomo_veto.min_factor":            {"organ": "envelope", "default": 0.3, "min": 0.1, "max": 0.6},
+    # Multi-Level Order Flow Imbalance (Cont-Kukanov, arXiv 2506.05764)
+    "envelope.ofi.levels":             {"organ": "envelope", "default": 10,   "min": 3,    "max": 20},
+    "envelope.ofi.strong_threshold":   {"organ": "envelope", "default": 0.5,  "min": 0.3,  "max": 0.8},
+    "envelope.ofi.mild_threshold":     {"organ": "envelope", "default": 0.3,  "min": 0.15, "max": 0.5},
+    "envelope.ofi.strong_boost":       {"organ": "envelope", "default": 1.30, "min": 1.10, "max": 1.50},
+    "envelope.ofi.mild_boost":         {"organ": "envelope", "default": 1.15, "min": 1.05, "max": 1.30},
+    "envelope.ofi.strong_penalty":     {"organ": "envelope", "default": 0.70, "min": 0.50, "max": 0.90},
+    "envelope.ofi.mild_penalty":       {"organ": "envelope", "default": 0.85, "min": 0.70, "max": 0.95},
+    # Pre-FOMC / CPI / NFP event window
+    "envelope.event_calendar.factor_during_event": {"organ": "envelope", "default": 0.5, "min": 0.2, "max": 0.9},
+    "envelope.event_calendar.pre_event_minutes":   {"organ": "envelope", "default": 60,  "min": 15,  "max": 180},
+    "envelope.event_calendar.post_event_minutes":  {"organ": "envelope", "default": 30,  "min": 10,  "max": 90},
+    # Hurst exponent regime hints (consumed by hurst_estimator.py methods)
+    "envelope.hurst.window":              {"organ": "envelope", "default": 200, "min": 100, "max": 500},
+    "envelope.hurst.mean_revert_thr":     {"organ": "envelope", "default": 0.45, "min": 0.40, "max": 0.48},
+    "envelope.hurst.trending_thr":        {"organ": "envelope", "default": 0.55, "min": 0.52, "max": 0.60},
+    # Black-Litterman + Max-Sharpe portfolio optimizer
+    "envelope.bl.tau":                    {"organ": "envelope", "default": 0.025, "min": 0.005, "max": 0.10},
+    "envelope.bl.delta":                  {"organ": "envelope", "default": 2.5,   "min": 1.0,   "max": 5.0},
+    "envelope.bl.lookback_candles":       {"organ": "envelope", "default": 168,   "min": 48,    "max": 720},
+    # OLMAR cross-pair mean reversion
+    "envelope.olmar.window":              {"organ": "envelope", "default": 5,   "min": 3,   "max": 20},
+    "envelope.olmar.reversion_threshold": {"organ": "envelope", "default": 1.0, "min": 0.5, "max": 2.0},
+    # Monte Carlo bootstrap p-value threshold
+    "envelope.mc_bootstrap.iterations":   {"organ": "envelope", "default": 1000, "min": 200, "max": 5000},
+    "envelope.mc_bootstrap.alpha":        {"organ": "envelope", "default": 0.05, "min": 0.01, "max": 0.20},
+    # Stablecoin netflow modifier
+    "envelope.stablecoin.bullish_threshold_usd": {"organ": "envelope", "default": 100_000_000.0, "min": 10_000_000.0, "max": 500_000_000.0},
+    "envelope.stablecoin.boost":   {"organ": "envelope", "default": 1.10, "min": 1.02, "max": 1.20},
+    "envelope.stablecoin.penalty": {"organ": "envelope", "default": 0.92, "min": 0.80, "max": 0.98},
+    # VPIN action layer (toxicity-adaptive maker spread)
+    "envelope.vpin_action.toxic_threshold": {"organ": "envelope", "default": 0.7, "min": 0.5,  "max": 0.9},
+    "envelope.vpin_action.spread_widen_x":  {"organ": "envelope", "default": 2.0, "min": 1.2,  "max": 4.0},
+    "envelope.vpin_action.size_factor":     {"organ": "envelope", "default": 0.5, "min": 0.2,  "max": 0.9},
+    # FOMO veto fallback when ATR unavailable
+    "envelope.fomo_veto.full_penalty_pct_no_atr": {"organ": "envelope", "default": 8.0, "min": 3.0, "max": 20.0},
+    # Sprint 2026-05-02 (audit Finding #7 fix): indicator periods
+    # exposed to PARAM_REGISTRY so the neural organism can adapt them.
+    "strategy.indicators.squeeze.bb_period":  {"organ": "indicators", "default": 20,  "min": 10, "max": 50},
+    "strategy.indicators.squeeze.bb_std":     {"organ": "indicators", "default": 2.0, "min": 1.5, "max": 3.0},
+    "strategy.indicators.squeeze.kc_period":  {"organ": "indicators", "default": 20,  "min": 10, "max": 50},
+    "strategy.indicators.squeeze.kc_atr_mult":{"organ": "indicators", "default": 1.5, "min": 1.0, "max": 3.0},
+    "strategy.indicators.stiffness.sma_period":   {"organ": "indicators", "default": 100, "min": 30, "max": 200},
+    "strategy.indicators.stiffness.std_mult":     {"organ": "indicators", "default": 0.2, "min": 0.05, "max": 0.5},
+    "strategy.indicators.stiffness.window":       {"organ": "indicators", "default": 60,  "min": 20, "max": 120},
+    "strategy.indicators.reflex.period":           {"organ": "indicators", "default": 20, "min": 10, "max": 50},
+    "strategy.indicators.reflex.std_window":       {"organ": "indicators", "default": 50, "min": 20, "max": 100},
+    # Audit Finding #14 — Hurst agreement metric uses pairwise distance
+    "envelope.hurst.agreement_decay":         {"organ": "envelope", "default": 0.5, "min": 0.3, "max": 0.8},
+    # Stop-hunt defense — spread anomaly threshold (× 1h-rolling median)
+    # that triggers a temporary stop loosening + entry pause.
+    "envelope.stop_hunt.spread_multiplier": {"organ": "envelope", "default": 3.0, "min": 1.5, "max": 5.0},
+    "envelope.stop_hunt.pause_minutes":     {"organ": "envelope", "default": 5,   "min": 1,   "max": 15},
+    # Maker-only orders — entry pricing offset and retry config.
+    "envelope.maker_only.offset_bps": {"organ": "envelope", "default": 5.0,  "min": 1.0,  "max": 20.0},
+    "envelope.maker_only.retry_seconds": {"organ": "envelope", "default": 30, "min": 10, "max": 120},
+    # Funding-rate arbitrage — Bybit perp funding settles every 8h. Highly
+    # negative funding → shorts collect; highly positive → longs collect.
+    # When the bot's signal aligns with the collection side, boost cap.
+    "envelope.funding_arb.extreme":       {"organ": "envelope", "default": 0.0005, "min": 0.0002, "max": 0.002},
+    "envelope.funding_arb.mild":          {"organ": "envelope", "default": 0.0002, "min": 0.0001, "max": 0.0008},
+    "envelope.funding_arb.extreme_boost": {"organ": "envelope", "default": 1.30,   "min": 1.10,   "max": 1.50},
+    "envelope.funding_arb.mild_boost":    {"organ": "envelope", "default": 1.10,   "min": 1.03,   "max": 1.25},
+    "envelope.funding_arb.penalty":       {"organ": "envelope", "default": 0.85,   "min": 0.60,   "max": 0.95},
 
     # ─── ORGAN: calibrator (3 params) — confidence_calibrator.py:42-170 ───
     "calibrator.min_trades":     {"organ": "calibrator", "default": 20,   "min": 10,   "max": 50},
@@ -1724,6 +1819,9 @@ class NeuralOrganism:
         # survives bot restarts (yesterday's big loss still weighs on today).
         self._load_hormones()
         self._load_amygdala()
+        # Sprint 2026-05-01 night (audit Finding D9): restore consec_wins /
+        # consec_losses so EarnedTrust streak progress survives restarts.
+        self._load_streak()
         logger.info(f"[NeuralOrganism] Initialized: {len(self._neurons)} neurons, "
                     f"{len(PARAM_REGISTRY)} params × {len(REGIMES)} regimes, 17 subsystems")
 
@@ -1946,6 +2044,9 @@ class NeuralOrganism:
         else:
             self._consec_losses += 1
             self._consec_wins = 0
+        # Audit Finding D9: persist counters EVERY trade so a crash at
+        # consec_wins=4 doesn't lose three quarters of the earned streak.
+        self._persist_streak()
 
         portfolio_value = max(balance_vs_peak, 1.0)
         stake_pct = stake_amount / portfolio_value if portfolio_value > 0 else 0.01
@@ -2454,6 +2555,71 @@ class NeuralOrganism:
                 conn.commit()
         except Exception as e:
             logger.debug(f"[NeuralOrganism:Hormones] Persist failed: {e}")
+
+    def _persist_streak(self) -> None:
+        """Persist consecutive-win/loss counters across restarts.
+
+        Sprint 2026-05-01 night audit fix (Finding D9): the EarnedTrust
+        streak bonus fires when consec_wins crosses the threshold. Prior
+        to this method `_consec_wins` was init-only (line 1753) so a
+        crash at consec_wins=4 would lose all earned streak progress on
+        restart — the user never got the bonus they actually earned.
+
+        Stores in a single-row `streak_state` table (CREATE IF NOT
+        EXISTS so cold start is safe). Called from update_cycle after
+        the win/loss counter updates.
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS streak_state ("
+                    " id INTEGER PRIMARY KEY CHECK (id=1),"
+                    " consec_wins INTEGER DEFAULT 0,"
+                    " consec_losses INTEGER DEFAULT 0,"
+                    " updated_at TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO streak_state "
+                    " (id, consec_wins, consec_losses, updated_at) "
+                    " VALUES (1, ?, ?, ?) "
+                    " ON CONFLICT(id) DO UPDATE SET "
+                    "  consec_wins=excluded.consec_wins, "
+                    "  consec_losses=excluded.consec_losses, "
+                    "  updated_at=excluded.updated_at",
+                    (int(self._consec_wins), int(self._consec_losses),
+                     datetime.now(tz=timezone.utc).isoformat()),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"[NeuralOrganism:Streak] persist failed: {e}")
+
+    def _load_streak(self) -> None:
+        """Restore consec_wins / consec_losses on startup. Cold-start
+        safe — when the table is missing or the row is absent, leaves
+        the in-process counters at their init values (0, 0)."""
+        try:
+            with self._get_conn() as conn:
+                # Table may not exist on a fresh DB — try-create idempotently
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS streak_state ("
+                    " id INTEGER PRIMARY KEY CHECK (id=1),"
+                    " consec_wins INTEGER DEFAULT 0,"
+                    " consec_losses INTEGER DEFAULT 0,"
+                    " updated_at TEXT)"
+                )
+                row = conn.execute(
+                    "SELECT consec_wins, consec_losses FROM streak_state WHERE id=1"
+                ).fetchone()
+            if row is not None:
+                self._consec_wins = int(row["consec_wins"] or 0)
+                self._consec_losses = int(row["consec_losses"] or 0)
+                if self._consec_wins or self._consec_losses:
+                    logger.info(
+                        f"[NeuralOrganism:Streak] Restored consec_wins={self._consec_wins}, "
+                        f"consec_losses={self._consec_losses}"
+                    )
+        except Exception as e:
+            logger.debug(f"[NeuralOrganism:Streak] load failed: {e}")
 
     def _persist_hormone_history(self, trigger: str = "update_cycle") -> None:
         """Append a snapshot row to hormone_history for time-series analysis.

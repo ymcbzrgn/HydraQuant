@@ -480,6 +480,42 @@ class PipelineScheduler:
             minutes=5, id='whitelist_health',
             name='Whitelist Size Health Tick',
             max_instances=1, replace_existing=True)
+        # Sprint 2026-05-01 night — Walk-forward validation. Daily 23:30 UTC,
+        # right after daily_postmortem so it sees the day's closed trades.
+        # When recent 14-day performance has degraded >30% vs the prior
+        # 30-day baseline, deposits a `model_freeze` pheromone that other
+        # learners (CatBoost retrain, OOD refit, ensemble refit) consume
+        # to skip their next update cycle.
+        self.scheduler.add_job(self._walk_forward_validation, 'cron',
+            hour=23, minute=30, id='walk_forward',
+            name='Walk-Forward Validation Daily',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-02 — Monte Carlo trade-shuffle bootstrap (jesse repo).
+        # Tests if observed strategy performance is statistically significant
+        # vs random reordering. Daily 23:45 UTC.
+        self.scheduler.add_job(self._mc_bootstrap_validation, 'cron',
+            hour=23, minute=45, id='mc_bootstrap',
+            name='Monte Carlo Trade-Shuffle Bootstrap',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-02 — Stablecoin netflow proxy (placeholder until
+        # CryptoQuant API integrated). 4h cadence.
+        self.scheduler.add_job(self._stablecoin_netflow_tick, 'interval',
+            hours=4, id='stablecoin_netflow',
+            name='Stablecoin Netflow 24h Proxy',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-02 — Black-Litterman + Max-Sharpe joint pair
+        # allocator (Lean repo BL implementation). Hourly.
+        self.scheduler.add_job(self._portfolio_optimizer_tick, 'interval',
+            hours=1, id='portfolio_optimizer',
+            name='Portfolio Optimizer (BL+MaxSharpe)',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-02 (audit Finding #2 fix) — OLMAR cross-pair
+        # mean-reversion (Li & Hoi 2012). Hourly cadence; reads
+        # recent_closes pheromone deposits per pair.
+        self.scheduler.add_job(self._olmar_tick, 'interval',
+            hours=1, id='olmar_optimizer',
+            name='OLMAR Cross-Pair Mean Reversion',
+            max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._cache_health_drain_tick, 'interval',
             minutes=10, id='cache_health_drain',
             name='Semantic Cache Health Drain',
@@ -2850,6 +2886,386 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[Whitelist:Health] tick failed: {e}")
 
+    def _walk_forward_validation(self):
+        """Sprint 2026-05-01 night — WALK-FORWARD VALIDATION.
+
+        Daily check: compare last 14 days' Sharpe vs the 30 days before.
+        When recent performance has degraded by >30%, deposit a
+        `model_freeze` pheromone that downstream learners (CatBoost
+        retrain, OOD refit, ensemble refit) honor by SKIPPING their
+        update cycle. Protects the bot from learning a regime change
+        as if it were a feature.
+
+        Pure observation job — never blocks trades, only freezes model
+        updates. Frozen state auto-clears the next day if performance
+        recovers.
+        """
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                # Recent: last 14 days
+                row_recent = conn.execute("""
+                    SELECT
+                        COUNT(*) AS n,
+                        AVG(close_profit) AS mean_ret,
+                        SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END) AS wins,
+                        SUM(close_profit_abs) AS net_pnl
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-14 days')
+                      AND is_open = 0
+                """).fetchone()
+                # Baseline: 30 days BEFORE the recent window
+                row_baseline = conn.execute("""
+                    SELECT
+                        COUNT(*) AS n,
+                        AVG(close_profit) AS mean_ret,
+                        SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END) AS wins,
+                        SUM(close_profit_abs) AS net_pnl
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-44 days')
+                      AND close_date < datetime('now', '-14 days')
+                      AND is_open = 0
+                """).fetchone()
+
+            if not row_recent or not row_baseline:
+                return
+            n_recent = int(row_recent["n"] or 0)
+            n_baseline = int(row_baseline["n"] or 0)
+            if n_recent < 5 or n_baseline < 10:
+                logger.info(
+                    f"[WalkForward] insufficient samples (recent={n_recent}, "
+                    f"baseline={n_baseline}) — skipping validation"
+                )
+                return
+
+            recent_mean = float(row_recent["mean_ret"] or 0.0)
+            baseline_mean = float(row_baseline["mean_ret"] or 0.0)
+            recent_wr = float(row_recent["wins"] or 0) / max(1, n_recent)
+            baseline_wr = float(row_baseline["wins"] or 0) / max(1, n_baseline)
+
+            # Composite degradation score: avg ret + win rate.
+            # Audit Finding B3 — thresholds sourced from PARAM_REGISTRY so
+            # neurons / operators can tune them without redeploys.
+            try:
+                from neural_organism import _p as _np_wf
+                ret_drop_thr = float(_np_wf("envelope.walk_forward.ret_drop_threshold", 0.30))
+                wr_drop_thr = float(_np_wf("envelope.walk_forward.wr_drop_threshold", 0.15))
+            except Exception:
+                ret_drop_thr, wr_drop_thr = 0.30, 0.15
+            ret_drop = (baseline_mean - recent_mean) / max(0.001, abs(baseline_mean) + 0.001)
+            wr_drop = baseline_wr - recent_wr  # positive when degrading
+            degraded = (ret_drop > ret_drop_thr) or (wr_drop > wr_drop_thr)
+
+            try:
+                import time as _t_wf
+                from pheromone_field import get_pheromone_field
+                pf = get_pheromone_field()
+                # Embed wall-clock timestamp so _walk_forward_frozen can
+                # apply the 36h staleness fail-safe (audit Finding D11).
+                now_ts = _t_wf.time()
+                if degraded:
+                    pf.deposit(
+                        "walk_forward", "model_freeze",
+                        {"recent_n": n_recent, "baseline_n": n_baseline,
+                         "recent_mean_ret": round(recent_mean, 4),
+                         "baseline_mean_ret": round(baseline_mean, 4),
+                         "recent_wr": round(recent_wr, 3),
+                         "baseline_wr": round(baseline_wr, 3),
+                         "ret_drop": round(ret_drop, 3),
+                         "wr_drop": round(wr_drop, 3),
+                         "frozen": True,
+                         "_ts": now_ts},
+                        half_life=86400.0,  # 24h decay
+                    )
+                    logger.warning(
+                        f"[WalkForward] DEGRADED — recent (n={n_recent}, "
+                        f"mean={recent_mean:.4f}, wr={recent_wr:.2%}) vs "
+                        f"baseline (n={n_baseline}, mean={baseline_mean:.4f}, "
+                        f"wr={baseline_wr:.2%}) — model updates FROZEN"
+                    )
+                else:
+                    pf.deposit(
+                        "walk_forward", "model_freeze",
+                        {"frozen": False, "recent_wr": round(recent_wr, 3),
+                         "baseline_wr": round(baseline_wr, 3),
+                         "_ts": now_ts},
+                        half_life=86400.0,
+                    )
+                    logger.info(
+                        f"[WalkForward] HEALTHY — recent_wr={recent_wr:.2%} "
+                        f"vs baseline_wr={baseline_wr:.2%}, ret_drop={ret_drop:.2%}"
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"[WalkForward] validation tick failed: {e}")
+
+    def _mc_bootstrap_validation(self):
+        """Sprint 2026-05-02 — Monte Carlo trade-shuffle bootstrap.
+
+        Source: jesse/jesse/research/monte_carlo/monte_carlo_trades.py.
+        Tests whether observed Sharpe / total-return are statistically
+        significant or order-luck. Shuffles the realized trade list N
+        times and computes p-value.
+
+        Runs nightly. When p > 0.05 (i.e., the strategy looks no better
+        than randomized order), deposits a `mc_significance` pheromone
+        flag = False that downstream consumers (RiskEnvelope EarnedTrust,
+        threshold adapter) honor by treating recent trust gains as
+        unproven (do not promote tier on insignificant performance).
+        """
+        try:
+            import numpy as np
+            from db import get_db_connection
+            try:
+                from neural_organism import _p
+                iterations = int(_p("envelope.mc_bootstrap.iterations", 1000))
+                alpha = float(_p("envelope.mc_bootstrap.alpha", 0.05))
+            except Exception:
+                iterations, alpha = 1000, 0.05
+
+            with get_db_connection() as conn:
+                rows = conn.execute("""
+                    SELECT close_profit, close_profit_abs
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-30 days')
+                      AND is_open = 0
+                    ORDER BY close_date ASC
+                """).fetchall()
+            if not rows or len(rows) < 20:
+                logger.info(
+                    f"[MC-Bootstrap] insufficient trades ({len(rows) if rows else 0}) "
+                    "— skipping"
+                )
+                return
+            returns = np.asarray(
+                [float(r["close_profit"] or 0.0) for r in rows], dtype=float
+            )
+            observed_total = float(returns.sum())
+            # Audit Finding #9 fix (2026-05-02): Sharpe annualization now
+            # uses the ACTUAL trade-rate over the lookback (last 30 days)
+            # rather than sqrt(252) which assumes daily bars on TradFi
+            # calendar. Crypto trades 24/7/365, plus we are working with
+            # PER-TRADE returns (close_profit) — annualization scale is
+            # `sqrt(trades_per_year)` derived from observed cadence.
+            lookback_days = 30.0
+            trades_per_year = (returns.size / lookback_days) * 365.0
+            ann_factor = float(np.sqrt(max(1.0, trades_per_year)))
+            observed_sharpe = (
+                returns.mean() / (returns.std() + 1e-12) * ann_factor
+            )
+            obs_compound = float(np.prod(1.0 + returns) - 1.0)
+            shuffled_compounds = np.empty(iterations, dtype=float)
+            shuffled_sharpe = np.empty(iterations, dtype=float)
+            for i in range(iterations):
+                idx = np.random.permutation(returns.size)
+                shuffled = returns[idx]
+                shuffled_compounds[i] = float(np.prod(1.0 + shuffled) - 1.0)
+                shuffled_sharpe[i] = (
+                    shuffled.mean() / (shuffled.std() + 1e-12) * ann_factor
+                )
+            # p-value: probability of seeing observed >= shuffled
+            p_compound = float(np.sum(shuffled_compounds >= obs_compound) / iterations)
+            p_sharpe = float(np.sum(shuffled_sharpe >= observed_sharpe) / iterations)
+            significant = (p_compound < alpha) or (p_sharpe < alpha)
+
+            try:
+                import time as _t
+                from pheromone_field import get_pheromone_field
+                get_pheromone_field().deposit(
+                    "mc_bootstrap", "significance",
+                    {"significant": significant,
+                     "p_compound": round(p_compound, 4),
+                     "p_sharpe": round(p_sharpe, 4),
+                     "n_trades": int(returns.size),
+                     "iterations": iterations,
+                     "obs_total_return": round(observed_total, 4),
+                     "obs_compound_return": round(obs_compound, 4),
+                     "obs_sharpe": round(observed_sharpe, 3),
+                     "_ts": _t.time()},
+                    half_life=172800.0,  # 48h
+                )
+            except Exception:
+                pass
+            logger.info(
+                f"[MC-Bootstrap] n={returns.size} obs_compound={obs_compound:.3%} "
+                f"p_compound={p_compound:.3f} p_sharpe={p_sharpe:.3f} "
+                f"significant={significant}"
+            )
+        except Exception as e:
+            logger.debug(f"[MC-Bootstrap] validation tick failed: {e}")
+
+    def _stablecoin_netflow_tick(self):
+        """Sprint 2026-05-02 — Stablecoin minting/burning as liquidity gauge.
+
+        Net minting of USDT/USDC to exchange wallets = incoming buy
+        pressure (12-48h lead). We don't have CryptoQuant API key in
+        this stack, but we CAN proxy via Bybit's USDT supply on the
+        derivatives wallet (rough, but directional).
+
+        For now this writes the ROUGH proxy and a placeholder; when
+        CryptoQuant / Glassnode credentials are added the body can be
+        swapped without changing the consumer interface.
+        """
+        try:
+            import time as _t
+            try:
+                from neural_organism import _p
+                bullish_thr = float(_p("envelope.stablecoin.bullish_threshold_usd", 100_000_000.0))
+            except Exception:
+                bullish_thr = 100_000_000.0
+            # Placeholder telemetry deposit — CryptoQuant API integration
+            # would replace this with real netflow data. The pheromone is
+            # consumed by RiskEnvelope.stablecoin_netflow_factor (added
+            # on demand). When data isn't available the factor returns
+            # 1.0 (neutral), so the absence of CryptoQuant doesn't break
+            # sizing.
+            from pheromone_field import get_pheromone_field
+            get_pheromone_field().deposit(
+                "stablecoin_netflow", "netflow_24h",
+                {"netflow_usd": 0.0,  # placeholder until CryptoQuant wired
+                 "bullish_threshold": bullish_thr,
+                 "available": False,
+                 "_ts": _t.time()},
+                half_life=14400.0,  # 4h
+            )
+            logger.debug(
+                "[StablecoinNetflow] placeholder deposit (no CryptoQuant key) — "
+                "factor returns neutral 1.0"
+            )
+        except Exception as e:
+            logger.debug(f"[StablecoinNetflow] tick failed: {e}")
+
+    def _olmar_tick(self):
+        """Sprint 2026-05-02 (audit Finding #2 fix) — OLMAR cross-pair
+        mean-reversion. Pulls last N closes per active pair (whitelist
+        derived from system_metrics whitelist_size deposit + recent
+        trade pairs) and computes weights via Li & Hoi (2012) PA step.
+
+        Hourly cadence. Outputs deposited to pheromone field at
+        "olmar::mean_revert_weights" via publish_olmar_to_pheromone.
+        Sizing layer can blend these with Black-Litterman weights when
+        constructing per-pair allocations across the basket.
+        """
+        try:
+            from olmar_optimizer import olmar_weights, publish_olmar_to_pheromone
+            from db import get_db_connection
+            try:
+                from neural_organism import _p
+                window = int(_p("envelope.olmar.window", 5))
+                # Pull last `window+5` per pair so SMA has buffer
+                lookback_candles = window + 5
+            except Exception:
+                window = 5
+                lookback_candles = 10
+
+            with get_db_connection() as conn:
+                # Pair universe = pairs with closed trades in last 7 days
+                pairs_rows = conn.execute("""
+                    SELECT DISTINCT pair FROM trades
+                    WHERE close_date >= datetime('now', '-7 days')
+                      AND is_open = 0
+                """).fetchall()
+            pairs = [r["pair"] for r in pairs_rows] if pairs_rows else []
+            if len(pairs) < 2:
+                logger.debug(
+                    f"[OLMAR] insufficient pair universe ({len(pairs)} pairs)"
+                )
+                return
+
+            # For each pair, fetch last N closes from a price feed. The
+            # pheromone field's market_data trail is the lightweight option;
+            # if absent, fall back to derivatives_data or skip the pair.
+            from pheromone_field import get_pheromone_field
+            pf = get_pheromone_field()
+            price_history = {}
+            for p in pairs:
+                px = None
+                try:
+                    snap = pf.read(f"recent_closes::{p}")
+                    if isinstance(snap, dict) and "closes" in snap:
+                        px = list(snap["closes"])[-lookback_candles:]
+                except Exception:
+                    px = None
+                if not px or len(px) < window:
+                    continue
+                price_history[p] = px
+            if len(price_history) < 2:
+                logger.debug(
+                    f"[OLMAR] need >=2 pairs with price history, "
+                    f"have {len(price_history)}"
+                )
+                return
+
+            weights = olmar_weights(price_history)
+            if weights is None:
+                logger.debug("[OLMAR] PA-step solver returned None")
+                return
+            publish_olmar_to_pheromone(weights)
+            top = sorted(weights.items(), key=lambda x: -x[1])[:5]
+            logger.info(
+                f"[OLMAR] cross-pair mean-revert weights for "
+                f"{len(weights)} pairs. Top: "
+                f"{[(p, round(w,3)) for p, w in top]}"
+            )
+        except Exception as e:
+            logger.debug(f"[OLMAR] tick failed: {e}")
+
+    def _portfolio_optimizer_tick(self):
+        """Sprint 2026-05-02 — Run Black-Litterman + Max-Sharpe joint
+        allocator on the active whitelist. Deposits per-pair weights to
+        pheromone field. RiskEnvelope's max_single_stake can read these
+        as a scaling factor (overweight pairs the optimizer favors).
+
+        Runs hourly when whitelist >= 3 pairs (BL needs covariance, which
+        needs ≥2 assets; we require 3 for robust solving).
+        """
+        try:
+            from db import get_db_connection
+            from portfolio_optimizer import joint_pair_weights, publish_joint_weights
+            try:
+                from neural_organism import _p
+                lookback = int(_p("envelope.bl.lookback_candles", 168))
+            except Exception:
+                lookback = 168
+            with get_db_connection() as conn:
+                # Pull last N close-profit ratios per pair as proxy for returns
+                rows = conn.execute(f"""
+                    SELECT pair, close_date, close_profit
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-30 days')
+                      AND is_open = 0
+                    ORDER BY pair, close_date ASC
+                """).fetchall()
+            if not rows or len(rows) < 20:
+                logger.debug(
+                    f"[PortfolioOpt] insufficient trades ({len(rows) if rows else 0})"
+                )
+                return
+            returns_history = {}
+            for r in rows:
+                returns_history.setdefault(r["pair"], []).append(
+                    float(r["close_profit"] or 0.0)
+                )
+            pairs = [p for p, hist in returns_history.items() if len(hist) >= 5]
+            if len(pairs) < 3:
+                logger.debug(f"[PortfolioOpt] need >=3 pairs, have {len(pairs)}")
+                return
+            weights = joint_pair_weights(
+                pairs, returns_history, agent_views=None, max_weight=0.30
+            )
+            if weights is None:
+                logger.debug("[PortfolioOpt] solver failed — neutral weights")
+                return
+            publish_joint_weights(weights)
+            top = sorted(weights.items(), key=lambda x: -x[1])[:5]
+            logger.info(
+                f"[PortfolioOpt] BL+MaxSharpe weights computed for {len(pairs)} pairs. "
+                f"Top: {[(p, round(w,3)) for p, w in top]}"
+            )
+        except Exception as e:
+            logger.debug(f"[PortfolioOpt] tick failed: {e}")
+
     def _ws_health_tick(self):
         """Every 5min: scan recent strategy log for websocket disconnects
         (the 54× `_unwatch_ohlcv` / code-1006 events observed in production
@@ -3443,11 +3859,54 @@ class PipelineScheduler:
           3. Train CatBoost v2 (193 features, 500 iterations)
           4. Falls back to v1 (11 features) if insufficient backtest data
 
-        Sprint 2026-05-01: jemalloc-purge wrapped — full training data
-        matrix lives in memory during training, biggest single allocator.
+        Sprint 2026-05-01 night — checks walk-forward freeze pheromone
+        first. When recent performance has degraded the model is NOT
+        updated this cycle (skip-and-wait). Prevents the bot from
+        fitting a regime change as if it were a feature.
         """
+        if self._walk_forward_frozen():
+            logger.warning(
+                "[Sprint2:CatBoost] SKIPPED — walk-forward freeze active "
+                "(recent perf degraded vs baseline). Will retry next cycle."
+            )
+            return
         with self._heavy_job_gc("catboost_retrain"):
             self._catboost_retrain_inner()
+
+    def _walk_forward_frozen(self) -> bool:
+        """Check pheromone field for walk-forward freeze state.
+
+        Audit Finding D11: a freeze deposit only auto-clears when the
+        next daily validator run overwrites it. If the validator dies
+        for several days the freeze persists too long, locking model
+        updates indefinitely. Fail-safe: a freeze older than 36 hours
+        is treated as STALE — better to retrain on questionable data
+        than to leave the bot stuck on stale models forever.
+        """
+        try:
+            import time as _t
+            from pheromone_field import get_pheromone_field
+            pf = get_pheromone_field()
+            state = pf.read("model_freeze", source="walk_forward")
+            if not isinstance(state, dict):
+                return False
+            if not bool(state.get("frozen", False)):
+                return False
+            ts = state.get("_ts") or state.get("timestamp")
+            if ts:
+                try:
+                    age_h = (_t.time() - float(ts)) / 3600.0
+                    if age_h > 36.0:
+                        logger.info(
+                            f"[WalkForward] freeze stale ({age_h:.1f}h old) — "
+                            "treating as cleared"
+                        )
+                        return False
+                except (TypeError, ValueError):
+                    pass
+            return True
+        except Exception:
+            return False
 
     def _catboost_retrain_inner(self):
         try:
@@ -3517,7 +3976,12 @@ class PipelineScheduler:
         Sprint 2026-05-01: jemalloc-purge wrapped — pulls 1000 rows into a
         pandas DataFrame and fits a Mahalanobis distance per regime, holding
         feature matrices the entire time.
+
+        Sprint 2026-05-01 night — walk-forward freeze honored.
         """
+        if self._walk_forward_frozen():
+            logger.warning("[Phase28:OOD] SKIPPED — walk-forward freeze active.")
+            return
         with self._heavy_job_gc("ood_refit"):
             self._ood_refit_inner()
 
@@ -4396,7 +4860,12 @@ class PipelineScheduler:
 
         Sprint 2026-05-01: jemalloc-purge wrapped — fits 5 deep models
         in-process, biggest neural-net allocator after CatBoost.
+
+        Sprint 2026-05-01 night — walk-forward freeze honored.
         """
+        if self._walk_forward_frozen():
+            logger.warning("[Phase28:Ensemble] SKIPPED — walk-forward freeze active.")
+            return
         with self._heavy_job_gc("ensemble_refit"):
             try:
                 from deep_ensemble import DeepEnsemble

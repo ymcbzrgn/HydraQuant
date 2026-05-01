@@ -185,6 +185,89 @@ class OrderFlowAnalyzer:
         if not hasattr(self, "_last_orderbook") or self._last_orderbook is None:
             self._last_orderbook = {}
         self._last_orderbook[pair] = orderbook
+        # Sprint 2026-05-02: compute multi-level OFI on every snapshot so
+        # downstream consumers always have a fresh value.
+        try:
+            self._compute_multi_level_ofi(pair, orderbook)
+        except Exception as e:
+            logger.debug(f"[OrderFlow:MultiOFI] {pair} compute failed: {e}")
+
+    def _compute_multi_level_ofi(self, pair: str, orderbook: Dict) -> Optional[float]:
+        """Multi-Level Order Flow Imbalance (Cont-Kukanov style).
+
+        Source: arXiv 2506.05764 (Bybit BTCUSDT) + Cont (NYU) — multi-level
+        OFI dominates single-level imbalance for short-horizon prediction.
+
+        Computes weighted depth ratio across the top-N levels:
+          OFI = Σ w_i * (bid_size_i - ask_size_i) / (bid_size_i + ask_size_i)
+        where w_i = 1/i (closer levels weighted more) and i ∈ [1, N].
+
+        Range [-1, 1]. Positive → buy pressure dominant, negative → sell.
+        Persists rolling history per pair so percentile-rank comparisons
+        work the same way VPIN history does.
+
+        Returns the latest weighted OFI in [-1, 1] or None on bad input.
+        """
+        from collections import deque
+        try:
+            from neural_organism import _p
+            n_levels = int(_p("envelope.ofi.levels", 10))
+        except Exception:
+            n_levels = 10
+        bids = orderbook.get("bids") or []
+        asks = orderbook.get("asks") or []
+        if not bids or not asks:
+            return None
+        levels = min(n_levels, len(bids), len(asks))
+        if levels < 1:
+            return None
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for i in range(levels):
+            try:
+                bid_size = float(bids[i][1])
+                ask_size = float(asks[i][1])
+            except (IndexError, TypeError, ValueError):
+                continue
+            denom = bid_size + ask_size
+            if denom <= 0:
+                continue
+            level_imbalance = (bid_size - ask_size) / denom
+            weight = 1.0 / (i + 1)  # 1, 1/2, 1/3, ...
+            weighted_sum += weight * level_imbalance
+            weight_total += weight
+        if weight_total <= 0:
+            return None
+        ofi = weighted_sum / weight_total
+        # Clamp to [-1, 1]
+        ofi = max(-1.0, min(1.0, ofi))
+        # Maintain history (mirrors VPIN history pattern)
+        if not hasattr(self, "_ofi_history"):
+            self._ofi_history: Dict[str, deque] = {}
+        if pair not in self._ofi_history:
+            self._ofi_history[pair] = deque(maxlen=500)
+        self._ofi_history[pair].append(float(ofi))
+        # Pheromone deposit so RiskEnvelope and signal layer can consume
+        try:
+            from pheromone_field import get_pheromone_field
+            get_pheromone_field().deposit(
+                "order_flow", f"ofi_multi::{pair}",
+                {"pair": pair, "ofi": round(ofi, 4),
+                 "levels": levels, "abs": round(abs(ofi), 4)},
+                half_life=120.0,
+            )
+        except Exception:
+            pass
+        return float(ofi)
+
+    def get_multi_level_ofi(self, pair: str) -> Optional[float]:
+        """Latest weighted multi-level OFI for a pair, None if no snapshot."""
+        if not hasattr(self, "_ofi_history"):
+            return None
+        hist = self._ofi_history.get(pair)
+        if not hist:
+            return None
+        return float(hist[-1])
 
     def _get_hawkes(self, pair: str) -> HawkesIntensityTracker:
         tracker = self._hawkes.get(pair)

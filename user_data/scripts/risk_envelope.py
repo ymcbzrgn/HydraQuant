@@ -996,6 +996,460 @@ class RiskEnvelope:
             f"trust for {self.STREAK_BONUS_TTL_SECONDS/60:.0f} min"
         )
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Sprint 2026-05-01 night — para makinesi additions:
+    #   • F&G Contrarian Bias        (#9)
+    #   • Time-of-Day (Cerebellum)   (#8)
+    #   • Confidence Calibration     (#1)
+    #   • Volatility Targeting       (#13)
+    # All four feed into max_single_stake / max_combined_position /
+    # dca_increment_pct as additional multipliers in the EarnedTrust chain.
+    # ═══════════════════════════════════════════════════════════════════
+
+    def fng_contrarian_bias(self, signal_type: Optional[str] = None) -> float:
+        """Buffett rule: 'Be greedy when others are fearful, fearful when greedy.'
+
+        Returns a confidence multiplier:
+          • F&G < 20 (Extreme Fear)  AND signal BULL → 1.20 (boost contrarian long)
+          • F&G > 80 (Extreme Greed) AND signal BEAR → 1.20 (boost contrarian short)
+          • F&G < 20 AND signal BEAR → 0.85 (penalize trend-chasing into a fear bottom)
+          • F&G > 80 AND signal BULL → 0.85 (penalize FOMO into a greed top)
+          • All other cases → 1.0 (neutral)
+
+        Thresholds come from PARAM_REGISTRY so neurons can tune them.
+        """
+        try:
+            from neural_organism import _p
+            extreme_low = float(_p("envelope.fng_contrarian.extreme_low", 20.0))
+            extreme_high = float(_p("envelope.fng_contrarian.extreme_high", 80.0))
+            boost_factor = float(_p("envelope.fng_contrarian.boost", 1.20))
+            penalty_factor = float(_p("envelope.fng_contrarian.penalty", 0.85))
+        except Exception:
+            extreme_low, extreme_high = 20.0, 80.0
+            boost_factor, penalty_factor = 1.20, 0.85
+
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                row = conn.execute(
+                    "SELECT value FROM fear_and_greed "
+                    "ORDER BY timestamp DESC LIMIT 1"
+                ).fetchone()
+            if row is None:
+                return 1.0
+            fng = float(row["value"])
+        except Exception:
+            return 1.0
+
+        if signal_type is None:
+            return 1.0
+
+        sig = str(signal_type).upper()
+        is_bull = sig in ("BULL", "BULLISH", "LONG")
+        is_bear = sig in ("BEAR", "BEARISH", "SHORT")
+
+        if fng < extreme_low:
+            return boost_factor if is_bull else (penalty_factor if is_bear else 1.0)
+        if fng > extreme_high:
+            return boost_factor if is_bear else (penalty_factor if is_bull else 1.0)
+        return 1.0
+
+    def cerebellum_hour_factor(self) -> float:
+        """Returns the bot's own historical performance multiplier for the
+        current UTC hour. Sourced from Cerebellum.get_hour_multiplier
+        which already produces [0.6, 1.4] based on hourly win rate.
+
+        This converts the 'bot's best hours' that were just sitting in DB
+        (cerebellum_hours table) into actual sizing pressure. Free alpha
+        from the bot's own observed regularity.
+
+        Falls back to 1.0 (neutral) when the organism isn't ready or the
+        slot has <3 samples — never blocks trading on missing data.
+        """
+        try:
+            from neural_organism import get_organism
+            from datetime import datetime, timezone
+            org = get_organism()
+            hour_utc = datetime.now(tz=timezone.utc).hour
+            mult = float(org.cerebellum.get_hour_multiplier(hour_utc))
+            # Cerebellum already clamps to [0.6, 1.4]; we re-clamp defensively.
+            return max(0.6, min(1.4, mult))
+        except Exception:
+            return 1.0
+
+    def apply_calibration(self, raw_confidence: float) -> float:
+        """Take a raw model confidence and return its Platt-calibrated value.
+
+        ConfidenceCalibrator already:
+          • Reads ai_decisions outcomes
+          • Fits Platt scaling (logistic regression: A·conf + B)
+          • Returns adjusted probability
+
+        We just route every confidence value through it before sizing
+        decisions. Effect: when the bot routinely says '85% sure' but
+        only wins 65% of those, calibration shrinks future 0.85 reads
+        toward 0.70 — and the EarnedTrust sizing chain consumes the
+        truthful number.
+
+        Falls back to raw_confidence when calibrator isn't fitted yet
+        (insufficient outcome history) — never blocks trading.
+        """
+        try:
+            from confidence_calibrator import ConfidenceCalibrator
+            # Cache the singleton on the envelope so we don't re-instantiate
+            # (the calibrator opens a DB connection on construct).
+            cal = getattr(self, "_calibrator_singleton", None)
+            if cal is None:
+                cal = ConfidenceCalibrator()
+                self._calibrator_singleton = cal
+            adjusted = cal.adjust_confidence(float(raw_confidence))
+            return max(0.0, min(1.0, float(adjusted)))
+        except Exception:
+            return max(0.0, min(1.0, float(raw_confidence)))
+
+    def fomo_veto_factor(self, recent_low: Optional[float],
+                         current_price: Optional[float],
+                         atr: Optional[float] = None,
+                         signal_type: Optional[str] = None,
+                         recent_high: Optional[float] = None) -> float:
+        """FOMO veto — penalize entries that chase price already extended.
+
+        Source: AI-Trader-main-4 pump_detector.py:217-234.
+
+        Audit Finding #10 fix (2026-05-02): direction-aware. For LONGS,
+        FOMO is "buying AFTER the breakout has run" — distance from
+        recent_low. For SHORTS, FOMO is "selling AFTER the drop has
+        completed" — distance from recent_high. The prior implementation
+        only handled longs and silently mis-sized shorts.
+
+        Returns multiplier in [min_factor, 1.0]:
+          • At anchor price (low for long, high for short) → 1.0
+          • At anchor + ATR×3 distance → min_factor (0.3 default)
+          • Linear decay between
+        """
+        if current_price is None or current_price <= 0:
+            return 1.0
+        try:
+            from neural_organism import _p
+            full_penalty_atr = float(_p("envelope.fomo_veto.full_penalty_atr_mult", 3.0))
+            min_factor = float(_p("envelope.fomo_veto.min_factor", 0.3))
+            full_penalty_pct = float(_p("envelope.fomo_veto.full_penalty_pct_no_atr", 8.0))
+        except Exception:
+            full_penalty_atr, min_factor, full_penalty_pct = 3.0, 0.3, 8.0
+
+        sig = (signal_type or "").upper()
+        is_short = sig in ("BEAR", "BEARISH", "SHORT")
+        is_long = sig in ("BULL", "BULLISH", "LONG")
+
+        # Pick the anchor based on direction. Default to LONG semantics
+        # when signal_type is missing (most common case, backward compat).
+        if is_short:
+            anchor = recent_high
+            if anchor is None or anchor <= 0:
+                return 1.0
+            raw_distance = anchor - current_price
+        else:
+            # is_long OR unknown → use recent_low as anchor
+            anchor = recent_low
+            if anchor is None or anchor <= 0:
+                return 1.0
+            raw_distance = current_price - anchor
+
+        if atr and atr > 0:
+            distance = raw_distance / atr
+            full_penalty_at = full_penalty_atr  # ATR-units
+        else:
+            distance = raw_distance / anchor * 100.0
+            full_penalty_at = full_penalty_pct
+
+        if distance <= 0:
+            return 1.0
+        if distance >= full_penalty_at:
+            return min_factor
+        # Linear decay 1.0 → min_factor
+        return max(min_factor, 1.0 - (1.0 - min_factor) * (distance / full_penalty_at))
+
+    def hurst_regime_factor(self, hurst_value: Optional[float] = None,
+                            pair: Optional[str] = None) -> float:
+        """Hurst exponent → sizing factor.
+
+        Sources: jesse/indicators/hurst_exponent.py (R/S, DMA, DSOD).
+        H < 0.45 → mean-reverting (boost mean-reversion strategies)
+        H > 0.55 → trending  (boost trend-following)
+        H ≈ 0.50 → random walk → reduce sizing (no edge)
+
+        Audit Finding #1 fix (2026-05-02): pair parameter added so each
+        pair reads its OWN Hurst from the pheromone field. The legacy
+        unsuffixed key is read only as a fallback when a per-pair key
+        isn't yet populated (cold start within first hour).
+        """
+        if hurst_value is None:
+            try:
+                from pheromone_field import get_pheromone_field
+                pf = get_pheromone_field()
+                # Prefer per-pair key — set by publish_hurst_to_pheromone(prices, pair=pair)
+                h_state = None
+                if pair:
+                    h_state = pf.read(f"hurst_3vote::{pair}")
+                # Fallback to unsuffixed key for cold-start / migration safety
+                if not isinstance(h_state, dict):
+                    h_state = pf.read("hurst_3vote")
+                if isinstance(h_state, dict):
+                    hurst_value = float(h_state.get("hurst", 0.5))
+            except Exception:
+                pass
+        if hurst_value is None:
+            return 1.0
+        h = max(0.0, min(1.0, float(hurst_value)))
+        # Distance from 0.5 random-walk, capped at 0.3 each side
+        distance = min(0.3, abs(h - 0.5))
+        # Strong direction (trending OR mean-revert) → up to 1.2
+        # Random walk (H≈0.5) → 0.7 (no edge, shrink)
+        if distance < 0.05:
+            return 0.7  # random walk: no structural edge
+        return 1.0 + (distance / 0.3) * 0.2  # up to 1.2 at distance=0.3
+
+    def vpin_action_factor(self, pair: Optional[str] = None) -> float:
+        """VPIN toxicity-adaptive sizing factor.
+
+        Audit Finding #3 fix (2026-05-02): the PARAM_REGISTRY exposed
+        envelope.vpin_action.* tunables but no consumer existed. This
+        method reads the live VPIN history from order_flow's per-pair
+        history and shrinks sizing when toxicity exceeds the threshold.
+
+        Source: ScienceDirect (2025) — Bitcoin VPIN significantly
+        predicts price jumps. When VPIN is in the top decile (>0.7
+        default), informed traders are crowding one side; passive
+        liquidity providers face elevated adverse-selection cost. Our
+        action: shrink position size by `size_factor` (default 0.5).
+
+        Returns multiplier in [size_factor, 1.0]:
+          • VPIN >= toxic_threshold (0.7) → size_factor (0.5)
+          • Otherwise → 1.0 neutral
+        """
+        if pair is None:
+            return 1.0
+        try:
+            from neural_organism import _p
+            toxic_thr = float(_p("envelope.vpin_action.toxic_threshold", 0.7))
+            size_factor = float(_p("envelope.vpin_action.size_factor", 0.5))
+        except Exception:
+            toxic_thr, size_factor = 0.7, 0.5
+        try:
+            from order_flow import get_order_flow
+            of = get_order_flow()
+            hist = of._vpin_history.get(pair) if hasattr(of, "_vpin_history") else None
+            if not hist or len(hist) == 0:
+                return 1.0
+            latest_vpin = float(hist[-1])
+        except Exception:
+            return 1.0
+        if latest_vpin >= toxic_thr:
+            return max(0.1, min(1.0, size_factor))
+        return 1.0
+
+    def event_calendar_factor(self) -> float:
+        """Pre-FOMC / CPI / NFP volatility crush avoidance.
+
+        Per Kraken Aug 2025: only 1 of 8 FOMC meetings rallied BTC.
+        Pre-event (1h before → 30min after): reduce sizing by 50%.
+        Outside event windows: 1.0 neutral. Defensive — prevents 100-300
+        bps of avoidable losses per macro event.
+        """
+        try:
+            from event_calendar import current_event_factor
+            return float(current_event_factor())
+        except Exception:
+            return 1.0
+
+    def multi_level_ofi_bias(self, pair: Optional[str] = None,
+                             signal_type: Optional[str] = None) -> float:
+        """Multi-level Order Flow Imbalance directional alignment factor.
+
+        Source: arXiv 2506.05764, Cont (NYU). When OFI strongly aligns
+        with the signal direction (e.g., signal=BULL AND OFI > +0.5 →
+        bid pressure confirms), boost cap. When opposite, penalize.
+
+        Returns multiplier in [0.7, 1.3]:
+          • |OFI| > 0.5 AND aligned with signal → 1.30
+          • |OFI| > 0.3 AND aligned             → 1.15
+          • |OFI| > 0.5 AND OPPOSED to signal   → 0.70
+          • |OFI| > 0.3 AND opposed             → 0.85
+          • all else                             → 1.0
+        """
+        if pair is None or signal_type is None:
+            return 1.0
+        # Audit Finding #5 fix (2026-05-02): prefer pheromone (cross-process,
+        # survives singleton restart) over in-memory deque. Fall back to
+        # the in-memory getter only when pheromone is missing/stale.
+        ofi = None
+        try:
+            from pheromone_field import get_pheromone_field
+            state = get_pheromone_field().read(f"ofi_multi::{pair}")
+            if isinstance(state, dict) and "ofi" in state:
+                ofi = float(state["ofi"])
+        except Exception:
+            pass
+        if ofi is None:
+            try:
+                from order_flow import get_order_flow
+                ofi = get_order_flow().get_multi_level_ofi(pair)
+            except Exception:
+                ofi = None
+        if ofi is None:
+            return 1.0
+        try:
+            from neural_organism import _p
+            strong_thr = float(_p("envelope.ofi.strong_threshold", 0.5))
+            mild_thr = float(_p("envelope.ofi.mild_threshold", 0.3))
+            strong_boost = float(_p("envelope.ofi.strong_boost", 1.30))
+            mild_boost = float(_p("envelope.ofi.mild_boost", 1.15))
+            penalty_strong = float(_p("envelope.ofi.strong_penalty", 0.70))
+            penalty_mild = float(_p("envelope.ofi.mild_penalty", 0.85))
+        except Exception:
+            strong_thr, mild_thr = 0.5, 0.3
+            strong_boost, mild_boost = 1.30, 1.15
+            penalty_strong, penalty_mild = 0.70, 0.85
+
+        sig = str(signal_type).upper()
+        is_bull = sig in ("BULL", "BULLISH", "LONG")
+        is_bear = sig in ("BEAR", "BEARISH", "SHORT")
+        if not (is_bull or is_bear):
+            return 1.0
+        # OFI > 0 → buy pressure → aligned with BULL
+        ofi_dir_bull = ofi > 0
+        aligned = (is_bull and ofi_dir_bull) or (is_bear and not ofi_dir_bull)
+        abs_ofi = abs(ofi)
+        if abs_ofi >= strong_thr:
+            return strong_boost if aligned else penalty_strong
+        if abs_ofi >= mild_thr:
+            return mild_boost if aligned else penalty_mild
+        return 1.0
+
+    def funding_arbitrage_bias(self, pair: str,
+                               signal_type: Optional[str] = None) -> float:
+        """Funding-rate arbitrage edge.
+
+        Bybit perp funding settles every 8h. When funding is highly
+        NEGATIVE (e.g. -0.05% per 8h = -0.15%/day), shorts COLLECT the
+        funding fee from longs. So opening a short:
+          • Earns +0.15%/day passively as long as the position is held
+          • Plus directional P&L if price drops
+          • Risk-free if held through one funding cycle without price move
+
+        Mirror logic for highly POSITIVE funding (longs collect).
+
+        Returns multiplicative bias [0.85, 1.30]:
+          • |funding| > 0.05% AND signal aligned with collection side → 1.30
+          • |funding| > 0.02% AND signal aligned                     → 1.10
+          • |funding| > 0.05% AND signal AGAINST collection side     → 0.85
+          • All else                                                  → 1.0
+
+        This is real institutional alpha — basis trades / cash-and-carry.
+        """
+        if signal_type is None:
+            return 1.0
+
+        try:
+            from neural_organism import _p
+            extreme_threshold = float(_p("envelope.funding_arb.extreme", 0.0005))   # 0.05%/8h
+            mild_threshold = float(_p("envelope.funding_arb.mild", 0.0002))          # 0.02%/8h
+            extreme_boost = float(_p("envelope.funding_arb.extreme_boost", 1.30))
+            mild_boost = float(_p("envelope.funding_arb.mild_boost", 1.10))
+            penalty = float(_p("envelope.funding_arb.penalty", 0.85))
+        except Exception:
+            extreme_threshold, mild_threshold = 0.0005, 0.0002
+            extreme_boost, mild_boost, penalty = 1.30, 1.10, 0.85
+
+        try:
+            from db import get_db_connection
+            # derivatives_data uses BASE pair without :USDT suffix
+            base_pair = (pair or "").split(":")[0]
+            with get_db_connection() as conn:
+                row = conn.execute(
+                    "SELECT funding_rate FROM derivatives_data "
+                    "WHERE pair = ? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (base_pair,),
+                ).fetchone()
+            if row is None or row["funding_rate"] is None:
+                return 1.0
+            fr = float(row["funding_rate"])
+        except Exception:
+            return 1.0
+
+        sig = str(signal_type).upper()
+        is_short = sig in ("BEAR", "BEARISH", "SHORT")
+        is_long = sig in ("BULL", "BULLISH", "LONG")
+        if not (is_short or is_long):
+            return 1.0
+
+        # Negative funding → shorts collect; positive → longs collect.
+        short_collects = fr < 0
+        long_collects = fr > 0
+        abs_fr = abs(fr)
+
+        if abs_fr >= extreme_threshold:
+            if (is_short and short_collects) or (is_long and long_collects):
+                logger.info(
+                    f"[FundingArb] {pair} funding={fr:+.4%} "
+                    f"({sig} aligned with collection side) → boost {extreme_boost:.2f}x"
+                )
+                return extreme_boost
+            return penalty
+        if abs_fr >= mild_threshold:
+            if (is_short and short_collects) or (is_long and long_collects):
+                return mild_boost
+        return 1.0
+
+    def volatility_target_scalar(self) -> float:
+        """Renaissance-style portfolio-level volatility targeting.
+
+        Target daily portfolio volatility = 1.0% (configurable). Compares
+        against the bot's REALIZED daily PnL standard deviation over the
+        last 20 trades. When realized vol is LOW (calm, predictable
+        market), scale UP; when HIGH (chaotic), scale DOWN.
+
+        Range clamped to [0.5, 2.0] — at the extremes:
+          • 0.5×: realized vol 2× target → cut sizing in half
+          • 2.0×: realized vol 0.5× target → double sizing
+
+        This is structurally different from `_volatility_brake_factor`
+        (which reads ATR pheromone for short-term spikes). Vol-target
+        is a 20-trade rolling adjustment to portfolio-level risk budget.
+        """
+        try:
+            from neural_organism import _p
+            target_vol = float(_p("envelope.vol_target.daily_pct", 0.01))
+            min_scalar = float(_p("envelope.vol_target.min_scalar", 0.5))
+            max_scalar = float(_p("envelope.vol_target.max_scalar", 2.0))
+        except Exception:
+            target_vol, min_scalar, max_scalar = 0.01, 0.5, 2.0
+
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                row = conn.execute("""
+                    SELECT close_profit
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-30 days')
+                      AND is_open = 0
+                    ORDER BY close_date DESC LIMIT 20
+                """).fetchall()
+            if not row or len(row) < 5:
+                return 1.0
+            returns = [float(r["close_profit"] or 0.0) for r in row]
+            n = len(returns)
+            mean = sum(returns) / n
+            variance = sum((r - mean) ** 2 for r in returns) / n
+            realized_vol = variance ** 0.5
+            if realized_vol <= 0:
+                return max_scalar  # zero variance — extremely calm, max boost
+            scalar = target_vol / realized_vol
+            return max(min_scalar, min(max_scalar, scalar))
+        except Exception:
+            return 1.0
+
     def _volatility_brake_factor(self) -> float:
         """Returns [0.5, 1.0] — halves cap when ATR is 2× the rolling normal.
 
@@ -1060,90 +1514,143 @@ class RiskEnvelope:
         except Exception:
             return 0
 
+    def _alpha_chain(self, confidence: Optional[float],
+                     signal_type: Optional[str],
+                     pair: Optional[str] = None,
+                     recent_low: Optional[float] = None,
+                     current_price: Optional[float] = None,
+                     atr: Optional[float] = None,
+                     recent_high: Optional[float] = None) -> Dict[str, float]:
+        """Compute every multiplicative factor used by sizing methods.
+
+        Sprint 2026-05-02 — para makinesi sizing chain (FULL):
+          tier_base × trust × conv × hormonal × decay × vol_brake
+                     × cerebellum_hour × fng_contrarian × vol_target
+                     × funding_arb × ofi × hurst_regime
+                     × fomo_veto × event_calendar
+        """
+        if confidence is None:
+            calibrated = None
+            conv = 0.85
+        else:
+            calibrated = self.apply_calibration(float(confidence))
+            conv = self.conviction_scalar(calibrated)
+
+        funding_arb = self.funding_arbitrage_bias(pair, signal_type) if pair else 1.0
+        ofi = self.multi_level_ofi_bias(pair, signal_type) if pair else 1.0
+
+        return {
+            "trust": self.earned_trust_multiplier(),
+            "conv": conv,
+            "hormonal": self._hormonal_factor(),
+            "decay": float(self._decay_multiplier),
+            "vol_brake": self._volatility_brake_factor(),
+            "cerebellum": self.cerebellum_hour_factor(),
+            "fng_contrarian": self.fng_contrarian_bias(signal_type),
+            "vol_target": self.volatility_target_scalar(),
+            "funding_arb": funding_arb,
+            "ofi": ofi,
+            "hurst": self.hurst_regime_factor(pair=pair),
+            "fomo_veto": self.fomo_veto_factor(recent_low, current_price, atr,
+                                               signal_type=signal_type,
+                                               recent_high=recent_high),
+            "event_calendar": self.event_calendar_factor(),
+            "vpin_action": self.vpin_action_factor(pair=pair),
+            "calibrated_conf": (calibrated if calibrated is not None
+                                else (confidence or 0.0)),
+            "raw_conf": float(confidence) if confidence is not None else 0.0,
+        }
+
     def max_single_stake(self, portfolio_value: float,
-                         confidence: Optional[float] = None) -> float:
+                         confidence: Optional[float] = None,
+                         signal_type: Optional[str] = None,
+                         pair: Optional[str] = None,
+                         recent_low: Optional[float] = None,
+                         current_price: Optional[float] = None,
+                         atr: Optional[float] = None,
+                         recent_high: Optional[float] = None) -> float:
         """Hard ceiling for a single trade's stake amount.
 
-        Sprint 2026-05-01 evening — EarnedTrust System:
-          final_pct = TIER_BASE × earned_trust × conviction_scalar
-                      × hormonal × decay × volatility_brake
+        Sprint 2026-05-02 — full 13-factor alpha chain:
+          tier × trust × conv × hormonal × decay × vol_brake
+              × cerebellum × fng_contrarian × vol_target × funding_arb
+              × ofi × hurst × fomo_veto × event_calendar
 
-        With cold-start defaults (trust=1.0, conv=full at conf 0.85+),
-        L0 produces ~$257 (5%). After 30 days of profitable trading
-        (trust=1.5), L1+conf 0.95 climbs to ~$617. After 6 months at L5
-        with trust=2.0 the cap hits the global hard ceiling at 30%.
-        Apr 17 disaster (cold-start L0 with conf=0.95): $257 — was $5,481.
-
-        confidence: optional [0,1]. When provided, conviction_scalar is
-        applied. When None (legacy callers / pre-trade estimation), the
-        scalar defaults to 0.85 — middle of the cap utilization curve,
-        a sensible neutral.
+        Hard ceiling 30% portfolio NEVER violated.
         """
         if portfolio_value <= 0:
             return 0.0
-
         base_pct = self._tier_base("max_single_stake_pct", 0.05)
-        trust = self.earned_trust_multiplier()
-        if confidence is None:
-            conv = 0.85  # neutral mid-conv when caller hasn't supplied
-        else:
-            conv = self.conviction_scalar(confidence)
-        hormonal = self._hormonal_factor()  # [0.30, 1.15]
-        decay = float(self._decay_multiplier)
-        vol_brake = self._volatility_brake_factor()
-
-        effective = base_pct * trust * conv * hormonal * decay * vol_brake
-        # Hard ceiling — institutional safety floor, NEVER violated.
+        chain = self._alpha_chain(
+            confidence, signal_type, pair=pair,
+            recent_low=recent_low, current_price=current_price, atr=atr,
+            recent_high=recent_high,
+        )
+        effective = (
+            base_pct
+            * chain["trust"] * chain["conv"]
+            * chain["hormonal"] * chain["decay"]
+            * chain["vol_brake"] * chain["cerebellum"]
+            * chain["fng_contrarian"] * chain["vol_target"]
+            * chain["funding_arb"] * chain["ofi"]
+            * chain["hurst"] * chain["fomo_veto"]
+            * chain["event_calendar"] * chain["vpin_action"]
+        )
         effective = max(0.005, min(self.EARNED_TRUST_HARD_CEILING_PCT, effective))
         return float(portfolio_value) * effective
 
     def max_combined_position(self, portfolio_value: float,
-                              confidence: Optional[float] = None) -> float:
-        """Hard ceiling for combined position (initial + all DCAs).
-
-        Sprint 2026-05-01 evening — EarnedTrust System.
-        Same multiplicative chain as max_single_stake but uses the
-        wider tier_base (max_combined_pos_pct) so DCA pyramiding has
-        room. Hard ceiling still 30%.
-        """
+                              confidence: Optional[float] = None,
+                              signal_type: Optional[str] = None,
+                              pair: Optional[str] = None,
+                              recent_low: Optional[float] = None,
+                              current_price: Optional[float] = None,
+                              atr: Optional[float] = None) -> float:
+        """Combined position cap (full 13-factor alpha chain)."""
         if portfolio_value <= 0:
             return 0.0
-
         base_pct = self._tier_base("max_combined_pos_pct", 0.10)
-        trust = self.earned_trust_multiplier()
-        if confidence is None:
-            conv = 0.85
-        else:
-            conv = self.conviction_scalar(confidence)
-        hormonal = self._hormonal_factor()
-        decay = float(self._decay_multiplier)
-        vol_brake = self._volatility_brake_factor()
-
-        effective = base_pct * trust * conv * hormonal * decay * vol_brake
+        chain = self._alpha_chain(
+            confidence, signal_type, pair=pair,
+            recent_low=recent_low, current_price=current_price, atr=atr,
+            recent_high=recent_high,
+        )
+        effective = (
+            base_pct
+            * chain["trust"] * chain["conv"]
+            * chain["hormonal"] * chain["decay"]
+            * chain["vol_brake"] * chain["cerebellum"]
+            * chain["fng_contrarian"] * chain["vol_target"]
+            * chain["funding_arb"] * chain["ofi"]
+            * chain["hurst"] * chain["fomo_veto"]
+            * chain["event_calendar"] * chain["vpin_action"]
+        )
         effective = max(0.01, min(self.EARNED_TRUST_HARD_CEILING_PCT, effective))
         return float(portfolio_value) * effective
 
-    def dca_increment_pct(self, confidence: Optional[float] = None) -> float:
-        """DCA add-stake as fraction of portfolio.
-
-        Sprint 2026-05-01 evening — same EarnedTrust chain. Replaces the
-        legacy hardcoded `max_stake * 0.30` (Apr 17 disaster's
-        mechanism). DCA additions now scale with proven track record,
-        signal conviction, hormonal calm, decay, AND volatility brake.
-        """
+    def dca_increment_pct(self, confidence: Optional[float] = None,
+                          signal_type: Optional[str] = None,
+                          pair: Optional[str] = None,
+                          recent_low: Optional[float] = None,
+                          current_price: Optional[float] = None,
+                          atr: Optional[float] = None) -> float:
+        """DCA add-stake fraction. Full 13-factor alpha chain."""
         base = self._tier_base("dca_pct", 0.03)
-        trust = self.earned_trust_multiplier()
-        if confidence is None:
-            conv = 0.85
-        else:
-            conv = self.conviction_scalar(confidence)
-        hormonal = self._hormonal_factor()
-        decay = float(self._decay_multiplier)
-        vol_brake = self._volatility_brake_factor()
-
-        effective = base * trust * conv * hormonal * decay * vol_brake
-        # DCA increment hard floor 0.5%, ceiling 15% (the combined cap
-        # already enforces aggregate position bound).
+        chain = self._alpha_chain(
+            confidence, signal_type, pair=pair,
+            recent_low=recent_low, current_price=current_price, atr=atr,
+            recent_high=recent_high,
+        )
+        effective = (
+            base
+            * chain["trust"] * chain["conv"]
+            * chain["hormonal"] * chain["decay"]
+            * chain["vol_brake"] * chain["cerebellum"]
+            * chain["fng_contrarian"] * chain["vol_target"]
+            * chain["funding_arb"] * chain["ofi"]
+            * chain["hurst"] * chain["fomo_veto"]
+            * chain["event_calendar"] * chain["vpin_action"]
+        )
         return max(0.005, min(0.15, effective))
 
     def max_dca_levels(self) -> int:
