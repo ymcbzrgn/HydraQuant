@@ -192,6 +192,65 @@ class RegimeClassifier:
         }
         return modifiers.get(regime, 0.90)
 
+    # ─── Sprint 2026-05-01: dynamic regime-driven parameters ─────────────
+    # All values come from neural-organism adaptive parameters (`_p`) so
+    # production can tune them without redeploys.
+
+    @staticmethod
+    def neutral_band(regime: str) -> float:
+        """Half-width of the EVIDENCE_ENGINE NEUTRAL band per regime.
+
+        Trending regimes deserve a TIGHT band (0.01) — even small score
+        deviations are directionally meaningful when ADX is strong.
+        Ranging / volatile / illiquid deserve WIDE bands — chop is noise.
+
+        EE _synthesize() uses signal=NEUTRAL when 0.50-band < raw < 0.50+band.
+        Default 0.03 → 0.47/0.53 (legacy). New band per-regime tightens
+        trending and widens noise so signals don't all collapse to NEUTRAL.
+        """
+        bands = {
+            RegimeClassifier.TRENDING_BULL: _p("regime.neutral_band.trending", 0.01),
+            RegimeClassifier.TRENDING_BEAR: _p("regime.neutral_band.trending", 0.01),
+            RegimeClassifier.RANGING: _p("regime.neutral_band.ranging", 0.05),
+            RegimeClassifier.HIGH_VOLATILITY: _p("regime.neutral_band.high_vol", 0.07),
+            RegimeClassifier.TRANSITIONAL: _p("regime.neutral_band.transitional", 0.04),
+            RegimeClassifier.ILLIQUID: _p("regime.neutral_band.illiquid", 0.10),
+        }
+        return float(bands.get(regime, 0.03))
+
+    @staticmethod
+    def is_directional(regime: str) -> bool:
+        """True if the regime has a clear direction the strategy can lean on.
+
+        Used by HydraSizer's TriplePerception promotion gate to decide
+        whether TP override should fire (only when regime is directional).
+        """
+        return regime in (RegimeClassifier.TRENDING_BULL,
+                          RegimeClassifier.TRENDING_BEAR)
+
+    @staticmethod
+    def protection_lookback_factor(regime: str) -> float:
+        """Multiplier on protection lookback window per regime.
+
+        Trending: full window (1.0) — remember every loss in the trend.
+        Ranging: 0.6 — chop is noise, shorter memory.
+        High-volatility: 0.4 — focus on recent action.
+        Transitional: 0.7 — bias toward recent.
+        Illiquid: 0.5 — won't trade anyway.
+
+        Used by RiskEnvelope.protection_lookback_candles() to scale
+        TIER_BASES[level]['protection_lookback_base'] dynamically.
+        """
+        factors = {
+            RegimeClassifier.TRENDING_BULL: _p("regime.protection_lb.trending", 1.0),
+            RegimeClassifier.TRENDING_BEAR: _p("regime.protection_lb.trending", 1.0),
+            RegimeClassifier.RANGING: _p("regime.protection_lb.ranging", 0.6),
+            RegimeClassifier.HIGH_VOLATILITY: _p("regime.protection_lb.high_vol", 0.4),
+            RegimeClassifier.TRANSITIONAL: _p("regime.protection_lb.transitional", 0.7),
+            RegimeClassifier.ILLIQUID: _p("regime.protection_lb.illiquid", 0.5),
+        }
+        return float(factors.get(regime, 0.7))
+
 
 # ═══════════════════════════════════════════════════════════════
 # Phase 27 Task 12 (B5 Ajani): 4-Layer Regime Detection

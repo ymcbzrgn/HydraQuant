@@ -715,27 +715,40 @@ class MetaController:
         park the lifecycle-specific telemetry in its own columns.
         """
         try:
-            # Lazy import to dodge the circular: autonomous_lifecycle is imported
-            # by scheduler long before neural_organism's module-level state exists.
+            # Sprint 2026-05-01: read hormone_state from DB instead of
+            # in-process organism singleton. autonomous_lifecycle runs in
+            # the SCHEDULER process; trades close in the STRATEGY process.
+            # Each process has its own organism singleton, so reading the
+            # in-process organism here was capturing scheduler-side stale
+            # values (always 1.0 / 1.0 / 1.0 — canonical calm idle state)
+            # while the strategy side had real hormonal trajectories that
+            # never reached hormone_history. DB row is the cross-process
+            # source of truth (written by both organism instances via
+            # _persist_hormones).
+            cortisol = 1.0
+            dopamine = 1.0
+            serotonin = 1.0
+            adrenaline = 1.0
+            org_health = 0.5
+            market_stress = 0.0
             try:
-                from neural_organism import get_organism
-                org = get_organism()
-                h = org.hormones
-                org_health = org.get_organism_health()  # clamped [0..1]
-                cortisol = float(h.cortisol)
-                dopamine = float(h.dopamine)
-                serotonin = float(h.serotonin)
-                adrenaline = float(h.adrenaline)
-                market_stress = float(getattr(h, "_stress", 0.0))
+                from db import get_db_connection
+                with get_db_connection() as _conn:
+                    row = _conn.execute(
+                        "SELECT cortisol, dopamine, serotonin, adrenaline, "
+                        "       market_stress, portfolio_health "
+                        "FROM hormone_state WHERE id = 1"
+                    ).fetchone()
+                if row is not None:
+                    cortisol = float(row["cortisol"] if row["cortisol"] is not None else 1.0)
+                    dopamine = float(row["dopamine"] if row["dopamine"] is not None else 1.0)
+                    serotonin = float(row["serotonin"] if row["serotonin"] is not None else 1.0)
+                    adrenaline = float(row["adrenaline"] if row["adrenaline"] is not None else 1.0)
+                    market_stress = float(row["market_stress"] if row["market_stress"] is not None else 0.0)
+                    org_health = float(row["portfolio_health"] if row["portfolio_health"] is not None else 0.5)
             except Exception:
-                # Organism not yet booted — record a neutral "I don't know"
-                # row under canonical convention (1.0 = calm).
-                cortisol = 1.0
-                dopamine = 1.0
-                serotonin = 1.0
-                adrenaline = 1.0
-                org_health = 0.5
-                market_stress = 0.0
+                # Cold start — hormone_state row not yet created.
+                pass
 
             danger_level = float(decisions.get("danger", {}).get("danger_level", 0.0))
             sizing_mult = float(decisions.get("final_sizing_mult", 1.0))

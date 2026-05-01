@@ -248,6 +248,143 @@ class PairCircuitBreaker:
             filled_count = sum(1 for a in recent if a[1])
             return filled_count / len(recent)
 
+    # ─── Sprint 2026-05-01: spread/age/volume telemetry ──────────────────
+    # Rolling window of observed bid/ask spreads per pair. Fed by
+    # HydraSizer.bot_loop_start which reads dp.orderbook(pair, 1) for
+    # every active pair. Callers (scheduler._adaptive_pairlist_tune)
+    # query the aggregate distribution to compute exchange-wide medians
+    # so SpreadFilter / VolumePairList / AgeFilter values can be derived
+    # rather than hardcoded.
+
+    def record_pair_observation(self, pair: str, spread: Optional[float] = None,
+                                quote_volume: Optional[float] = None) -> None:
+        """Append a (timestamp, spread, quote_volume) sample to the slot.
+
+        Trimmed to last hour. None values are skipped per-field so a single
+        ticker that has spread but not volume doesn't poison the window.
+        """
+        if spread is None and quote_volume is None:
+            return
+        now = time.time()
+        with self._lock:
+            slot = self._slots.get(pair)
+            if slot is None:
+                slot = _PairSlot()
+                self._slots[pair] = slot
+            # Use a separate observations list so it doesn't pollute
+            # order_attempts. We piggyback by stashing it on the slot dict.
+            obs = getattr(slot, "_observations", None)
+            if obs is None:
+                obs = []
+                setattr(slot, "_observations", obs)
+            obs.append((now, spread, quote_volume))
+            # Trim to last hour
+            cutoff = now - 3600.0
+            slot._observations = [o for o in obs if o[0] >= cutoff]
+
+    def _all_recent_observations(self) -> Dict[str, list]:
+        """Snapshot of every pair's last-hour observations. Used by aggregate
+        statistics — never mutates state."""
+        now = time.time()
+        cutoff = now - 3600.0
+        snap: Dict[str, list] = {}
+        with self._lock:
+            for pair, slot in list(self._slots.items()):
+                obs = getattr(slot, "_observations", None) or []
+                recent = [o for o in obs if o[0] >= cutoff]
+                if recent:
+                    snap[pair] = recent
+        return snap
+
+    def get_exchange_spread_distribution(self) -> Dict[str, float]:
+        """Per-pair median 1h-rolling spread. Empty dict if no samples yet.
+
+        Uses observations recorded via record_pair_observation(). The
+        median per pair is the noise-robust per-pair "true" spread; the
+        aggregate distribution is what adaptive filters consume.
+        """
+        result: Dict[str, float] = {}
+        for pair, recent in self._all_recent_observations().items():
+            spreads = [o[1] for o in recent if o[1] is not None]
+            if not spreads:
+                continue
+            spreads.sort()
+            mid = len(spreads) // 2
+            if len(spreads) % 2 == 0:
+                med = 0.5 * (spreads[mid - 1] + spreads[mid])
+            else:
+                med = spreads[mid]
+            result[pair] = float(med)
+        return result
+
+    def adaptive_spread_cap(self, fallback: float = 0.05) -> float:
+        """Adaptive max-spread-ratio for SpreadFilter consumers.
+
+        Computed as exchange-wide median × hormonal panic factor. Calm:
+        median × 1.5 (admit pairs up to 1.5× median spread). Panic:
+        median × 1.05 (only the cleanest books).
+
+        `fallback` is returned only when there are NO spread observations
+        yet (cold start within first hour). The fallback should itself
+        come from a config or envelope — we keep a permissive 5% so the
+        bot can build observation history without locking everyone out.
+        """
+        dist = self.get_exchange_spread_distribution()
+        if not dist:
+            return float(fallback)
+        spreads = sorted(dist.values())
+        mid = len(spreads) // 2
+        if len(spreads) % 2 == 0:
+            median_spread = 0.5 * (spreads[mid - 1] + spreads[mid])
+        else:
+            median_spread = spreads[mid]
+        # Hormonal modulation: cortisol 1.0 (calm) → factor 1.5,
+        # cortisol 0.5 (panic) → factor 1.05.
+        try:
+            from neural_organism import get_organism
+            cort = float(get_organism().hormones.cortisol)
+        except Exception:
+            cort = 1.0
+        factor = 1.05 + 0.45 * max(0.0, min(1.0, (cort - 0.5) / 0.5))
+        cap = median_spread * factor
+        # Hard floor 0.005 (0.5%) — never admit a pair with sub-half-percent
+        # noise floor; hard ceiling 0.20 (20%) — anything wider is broken book.
+        return max(0.005, min(0.20, cap))
+
+    def adaptive_age_floor(self, fallback: int = 7) -> int:
+        """Adaptive AgeFilter min_days_listed, hormone-driven.
+
+        Calm cortisol (1.0) → floor 7 days (permissive — accept newer pairs).
+        Panic (0.5) → floor 30 days (demand more history under stress).
+        """
+        try:
+            from neural_organism import get_organism
+            cort = float(get_organism().hormones.cortisol)
+        except Exception:
+            cort = 1.0
+        # cort 1.0 → 7, cort 0.5 → 30
+        days = int(round(7 + (1.0 - cort) * 46))
+        return max(1, min(60, days))
+
+    def adaptive_volume_floor(self, exchange_quote_volumes: Optional[list] = None,
+                              fallback: float = 0.0) -> float:
+        """Adaptive VolumePairList min_value (5th-percentile of exchange volumes).
+
+        If no list is provided, derive from observations. Returns 0.0 when
+        there's no data — the safest permissive floor for cold start.
+        """
+        vols = list(exchange_quote_volumes) if exchange_quote_volumes else []
+        if not vols:
+            for recent in self._all_recent_observations().values():
+                vols.extend([o[2] for o in recent if o[2] is not None])
+        if not vols:
+            return float(fallback)
+        vols = sorted(v for v in vols if v and v > 0)
+        if not vols:
+            return float(fallback)
+        idx = max(0, int(len(vols) * 0.05) - 1)
+        return float(vols[idx])
+
     def revive_probe(self, pair: str, orderbook: Optional[Dict]) -> bool:
         """Run a manual probe from outside (scheduler revival job). Returns
         True if the pair woke up as a result of this probe."""

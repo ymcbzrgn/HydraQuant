@@ -91,7 +91,14 @@ class HydraSizer(IStrategy):
         super().__init__(config)
         self.db_path = os.path.join(self.config['user_data_dir'], "db", "ai_data.sqlite")
         self.rag_script_path = os.path.join(self.config['user_data_dir'], "scripts", "rag_graph.py")
-        self.ai_signal_cache = {} # Memory cache: { "BTC/USDT": {"signal": "BULLISH", "confidence": 0.8, "timestamp": datetime} }
+        # Sprint 2026-05-01: bounded LRU. Apr 27 freqtrade.service OOM-killed at
+        # 2GB cgroup with anon-rss 1.3GB — the unbounded dict accumulated stale
+        # entries for every pair the scanner ever saw (40+ active × 20-pair
+        # rotations × hours of history). LRU bound is derived from the live
+        # whitelist size in _ai_cache_maxlen so it scales with the bot's
+        # actual concurrent trade universe — never a static number.
+        from collections import OrderedDict
+        self.ai_signal_cache: "OrderedDict[str, dict]" = OrderedDict()
         self.cache_ttl_hours = 6 # Non-NEUTRAL signals valid for 6 hours (Phase 22: increased from 4h)
         self._neutral_ttl_hours = 8.0  # NEUTRAL signals retried after 8h (reduced LLM calls for free tier)
 
@@ -484,12 +491,25 @@ class HydraSizer(IStrategy):
                     sig["signal"] = parsed.get("signal", "NEUTRAL")
                     sig["confidence"] = parsed.get("confidence", 0.0)
                     sig["reasoning"] = parsed.get("reasoning", "")
+                    # Sprint 2026-05-01: same pass-through as _get_ai_signal —
+                    # populates sub_scores/regime/source so the bot_loop
+                    # fast-path sees the same enrichment as the cache-miss
+                    # path. Without this, the parallel pre-fetch would
+                    # poison the cache with stripped fields.
+                    if isinstance(parsed.get("sub_scores"), dict):
+                        sig["sub_scores"] = parsed["sub_scores"]
+                    if parsed.get("regime"):
+                        sig["regime"] = parsed["regime"]
+                    if parsed.get("source"):
+                        sig["source"] = parsed["source"]
+                    if parsed.get("trust_score") is not None:
+                        sig["trust_score"] = parsed["trust_score"]
             except Exception as e:
                 logger.warning(f"[bot_loop_start] Fetch failed for {p}: {e}")
             # Only cache if we got a real signal (POST with tech_data).
             # NEUTRAL from missing tech_data should NOT pollute cache.
             if sig.get("confidence", 0) > 0 or sig.get("signal") != "NEUTRAL":
-                self.ai_signal_cache[p] = sig
+                self._cache_set(p, sig)
             return p, sig
 
         results = {}
@@ -550,6 +570,84 @@ class HydraSizer(IStrategy):
             logger.info(f"[bot_loop_start] Cycle complete. All {len(self._batch_queue)} pairs processed.")
             self._batch_queue = []
             self._batch_index = 0
+
+        # Sprint 2026-05-01: telemetry + cross-process state publishing.
+        # Three jobs in one place — they all share the same per-cycle
+        # data so doing them together avoids re-reading whitelist/cache.
+        try:
+            wl = list(self.dp.current_whitelist() or [])
+        except Exception:
+            wl = []
+        try:
+            from db import execute_with_retry
+            execute_with_retry(
+                "INSERT INTO system_metrics (timestamp, metric_name, metric_value, metadata_json) "
+                "VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?, ?, NULL)",
+                ("whitelist_size", float(len(wl))),
+                max_retries=2,
+            )
+        except Exception:
+            pass
+        # Most-frequent regime across active cache → pheromone deposit so
+        # cross-process readers (RiskEnvelope.protection_lookback_candles,
+        # scheduler jobs) can see the strategy-side regime view without a
+        # DB hit.
+        if self.ai_signal_cache:
+            try:
+                from collections import Counter
+                regimes = [s.get("regime") for s in self.ai_signal_cache.values()
+                           if isinstance(s, dict) and s.get("regime")]
+                if regimes:
+                    most_common = Counter(regimes).most_common(1)[0][0]
+                    try:
+                        from pheromone_field import get_pheromone_field
+                        get_pheromone_field().deposit(
+                            "regime_state", "current_regime",
+                            {"regime": most_common, "n_pairs": len(regimes)},
+                            half_life=600.0,
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        # Per-pair spread/volume sample feeds adaptive_spread_cap +
+        # adaptive_volume_floor. We only sample a slice each cycle to
+        # avoid hammering the exchange — the scanner already touches
+        # tickers, so this is a low-cost piggyback on its work.
+        if wl:
+            try:
+                from pair_circuit import get_pair_circuit
+                circuit = get_pair_circuit()
+                # Sample first 12 — round-robin across cycles via batch_index
+                cycle_offset = (self._batch_index // max(1, self._batch_size)) % max(1, len(wl) - 11)
+                sample = wl[cycle_offset:cycle_offset + 12]
+                for p in sample:
+                    try:
+                        ob = self.dp.orderbook(p, 1)
+                    except Exception:
+                        ob = None
+                    spread = None
+                    if ob and ob.get("bids") and ob.get("asks"):
+                        try:
+                            bid = float(ob["bids"][0][0])
+                            ask = float(ob["asks"][0][0])
+                            if bid > 0 and ask > 0:
+                                spread = max(0.0, 1.0 - bid / ask)
+                        except Exception:
+                            spread = None
+                    quote_volume = None
+                    try:
+                        ticker = self.dp.ticker(p)
+                        if ticker and ticker.get("quoteVolume"):
+                            quote_volume = float(ticker["quoteVolume"])
+                    except Exception:
+                        quote_volume = None
+                    if spread is not None or quote_volume is not None:
+                        circuit.record_pair_observation(
+                            p, spread=spread, quote_volume=quote_volume
+                        )
+            except Exception as e:
+                logger.debug(f"[bot_loop_start] pair observation sample failed: {e}")
 
     def get_entry_signal(self, pair, timeframe, dataframe):
         """
@@ -875,6 +973,54 @@ class HydraSizer(IStrategy):
             logger.debug(f"[Phase17] Daily summary computation failed: {e}")
         return summaries
 
+    @property
+    def _ai_cache_maxlen(self) -> int:
+        """Bound on `ai_signal_cache` — derived dynamically.
+
+        Uses (whitelist size + envelope's max_open_positions) × hormonal
+        ease factor so a relaxed organism keeps a wider history while a
+        tense one trims aggressively. Never returns a hardcoded number;
+        always recomputed from current state. Final clamp [16, 256] is a
+        safety bound, not a tuning knob.
+        """
+        try:
+            wl = self.dp.current_whitelist() if getattr(self, "dp", None) else []
+            wl_size = max(8, len(wl))
+        except Exception:
+            wl_size = 16
+        try:
+            from risk_envelope import get_risk_envelope
+            max_open = int(get_risk_envelope().get_max_open_positions())
+        except Exception:
+            max_open = 8
+        try:
+            from neural_organism import get_organism
+            sero = float(get_organism().hormones.serotonin)  # 0=anxious, 1=ease
+        except Exception:
+            sero = 1.0
+        # Calm/eased → wider cache; anxious → tighter
+        ease_mult = max(0.7, min(1.6, 0.8 + 0.8 * sero))
+        size = int((wl_size + max_open * 2) * ease_mult)
+        return max(16, min(256, size))
+
+    def _cache_set(self, pair: str, signal: dict) -> None:
+        """LRU-bounded write to `ai_signal_cache`. Evicts oldest entries
+        when over the dynamic maxlen so an unbounded scanner can't drift
+        the freqtrade heap toward OOM (Apr 27 03:08 root cause).
+        """
+        try:
+            self.ai_signal_cache[pair] = signal
+            self.ai_signal_cache.move_to_end(pair)
+        except Exception:
+            self.ai_signal_cache[pair] = signal
+            return
+        try:
+            limit = self._ai_cache_maxlen
+            while len(self.ai_signal_cache) > limit:
+                self.ai_signal_cache.popitem(last=False)
+        except Exception:
+            pass
+
     def _get_ai_signal(self, pair: str, current_time: datetime, dataframe: pd.DataFrame = None) -> dict:
         """
         The Bridge (Phase 5.1): Asks the RAG Signal Service for a decision.
@@ -926,6 +1072,21 @@ class HydraSizer(IStrategy):
                 signal_data["signal"] = parsed.get("signal", "NEUTRAL")
                 signal_data["confidence"] = parsed.get("confidence", 0.0)
                 signal_data["reasoning"] = parsed.get("reasoning", "")
+                # Sprint 2026-05-01: pass-through ALL fields so downstream
+                # consumers (forgone_pnl_engine sub-scores, calibrator,
+                # regime-aware threshold, source attribution) get real
+                # values instead of the constant 0.5 placeholder fallback.
+                # Previous shape dropped sub_scores / regime / source on
+                # the floor at the HTTP boundary even though _synthesize()
+                # populated them upstream.
+                if isinstance(parsed.get("sub_scores"), dict):
+                    signal_data["sub_scores"] = parsed["sub_scores"]
+                if parsed.get("regime"):
+                    signal_data["regime"] = parsed["regime"]
+                if parsed.get("source"):
+                    signal_data["source"] = parsed["source"]
+                if parsed.get("trust_score") is not None:
+                    signal_data["trust_score"] = parsed["trust_score"]
                 logger.info(f"RAG Signal: {signal_data['signal']} ({signal_data['confidence']}) for {pair}")
             else:
                 logger.warning(f"RAG service returned {response.status_code} for {pair}")
@@ -945,7 +1106,8 @@ class HydraSizer(IStrategy):
 
         # 3. Save to Cache (ALL signals including NEUTRAL — TTL handles expiry)
         # NEUTRAL uses shorter TTL (0.9h) so it's retried on next candle
-        self.ai_signal_cache[pair] = signal_data
+        # LRU-bounded write — see _cache_set above (Sprint 2026-05-01).
+        self._cache_set(pair, signal_data)
         return signal_data
 
     def _get_ai_signal_subprocess(self, pair: str, signal_data: dict):
@@ -1298,17 +1460,66 @@ class HydraSizer(IStrategy):
 
             ai_decision = self._get_ai_signal(pair, last_time, dataframe=df)
 
-            # Phase 26: Enrich AI decision with Triple Perception
+            # Sprint 2026-05-01: Triple-Perception promotion. The legacy
+            # logic only boosted/penalized when AI was already directional
+            # — when EVIDENCE_ENGINE returned NEUTRAL conf=0.11 (the
+            # 28-Apr-to-1-May NO-TRADE pathology) the boost path was a
+            # no-op and TP's strong directional reading was wasted. Now
+            # we PROMOTE TP to primary signal when (a) AI is NEUTRAL or
+            # weak and (b) regime is directional and (c) TP's confidence
+            # clears the envelope-driven promotion threshold. Boost /
+            # disagreement penalties retain their previous behaviour
+            # when the promotion gate doesn't fire.
             if _tp_result and _tp_result.get("confidence", 0) > 0.1:
-                # If perception and RAG agree → boost confidence
-                # If they disagree → reduce confidence (disagreement penalty)
                 tp_signal = _tp_result.get("signal", "NEUTRAL")
+                tp_conf = float(_tp_result.get("confidence", 0.0) or 0.0)
                 ai_signal = ai_decision.get("signal", "NEUTRAL")
-                if tp_signal == ai_signal and tp_signal != "NEUTRAL":
-                    ai_decision["confidence"] = min(ai_decision.get("confidence", 0) * 1.15, 0.95)
+                ai_conf = float(ai_decision.get("confidence", 0.0) or 0.0)
+                regime_now = ai_decision.get("regime") or "transitional"
+
+                # Pull dynamic gates from RiskEnvelope (no hardcode).
+                try:
+                    from risk_envelope import get_risk_envelope
+                    env = get_risk_envelope()
+                    env_floor = float(env.conviction_floor())
+                    tp_min_conf = float(env.tp_promotion_threshold())
+                    tp_haircut = float(env.tp_promotion_haircut())
+                except Exception:
+                    env_floor = 0.45
+                    tp_min_conf = 0.50
+                    tp_haircut = 0.85
+
+                try:
+                    from regime_classifier import RegimeClassifier
+                    regime_directional = RegimeClassifier.is_directional(regime_now)
+                except Exception:
+                    regime_directional = regime_now in ("trending_bull", "trending_bear")
+
+                ai_too_weak = (ai_signal == "NEUTRAL") or (ai_conf < env_floor)
+
+                if (ai_too_weak and regime_directional
+                        and tp_signal != "NEUTRAL" and tp_conf >= tp_min_conf):
+                    # PROMOTE — TP becomes the primary signal, with a
+                    # haircut to remain humble about the override.
+                    promoted_conf = min(0.95, tp_conf * tp_haircut)
+                    logger.info(
+                        f"[Phase26:TP-Promoted] {pair} AI={ai_signal}/{ai_conf:.2f} "
+                        f"→ TP={tp_signal}/{tp_conf:.2f} (promoted to {promoted_conf:.2f}, "
+                        f"regime={regime_now}, env_floor={env_floor:.2f})"
+                    )
+                    ai_decision["signal"] = tp_signal
+                    ai_decision["confidence"] = promoted_conf
+                    ai_decision["sizing_multiplier"] = _tp_result.get("sizing_multiplier", 1.0)
+                    ai_decision["source"] = "TRIPLE_PERCEPTION_PROMOTED"
+                    ai_decision["reasoning"] = (
+                        f"[TP-Promoted: AI was {ai_signal}/{ai_conf:.2f} weak in {regime_now}] "
+                        + str(_tp_result.get("reasoning", ""))
+                    )
+                elif tp_signal == ai_signal and tp_signal != "NEUTRAL":
+                    ai_decision["confidence"] = min(ai_conf * 1.15, 0.95)
                     ai_decision["sizing_multiplier"] = _tp_result.get("sizing_multiplier", 1.0)
                 elif tp_signal != "NEUTRAL" and ai_signal != "NEUTRAL" and tp_signal != ai_signal:
-                    ai_decision["confidence"] *= 0.75  # disagreement penalty
+                    ai_decision["confidence"] = ai_conf * 0.75
                 ai_decision["perception"] = _tp_result
 
             signal_type = ai_decision.get('signal', 'NEUTRAL')
@@ -1317,19 +1528,39 @@ class HydraSizer(IStrategy):
             is_bearish = signal_type == 'BEARISH'
 
             # ═══ GRADUATED EXECUTION: Log ALL signals, trade only high-confidence ═══
-            # Philosophy: LOG EVERYTHING → TRADE SELECTIVELY
-            # Every signal (even conf=0.05) is shadow-logged for calibrator learning.
-            # Only conf>=0.55 directional signals become real trades (fee break-even ~0.55).
-            # The calibrator needs BOTH positive and negative examples to learn properly.
-            # Logging <0.30 = "look how bad this was" is just as valuable as "look how good".
-            # Shadow data proves: conf 0.30+ = +7.88% avg PnL, %83 win rate
-            # Lowered from 0.55 to 0.40 — sweet spot between fee break-even and missed alpha
-            REAL_TRADE_THRESHOLD = float(self.confidence_threshold.value)
+            # Sprint 2026-05-01: REAL_TRADE_THRESHOLD is now FULLY dynamic.
+            # Components blended via geometric mean so all three voices
+            # contribute, none dominates:
+            #   1. RiskEnvelope.conviction_floor()  — autonomy/decay-driven
+            #   2. _pair_confidence_threshold      — per-pair forgone alpha
+            #   3. self.confidence_threshold       — hyperopt safety ceiling
+            # geo-mean keeps the bar between the three, so an envelope at L0
+            # (0.45) AND an aggressively-tuned pair_thr (0.40) yield
+            # ~0.42 — neither extreme dictates alone.
+            try:
+                from risk_envelope import get_risk_envelope
+                env_floor = float(get_risk_envelope().conviction_floor())
+            except Exception:
+                env_floor = float(self.confidence_threshold.value)
+            try:
+                regime_for_thr = ai_decision.get("regime") or "_global"
+                pair_thr = float(self._pair_confidence_threshold(pair, regime_for_thr))
+            except Exception:
+                pair_thr = float(self.confidence_threshold.value)
+            hyper_thr = float(self.confidence_threshold.value)
+            # Geometric mean of (env_floor, pair_thr, hyper_thr) with a
+            # safety floor to make sure no path goes below env_floor.
+            try:
+                geo = (env_floor * pair_thr * hyper_thr) ** (1.0 / 3.0)
+            except Exception:
+                geo = hyper_thr
+            REAL_TRADE_THRESHOLD = max(env_floor, geo)
+            shadow_floor = max(0.20, env_floor * 0.5)
 
             # Determine execution mode for logging
             if confidence >= REAL_TRADE_THRESHOLD and signal_type != 'NEUTRAL':
                 exec_mode = "REAL"
-            elif confidence >= _np("strategy.stoploss_floor", 0.30):
+            elif confidence >= shadow_floor:
                 exec_mode = "SHADOW"      # Decent signal, paper trade it
             else:
                 exec_mode = "SHADOW_WEAK"  # Garbage signal, still log for learning
@@ -1653,7 +1884,13 @@ class HydraSizer(IStrategy):
         return mult, breakdown
 
     def _pair_confidence_threshold(self, pair: str, regime: str) -> float:
-        """Phase 27 Fix 6: per-pair adaptive threshold lookup (fallback 0.50)."""
+        """Phase 27 Fix 6: per-pair adaptive threshold lookup.
+
+        Sprint 2026-05-01: fallback now sourced from RiskEnvelope's
+        conviction_floor (autonomy + decay-driven) so even pairs with no
+        threshold history follow the dynamic envelope rather than a
+        hardcoded constant.
+        """
         try:
             from db import get_db_connection
             conn = get_db_connection()
@@ -1666,7 +1903,11 @@ class HydraSizer(IStrategy):
                 return float(row["confidence_threshold"])
         except Exception:
             pass
-        return 0.50
+        try:
+            from risk_envelope import get_risk_envelope
+            return float(get_risk_envelope().conviction_floor())
+        except Exception:
+            return 0.50  # last-resort safety only on import failure
 
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
@@ -2245,6 +2486,14 @@ class HydraSizer(IStrategy):
             )
             
             # ═══ SPRINT 2: Constitution Check ═══
+            # Sprint 2026-05-01: the prior outer try/except silently swallowed
+            # ImportError + check_trade exceptions, leaving the Apr 17 $5,481
+            # HYPE stake unaudited. The fix is two-fold:
+            #   1. Make constitution failures EXPLICIT and route to a
+            #      defensive min_stake (NOT the proposed full stake which
+            #      Freqtrade's strategy_safe_wrapper would otherwise return
+            #      as default_retval on any unhandled exception).
+            #   2. Log every failure so the audit trail captures it.
             try:
                 from constitution import get_constitution
                 enforcer = get_constitution()
@@ -2263,8 +2512,17 @@ class HydraSizer(IStrategy):
                 if not const_check["allowed"]:
                     logger.warning(f"[Sprint2:Constitution] {pair} BLOCKED: {const_check['violations']}")
                     return min_stake
-            except Exception as e:
-                logger.debug(f"[Sprint2:Constitution] Check skipped: {e}")
+            except Exception as _const_e:
+                # Defensive close — when the constitution can't be evaluated
+                # (import failure, missing config, malformed enforcer), trade
+                # at the exchange's minimum to keep the audit trail loud and
+                # clear without falling back to the full proposed stake.
+                logger.error(
+                    f"[Sprint2:Constitution] {pair} EVALUATION_FAILED "
+                    f"({type(_const_e).__name__}: {_const_e}) — "
+                    f"defensive close at min_stake"
+                )
+                return min_stake
 
             # ═══ SPRINT 2: Order Flow Sizing ═══
             try:
@@ -2473,6 +2731,38 @@ class HydraSizer(IStrategy):
         # pair, so a second custom_stake_amount before the fill
         # overwrites the first — matching Freqtrade's own "last call
         # wins" stake semantics.
+
+        # Sprint 2026-05-01: ENVELOPE HARD CAP — last line of defense.
+        # No prior gate is mathematically tied to portfolio_value the way
+        # this one is. Even if Constitution / RiskBudget / EqualRisk all
+        # fail open (or are skipped via custom_data tags), this cap keeps
+        # any single trade ≤ envelope.max_single_stake which scales from
+        # ~$264 (5% of $5,287 at L0) to $1,057 (20% at L5). The Apr 17
+        # disaster's $5,481 HYPE stake would have been clamped to L0's
+        # $264 here regardless of which upstream gate failed.
+        try:
+            from risk_envelope import get_risk_envelope
+            env = get_risk_envelope()
+            portfolio_val_envcap = float(
+                getattr(self.risk_budget, "portfolio_value", 0.0) or 0.0
+            )
+            if portfolio_val_envcap <= 0:
+                portfolio_val_envcap = float(
+                    self.wallets.get_total_stake_amount()
+                ) if self.wallets else 0.0
+            if portfolio_val_envcap > 0:
+                envelope_cap = float(env.max_single_stake(portfolio_val_envcap))
+                if realised_stake > envelope_cap:
+                    logger.warning(
+                        f"[EnvelopeCap] {pair} stake ${realised_stake:.2f} > "
+                        f"envelope cap ${envelope_cap:.2f} "
+                        f"({envelope_cap/portfolio_val_envcap*100:.1f}% of portfolio). "
+                        f"Clamping — review sizing chain."
+                    )
+                    realised_stake = envelope_cap
+        except Exception as _envcap_e:
+            logger.debug(f"[EnvelopeCap] {pair} cap check skipped: {_envcap_e}")
+
         try:
             if not hasattr(self, "_pending_risk_consume"):
                 self._pending_risk_consume: dict[str, tuple] = {}
@@ -3046,31 +3336,75 @@ class HydraSizer(IStrategy):
 
     @property
     def protections(self):
-        """Built-in protections — TESTNET MODE: Very loose, log everything.
-        Trade-First: NEVER block trades aggressively. Just brief cooldowns.
-        All trade data logged to DB for analysis when switching to real money."""
+        """Built-in protections — Sprint 2026-05-01: FULLY DYNAMIC.
+
+        Apr 23 → Apr 27 production observed 17 MaxDrawdown trips with
+        values 0.92 / 1.57 / 1.69 / 2.26 / 2.51 vs threshold 0.50.
+        Root cause (audit 2026-05-01): legacy `ratios` mode summed
+        leverage-weighted close_profit values — Apr 26 BTC liquidation
+        alone (-1.0015 ratio) exceeded 50% threshold. The fix is two-fold:
+
+          1. `calculation_mode: "equity"` — true % of equity drawdown
+             using close_profit_abs in dollars instead of ratio cumsum.
+          2. EVERY parameter sourced from RiskEnvelope (autonomy + decay
+             + hormonal + regime). No hardcoded thresholds.
+
+        At cold start (envelope unreachable) the fallbacks are still
+        permissive enough to NOT lock the bot — better to trade through
+        a transient envelope outage than to block on a missing import.
+        """
+        try:
+            from risk_envelope import get_risk_envelope
+            env = get_risk_envelope()
+            max_dd = float(env.protection_max_drawdown())
+            lookback = int(env.protection_lookback_candles())
+            trade_lim = int(env.protection_trade_limit())
+            stop_dur = int(env.protection_stop_duration())
+        except Exception:
+            # Safe permissive defaults on cold-start / import failure —
+            # never block trading on an envelope outage. Numbers
+            # intentionally generous so the missing-envelope branch
+            # doesn't itself create a lock-out scenario.
+            max_dd = 0.20
+            lookback = 96
+            trade_lim = 12
+            stop_dur = 4
+
+        # StoplossGuard scales with envelope's current concurrent-trade
+        # appetite — more open positions allowed → more stoplosses
+        # tolerable per-pair before locking that pair.
+        try:
+            sl_lookback = max(12, min(96, lookback // 2))
+            sl_trade_lim = max(3, min(12, trade_lim // 2))
+            sl_stop_dur = max(1, min(24, stop_dur // 2))
+        except Exception:
+            sl_lookback, sl_trade_lim, sl_stop_dur = 24, 4, 2
+
         return [
             {
                 "method": "CooldownPeriod",
-                "stop_duration_candles": 1,  # Just 1 candle cooldown (not 2)
+                "stop_duration_candles": 1,
             },
             {
-                # Only trigger after 6 consecutive stoplosses on same pair (very loose)
                 "method": "StoplossGuard",
-                "lookback_period_candles": 48,
-                "trade_limit": 6,  # 6 stoplosses before lock (was 4)
-                "stop_duration_candles": 2,  # Lock only 2 candles (was 4)
+                "lookback_period_candles": sl_lookback,
+                "trade_limit": sl_trade_lim,
+                "stop_duration_candles": sl_stop_dur,
                 "only_per_pair": True,
             },
             {
-                # Nuclear option: only if account drawdown >50%
-                # Testnet: Equal Risk sizing limits per-trade loss to 0.5% of portfolio
-                # so 50% drawdown would require ~100 consecutive losses — nearly impossible
+                # Equity-mode: true % of account drawdown, not ratio cumsum.
+                # `calculation_mode="equity"` makes Freqtrade use
+                # close_profit_abs against starting balance (a real % of
+                # equity) instead of summing leveraged close_profit ratios.
+                # See max_drawdown_protection.py:58-81 for the dual-mode
+                # implementation.
                 "method": "MaxDrawdown",
-                "lookback_period_candles": 168,  # 7 days window (was 3 days — too short)
-                "trade_limit": 20,
-                "stop_duration_candles": 2,  # Brief pause, resume quickly
-                "max_allowed_drawdown": 0.50,  # 50% (was 25% — kept locking bot)
+                "calculation_mode": "equity",
+                "lookback_period_candles": lookback,
+                "trade_limit": trade_lim,
+                "stop_duration_candles": stop_dur,
+                "max_allowed_drawdown": max_dd,
             },
         ]
 
@@ -3430,7 +3764,19 @@ class HydraSizer(IStrategy):
         """DCA + partial exit + staged profit lock (OMEGA-inspired Phase 23)."""
         if self.dp.runmode.value not in ('dry_run', 'live'):
             return None
-        if trade.nr_of_successful_entries >= 4:
+        # Sprint 2026-05-01: max DCA levels comes from RiskEnvelope (autonomy
+        # tier × decay). L0 → 1 add (initial + 1 DCA), L5 → 5. Replaces the
+        # hardcoded 4 cap that was the structural enabler of the Apr 17
+        # ADA $0.25 → $1,463 pyramid (3 DCAs uncapped).
+        try:
+            from risk_envelope import get_risk_envelope
+            max_dca = int(get_risk_envelope().max_dca_levels())
+        except Exception:
+            max_dca = 1  # safest cold-start default
+        # nr_of_successful_entries counts the INITIAL entry too, so:
+        #   max_dca=1 → block at >=2 entries (1 initial + 1 DCA done)
+        #   max_dca=5 → block at >=6 entries
+        if trade.nr_of_successful_entries >= (1 + max_dca):
             return None
 
         # Task 20: pair-circuit dormant gate. Without this, DCA pyramid and
@@ -3564,34 +3910,63 @@ class HydraSizer(IStrategy):
                 except Exception:
                     pass
 
-                # Gate 4: Constitution-style absolute position cap. Per ALPHA
-                # PRENSİP 0 + constitution.max_single_position_pct=3%, the
-                # combined (current_stake + proposed DCA) can NEVER exceed
-                # 3% of portfolio value. This is the hard ceiling that would
-                # have stopped today's MNT $6,826 monster.
+                # Gate 4: ENVELOPE-DRIVEN combined-position cap.
+                # Sprint 2026-05-01: replaces the constitution-only check.
+                # The envelope's max_combined_position scales with autonomy
+                # tier × hormonal × decay so a wounded L0 caps combined
+                # position at 7% (vs 30% at calm L5). Constitution is also
+                # honoured as an upper-bound: take the TIGHTER of the two.
                 try:
-                    from constitution import IDENTITY_LIMITS, CONSTITUTION
                     portfolio_value = float(getattr(self.risk_budget, "portfolio_value", 0.0) or 0.0)
-                    max_pos_pct = float(CONSTITUTION["safety_limits"]["max_single_position_pct"]) / 100.0
+                    if portfolio_value <= 0 and self.wallets:
+                        portfolio_value = float(self.wallets.get_total_stake_amount())
                     if portfolio_value > 0:
-                        max_total_stake = portfolio_value * max_pos_pct
-                        proposed_dca = max_stake * 0.3
+                        # Envelope cap (tier + hormonal + decay)
+                        try:
+                            from risk_envelope import get_risk_envelope
+                            envelope_combined_cap = float(
+                                get_risk_envelope().max_combined_position(portfolio_value)
+                            )
+                        except Exception:
+                            envelope_combined_cap = portfolio_value * 0.10
+                        # Constitution cap (institutional safety floor)
+                        try:
+                            from constitution import CONSTITUTION
+                            const_pct = float(CONSTITUTION["safety_limits"]["max_single_position_pct"]) / 100.0
+                            constitution_cap = portfolio_value * const_pct
+                        except Exception:
+                            constitution_cap = portfolio_value * 0.03
+                        # Tighter wins
+                        max_total_stake = min(envelope_combined_cap, constitution_cap)
+
+                        # Proposed DCA is now ALSO envelope-driven (no
+                        # hardcoded `max_stake * 0.30` — that 30% was
+                        # the Apr 17 disaster's mechanism).
+                        try:
+                            from risk_envelope import get_risk_envelope as _ge
+                            dca_pct = float(_ge().dca_increment_pct())
+                            proposed_dca = portfolio_value * dca_pct
+                        except Exception:
+                            proposed_dca = portfolio_value * 0.02
+
+                        # Never exceed exchange-allowed stake either
+                        proposed_dca = min(proposed_dca, float(max_stake or proposed_dca))
                         proposed_total = float(trade.stake_amount or 0) + proposed_dca
                         if proposed_total > max_total_stake:
                             self._emit_dca_gate(
-                                trade.pair, reason="portfolio_cap",
+                                trade.pair, reason="combined_cap",
                                 detail=(f"proposed total ${proposed_total:.2f} > "
-                                        f"{max_pos_pct*100:.1f}% portfolio cap "
-                                        f"(${max_total_stake:.2f})"),
+                                        f"envelope cap ${max_total_stake:.2f}"),
                                 extra={
                                     "proposed_total": round(proposed_total, 2),
-                                    "cap": round(max_total_stake, 2),
-                                    "cap_pct": max_pos_pct,
+                                    "envelope_cap": round(envelope_combined_cap, 2),
+                                    "constitution_cap": round(constitution_cap, 2),
+                                    "cap_used": round(max_total_stake, 2),
                                 },
                             )
                             return None
                 except Exception as e:
-                    logger.debug(f"[DCA-GATE] constitution cap check failed: {e}")
+                    logger.debug(f"[DCA-GATE] envelope+constitution cap check failed: {e}")
             except Exception as e:
                 self._emit_dca_gate(
                     trade.pair, reason="fail_open",
@@ -3601,11 +3976,26 @@ class HydraSizer(IStrategy):
                 return None
 
             # All four Phase 27 gates passed — DCA is risk-bounded.
-            add_stake = max_stake * 0.3
+            # Sprint 2026-05-01: add_stake from envelope (no hardcoded 0.30).
+            try:
+                from risk_envelope import get_risk_envelope as _ge2
+                portfolio_value_dca = float(getattr(self.risk_budget, "portfolio_value", 0.0) or 0.0)
+                if portfolio_value_dca <= 0 and self.wallets:
+                    portfolio_value_dca = float(self.wallets.get_total_stake_amount())
+                if portfolio_value_dca > 0:
+                    dca_pct_final = float(_ge2().dca_increment_pct())
+                    add_stake = portfolio_value_dca * dca_pct_final
+                else:
+                    add_stake = float(max_stake) * 0.10  # very conservative cold-start
+                # Never exceed exchange-permitted max for this trade
+                add_stake = min(add_stake, float(max_stake or add_stake))
+            except Exception:
+                add_stake = float(max_stake) * 0.10
             if min_stake and add_stake >= min_stake:
                 logger.info(
                     f"[DCA] {trade.pair} PYRAMID: conf {confidence:.0%} "
-                    f"(Kelly={kelly_dca:.3f}, CAAT={caat_mult_dca:.2f})"
+                    f"(Kelly={kelly_dca:.3f}, CAAT={caat_mult_dca:.2f}, "
+                    f"add=${add_stake:.2f} envelope-driven)"
                 )
                 return add_stake
 

@@ -469,6 +469,17 @@ class PipelineScheduler:
             minutes=5, id='pair_circuit_revive',
             name='Pair Circuit Revival Probe',
             max_instances=1, replace_existing=True)
+        # Sprint 2026-05-01: adaptive pairlist tuner — derives runtime
+        # filter values from circuit telemetry + organism state.
+        self.scheduler.add_job(self._adaptive_pairlist_tune, 'interval',
+            minutes=30, id='pairlist_tuner',
+            name='Adaptive Pairlist Threshold Tuner',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-01: whitelist health monitor — alarms on collapse
+        self.scheduler.add_job(self._whitelist_health_tick, 'interval',
+            minutes=5, id='whitelist_health',
+            name='Whitelist Size Health Tick',
+            max_instances=1, replace_existing=True)
         self.scheduler.add_job(self._cache_health_drain_tick, 'interval',
             minutes=10, id='cache_health_drain',
             name='Semantic Cache Health Drain',
@@ -1507,13 +1518,33 @@ class PipelineScheduler:
         trimmed = False
         if heavy:
             full_collected = gc.collect(2)
+            # Sprint 2026-05-01: production runs jemalloc via systemd
+            # drop-in (LD_PRELOAD libjemalloc), so the legacy
+            # `libc.malloc_trim(0)` resolves into glibc which owns NO
+            # allocations — a no-op masquerading as memory work. The
+            # 150,523 OOM-failcnt on the scheduler service is partly
+            # this. Try jemalloc's native purge first; only fall back
+            # to glibc on environments without jemalloc.
             try:
                 import ctypes
-                libc = ctypes.CDLL("libc.so.6")
-                # malloc_trim returns 1 if it released memory, 0 otherwise.
-                trimmed = bool(libc.malloc_trim(0))
+                je_purged = False
+                try:
+                    je = ctypes.CDLL("libjemalloc.so.2")
+                    # mallctl("arena.<MALLCTL_ARENAS_ALL>.purge") — purges
+                    # all arenas. MALLCTL_ARENAS_ALL constant is 4096 in
+                    # jemalloc 5.x. Returns 0 on success.
+                    cmd = b"arena.4096.purge"
+                    rc = je.mallctl(cmd, None, None, None, 0)
+                    je_purged = (rc == 0)
+                except (OSError, AttributeError):
+                    pass
+                if je_purged:
+                    trimmed = True
+                else:
+                    libc = ctypes.CDLL("libc.so.6")
+                    trimmed = bool(libc.malloc_trim(0))
             except Exception as e:
-                logger.debug(f"[Scheduler:Memory] malloc_trim unavailable: {e}")
+                logger.debug(f"[Scheduler:Memory] purge unavailable: {e}")
             try:
                 from pheromone_field import get_pheromone_field
                 get_pheromone_field().deposit(
@@ -1826,16 +1857,21 @@ class PipelineScheduler:
             logger.error(f"[Scheduler:Organism] Habit check failed: {e}")
 
     def _organism_sleep(self):
-        """Weekly Sunday 03:30: Sleep consolidation — replay + prune + counterfactual."""
-        try:
-            from neural_organism import get_organism
-            organism = get_organism()
-            result = organism.sleep.run_consolidation(
-                organism._neurons, organism.synapses, organism.ganglia, organism.hippocampus)
-            organism._persist_batch(list(organism._neurons.values()))
-            logger.info(f"[Scheduler:Organism] Sleep consolidation: {result}")
-        except Exception as e:
-            logger.error(f"[Scheduler:Organism] Sleep consolidation failed: {e}")
+        """Weekly Sunday 03:30: Sleep consolidation — replay + prune + counterfactual.
+
+        Sprint 2026-05-01: jemalloc-purge wrapped — full neuron list (~1758
+        items) materialised into memory during _persist_batch.
+        """
+        with self._heavy_job_gc("organism_sleep"):
+            try:
+                from neural_organism import get_organism
+                organism = get_organism()
+                result = organism.sleep.run_consolidation(
+                    organism._neurons, organism.synapses, organism.ganglia, organism.hippocampus)
+                organism._persist_batch(list(organism._neurons.values()))
+                logger.info(f"[Scheduler:Organism] Sleep consolidation: {result}")
+            except Exception as e:
+                logger.error(f"[Scheduler:Organism] Sleep consolidation failed: {e}")
 
     def _organism_dmn(self):
         """Daily 04:00: Default Mode Network — idle background processing.
@@ -2699,6 +2735,121 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[PairCircuit] revival_tick failed: {e}")
 
+    # ─── Sprint 2026-05-01: adaptive pairlist tuning ────────────────────
+    # Computes the EFFECTIVE filter values from current circuit telemetry
+    # + organism state and persists them for HydraSizer's bot_loop_start
+    # to apply at the next pairlist refresh. Config holds permissive max
+    # ceilings; the effective values come from here.
+
+    def _adaptive_pairlist_tune(self):
+        """Every 30min: derive runtime-adaptive pairlist thresholds from
+        live exchange + organism telemetry, deposit to pheromone field
+        for HydraSizer to apply on the next refresh.
+
+        Source values:
+          • Spread cap     ← pair_circuit.adaptive_spread_cap()
+                              (median 1h spread × hormonal factor)
+          • Age floor      ← pair_circuit.adaptive_age_floor()
+                              (cortisol-driven; calm=7d, panic=30d)
+          • Volume floor   ← pair_circuit.adaptive_volume_floor()
+                              (5th-percentile of observed pair volumes)
+          • Whitelist size ← envelope.max_open_positions × 5
+                              (so number_assets scales with autonomy)
+
+        Persisted as a `pairlist_adaptive_thresholds` pheromone deposit
+        (consumed by HydraSizer's bot_loop_start). Also written to
+        `system_metrics` for telemetry observability.
+        """
+        try:
+            from pair_circuit import get_pair_circuit
+            circuit = get_pair_circuit()
+            spread_cap = float(circuit.adaptive_spread_cap())
+            age_floor = int(circuit.adaptive_age_floor())
+            volume_floor = float(circuit.adaptive_volume_floor())
+            try:
+                from risk_envelope import get_risk_envelope
+                env = get_risk_envelope()
+                wl_target = int(env.get_max_open_positions()) * 5
+            except Exception:
+                wl_target = 30
+            wl_target = max(10, min(80, wl_target))
+
+            payload = {
+                "spread_cap": round(spread_cap, 4),
+                "age_floor": int(age_floor),
+                "volume_floor": round(volume_floor, 2),
+                "whitelist_target": int(wl_target),
+            }
+
+            try:
+                from pheromone_field import get_pheromone_field
+                pf = get_pheromone_field()
+                pf.deposit("pairlist_tuner", "pairlist_adaptive_thresholds",
+                           payload, half_life=1800.0)
+            except Exception as e:
+                logger.debug(f"[Pairlist:Tuner] pheromone deposit failed: {e}")
+
+            try:
+                from db import execute_with_retry
+                ts = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+                for k, v in payload.items():
+                    execute_with_retry(
+                        f"INSERT INTO system_metrics "
+                        f"(timestamp, metric_name, metric_value, metadata_json) "
+                        f"VALUES ({ts}, ?, ?, NULL)",
+                        (f"pairlist_{k}", float(v)),
+                        max_retries=2,
+                    )
+            except Exception:
+                pass
+
+            logger.info(f"[Pairlist:Tuner] adaptive thresholds: {payload}")
+        except Exception as e:
+            logger.warning(f"[Pairlist:Tuner] tune failed: {e}")
+
+    def _whitelist_health_tick(self):
+        """Every 5min: monitor whitelist size; if it has collapsed below
+        envelope.max_open_positions / 2 (the bot can't even fill its
+        target slot count), deposit a `whitelist_distress` pheromone so
+        HydraSizer / pair_circuit can temporarily relax filters.
+        """
+        try:
+            # Pull last seen whitelist count from system_metrics rows
+            # written by the strategy process via bot_loop_start.
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                row = conn.execute(
+                    "SELECT metric_value FROM system_metrics "
+                    "WHERE metric_name='whitelist_size' "
+                    "ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+            wl_size = int(row["metric_value"]) if row else 0
+
+            try:
+                from risk_envelope import get_risk_envelope
+                target = int(get_risk_envelope().get_max_open_positions())
+            except Exception:
+                target = 8
+            half_target = max(2, target // 2)
+
+            if wl_size > 0 and wl_size < half_target:
+                try:
+                    from pheromone_field import get_pheromone_field
+                    get_pheromone_field().deposit(
+                        "whitelist_health", "whitelist_distress",
+                        {"size": wl_size, "target": target,
+                         "ratio": round(wl_size / max(1, target), 3)},
+                        half_life=600.0,
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    f"[Whitelist:Health] DISTRESS — only {wl_size} pairs "
+                    f"(target {target}, half {half_target})"
+                )
+        except Exception as e:
+            logger.debug(f"[Whitelist:Health] tick failed: {e}")
+
     def _ws_health_tick(self):
         """Every 5min: scan recent strategy log for websocket disconnects
         (the 54× `_unwatch_ohlcv` / code-1006 events observed in production
@@ -3148,56 +3299,65 @@ class PipelineScheduler:
           1. Generate offline episodes from backtest replay
           2. Train IQL on accumulated replay buffer
           3. Save checkpoint for SAC online fine-tuning
+
+        Sprint 2026-05-01: wrapped in `_heavy_job_gc` so PyTorch tensor
+        allocations are reclaimed via jemalloc purge after training,
+        preventing the Sunday-night OOM cascade.
         """
-        try:
-            from iql_pretrain import run_iql_training
+        with self._heavy_job_gc("rl_iql_retrain"):
+            try:
+                from iql_pretrain import run_iql_training
 
-            metrics = run_iql_training(
-                generate_episodes=100,  # Generate 100 new episodes
-                n_epochs=50,           # 50 epochs (conservative for CPU)
-            )
+                metrics = run_iql_training(
+                    generate_episodes=100,  # Generate 100 new episodes
+                    n_epochs=50,           # 50 epochs (conservative for CPU)
+                )
 
-            if "error" not in metrics:
-                logger.info(f"[Sprint2:IQL] Training complete: "
-                           f"V_loss={metrics.get('final_v_loss', 'N/A'):.4f}, "
-                           f"Q_loss={metrics.get('final_q_loss', 'N/A'):.4f}")
-            else:
-                logger.info(f"[Sprint2:IQL] {metrics.get('error', 'skipped')}")
+                if "error" not in metrics:
+                    logger.info(f"[Sprint2:IQL] Training complete: "
+                               f"V_loss={metrics.get('final_v_loss', 'N/A'):.4f}, "
+                               f"Q_loss={metrics.get('final_q_loss', 'N/A'):.4f}")
+                else:
+                    logger.info(f"[Sprint2:IQL] {metrics.get('error', 'skipped')}")
 
-        except ImportError:
-            logger.info("[Sprint2:IQL] iql_pretrain not available")
-        except Exception as e:
-            logger.warning(f"[Sprint2:IQL] Training failed: {e}")
+            except ImportError:
+                logger.info("[Sprint2:IQL] iql_pretrain not available")
+            except Exception as e:
+                logger.warning(f"[Sprint2:IQL] Training failed: {e}")
 
     def _counterfactual_analysis(self):
         """Weekly Saturday 02:30 UTC: Run counterfactual analysis on recent trades.
 
         Uses causal graph from 6A to estimate "what if" scenarios.
         Results feed into parameter optimization insights.
+
+        Sprint 2026-05-01: jemalloc-purge wrapped (heavy pandas DataFrames
+        for trade replay).
         """
-        try:
-            from counterfactual_engine import run_counterfactual_analysis
+        with self._heavy_job_gc("counterfactual_analysis"):
+            try:
+                from counterfactual_engine import run_counterfactual_analysis
 
-            result = run_counterfactual_analysis(
-                regime=None,
-                lookback_days=60,
-                persist=True,
-            )
+                result = run_counterfactual_analysis(
+                    regime=None,
+                    lookback_days=60,
+                    persist=True,
+                )
 
-            if "error" not in result:
-                logger.info(f"[Sprint2:Counterfactual] Analysis complete: "
-                           f"{result.get('n_trades', 0)} trades, "
-                           f"{result.get('n_counterfactuals', 0)} scenarios")
+                if "error" not in result:
+                    logger.info(f"[Sprint2:Counterfactual] Analysis complete: "
+                               f"{result.get('n_trades', 0)} trades, "
+                               f"{result.get('n_counterfactuals', 0)} scenarios")
 
-                # 6C: Update organism synapse weights from causal discoveries
-                self._update_organism_from_causal()
-            else:
-                logger.info(f"[Sprint2:Counterfactual] {result.get('error', 'skipped')}")
+                    # 6C: Update organism synapse weights from causal discoveries
+                    self._update_organism_from_causal()
+                else:
+                    logger.info(f"[Sprint2:Counterfactual] {result.get('error', 'skipped')}")
 
-        except ImportError:
-            logger.info("[Sprint2:Counterfactual] counterfactual_engine not available")
-        except Exception as e:
-            logger.warning(f"[Sprint2:Counterfactual] Analysis failed: {e}")
+            except ImportError:
+                logger.info("[Sprint2:Counterfactual] counterfactual_engine not available")
+            except Exception as e:
+                logger.warning(f"[Sprint2:Counterfactual] Analysis failed: {e}")
 
     def _update_organism_from_causal(self):
         """6C: Update neural organism synapse weights from causal discoveries.
@@ -3282,7 +3442,14 @@ class PipelineScheduler:
           2. Enrich with live trade data
           3. Train CatBoost v2 (193 features, 500 iterations)
           4. Falls back to v1 (11 features) if insufficient backtest data
+
+        Sprint 2026-05-01: jemalloc-purge wrapped — full training data
+        matrix lives in memory during training, biggest single allocator.
         """
+        with self._heavy_job_gc("catboost_retrain"):
+            self._catboost_retrain_inner()
+
+    def _catboost_retrain_inner(self):
         try:
             # Try v2 pipeline first (13B: backtest + chart features)
             from backtest_label_generator import BacktestLabelGenerator
@@ -3346,7 +3513,15 @@ class PipelineScheduler:
           2. Map any unknown / null regime label to 'transitional' (matches
              regime_classifier output), and only forward labels that are in
              OOD's REGIMES list — otherwise force '_global'.
+
+        Sprint 2026-05-01: jemalloc-purge wrapped — pulls 1000 rows into a
+        pandas DataFrame and fits a Mahalanobis distance per regime, holding
+        feature matrices the entire time.
         """
+        with self._heavy_job_gc("ood_refit"):
+            self._ood_refit_inner()
+
+    def _ood_refit_inner(self):
         try:
             from ood_detector import MarketOODDetector
             import pandas as pd
@@ -3408,6 +3583,25 @@ class PipelineScheduler:
 
             engine = ForgonePnLEngine()
             conn = get_db_connection()
+            # Sprint 2026-05-01: dynamic LIMIT derived from recent
+            # signal-generation rate × resolver window. Without a bound the
+            # fetchall could materialise 15k+ rows after a busy day, holding
+            # them all in Python memory while the for-loop iterates — a key
+            # contributor to the scheduler's 3GB cgroup OOM cycle. The
+            # bound is "signals_per_hour × 6h × 1.5x headroom" so on a
+            # 100/h pace we cap at 900 rows; on quiet days it's a no-op.
+            try:
+                rate_row = conn.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM forgone_profit
+                    WHERE signal_time >= datetime('now', '-1 hour')
+                """).fetchone()
+                rate_per_hour = int(rate_row["n"] or 0) if rate_row else 0
+            except Exception:
+                rate_per_hour = 0
+            # Floor 200 (always make progress on cold start), ceiling 5000
+            # (hard upper bound so a runaway producer can't blow up RAM).
+            dyn_limit = max(200, min(5000, int(rate_per_hour * 6 * 1.5) or 200))
             unresolved = conn.execute("""
                 SELECT id, pair, signal_type, entry_price, signal_time, regime
                 FROM forgone_profit
@@ -3415,7 +3609,8 @@ class PipelineScheduler:
                   AND forgone_pnl IS NULL
                   AND signal_time < datetime('now', '-4 hours')
                 ORDER BY signal_time ASC
-            """).fetchall()
+                LIMIT ?
+            """, (dyn_limit,)).fetchall()
             conn.close()
 
             if not unresolved:
@@ -3617,29 +3812,51 @@ class PipelineScheduler:
                 GROUP BY pair, regime
             """).fetchall()
 
+            # Sprint 2026-05-01: pull dynamic floor/ceiling from RiskEnvelope
+            # so the per-pair threshold creep stays inside the autonomy
+            # tier's conviction band. Previously the bounds were hardcoded
+            # 0.30 / 0.75 and the deltas were asymmetric (+0.01 punish vs
+            # -0.02 reward) — combined with a bear regime (avg conf 0.21)
+            # this drove every pair upward into a self-locking creep.
+            try:
+                from risk_envelope import get_risk_envelope
+                env = get_risk_envelope()
+                env_floor = float(env.conviction_floor())
+                env_ceiling = float(env.conviction_ceiling())
+                env_default = max(env_floor, min(env_ceiling, env_floor * 1.05))
+            except Exception:
+                env_floor, env_ceiling, env_default = 0.30, 0.75, 0.50
+
             adjusted = 0
             now = datetime.now(tz=timezone.utc).isoformat()
             for p in pairs:
                 alpha = (p["pos"] or 0.0) + (p["neg"] or 0.0)
-                if p["n_signals"] < 5:
+                n_signals = int(p["n_signals"] or 0)
+                if n_signals < 5:
                     continue  # too little data to act on
 
-                if alpha > 2.0:
-                    delta = -0.02  # missing too many winners → lower threshold (take more trades)
-                    reason = f"missed_alpha={alpha:+.2f}"
-                elif alpha < -1.0:
-                    delta = +0.01  # catching losers → raise threshold
-                    reason = f"net_loss_alpha={alpha:+.2f}"
-                else:
+                # Symmetric magnitude-aware delta. |alpha| ≤ 1 → tiny step;
+                # |alpha| ≥ 10 → cap. Sign is preserved: positive alpha
+                # means "we're missing trades" → lower the bar; negative
+                # alpha means "we picked losers" → raise it.
+                normalized = max(-1.0, min(1.0, alpha / 10.0))
+                base_step = 0.05  # max single-tick movement
+                # Hysteresis: tiny |alpha| < 0.5 → don't jitter
+                if abs(alpha) < 0.5:
                     continue
+                # Larger samples → trust the signal more (linear up to 50 signals)
+                trust = min(1.0, n_signals / 50.0)
+                delta = -normalized * base_step * trust
+                reason = (f"sym_alpha={alpha:+.2f} n={n_signals} "
+                          f"trust={trust:.2f} delta={delta:+.3f}")
 
-                # Upsert with clamped threshold
+                # Upsert with envelope-bounded threshold
                 existing = conn.execute("""
                     SELECT confidence_threshold FROM pair_thresholds
                     WHERE pair = ? AND regime = ?
                 """, (p["pair"], p["regime"])).fetchone()
-                current = float(existing["confidence_threshold"]) if existing else 0.50
-                new_thr = max(0.30, min(0.75, current + delta))
+                current = float(existing["confidence_threshold"]) if existing else env_default
+                new_thr = max(env_floor, min(env_ceiling, current + delta))
                 conn.execute("""
                     INSERT INTO pair_thresholds
                         (pair, regime, confidence_threshold, forgone_alpha_7d,
@@ -3754,9 +3971,14 @@ class PipelineScheduler:
                     last = float(arr[-1])
                     z = (last - float(arr.mean())) / std
                     vol_sigma = abs(z)
+                    # Sprint 2026-05-01: aligned to production schema
+                    # (metric_value / metadata_json) — the legacy
+                    # (value / metadata) shape was diverged from
+                    # system_monitor.py's writer.
                     conn.execute(
-                        "INSERT INTO system_metrics (metric_name, value, metadata) "
-                        "VALUES (?, ?, ?)",
+                        "INSERT INTO system_metrics "
+                        "(timestamp, metric_name, metric_value, metadata_json) "
+                        "VALUES (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?, ?, ?)",
                         ("market_vol_zscore_1h", vol_sigma,
                          f'{{"n_samples": {len(returns)}, "source": "sleep_wake_tick"}}'),
                     )
@@ -3914,6 +4136,11 @@ class PipelineScheduler:
         `with self._heavy_job_gc(name):` (or call directly in finally) to
         force a malloc_trim + gc collect after the job's PyTorch tensors
         go out of scope.
+
+        Sprint 2026-05-01: jemalloc-aware purge — production runs with
+        LD_PRELOAD libjemalloc, so the legacy glibc-only `malloc_trim`
+        was a no-op against the actual allocator. Try jemalloc first,
+        glibc fallback for non-prod environments.
         """
         import contextlib
         @contextlib.contextmanager
@@ -3926,7 +4153,15 @@ class PipelineScheduler:
                     gc.collect()
                     try:
                         import ctypes
-                        ctypes.CDLL("libc.so.6").malloc_trim(0)
+                        purged = False
+                        try:
+                            je = ctypes.CDLL("libjemalloc.so.2")
+                            rc = je.mallctl(b"arena.4096.purge", None, None, None, 0)
+                            purged = (rc == 0)
+                        except (OSError, AttributeError):
+                            pass
+                        if not purged:
+                            ctypes.CDLL("libc.so.6").malloc_trim(0)
                     except Exception:
                         pass  # malloc_trim only on Linux
                     try:
@@ -4157,28 +4392,33 @@ class PipelineScheduler:
             logger.debug(f"[Phase28:Conformal] Recalibration failed: {e}")
 
     def _ensemble_refit(self):
-        """Weekly: Refit deep ensemble on recent trade features."""
-        try:
-            from deep_ensemble import DeepEnsemble
-            import numpy as np
-            from db import get_connection
-            ensemble = DeepEnsemble(n_models=5, input_dim=10)
-            with get_connection() as conn:
-                rows = conn.execute("""
-                    SELECT confidence, trust_score_at_decision, outcome_pnl, outcome_duration
-                    FROM ai_decisions WHERE outcome_pnl IS NOT NULL
-                    ORDER BY timestamp DESC LIMIT 200
-                """).fetchall()
-            if len(rows) >= 30:
-                X = np.array([[r["confidence"] or 0.5, r["trust_score_at_decision"] or 0.5,
-                               r["outcome_duration"] or 1.0] + [0.5] * 7 for r in rows])
-                y = np.array([[r["outcome_pnl"]] for r in rows])
-                result = ensemble.fit(X, y, epochs=50)
-                logger.info(f"[Phase28:Ensemble] Refit: loss={result.get('avg_loss', 'N/A'):.4f}")
-            else:
-                logger.info("[Phase28:Ensemble] Insufficient data for refit")
-        except Exception as e:
-            logger.warning(f"[Phase28:Ensemble] Refit failed: {e}")
+        """Weekly: Refit deep ensemble on recent trade features.
+
+        Sprint 2026-05-01: jemalloc-purge wrapped — fits 5 deep models
+        in-process, biggest neural-net allocator after CatBoost.
+        """
+        with self._heavy_job_gc("ensemble_refit"):
+            try:
+                from deep_ensemble import DeepEnsemble
+                import numpy as np
+                from db import get_connection
+                ensemble = DeepEnsemble(n_models=5, input_dim=10)
+                with get_connection() as conn:
+                    rows = conn.execute("""
+                        SELECT confidence, trust_score_at_decision, outcome_pnl, outcome_duration
+                        FROM ai_decisions WHERE outcome_pnl IS NOT NULL
+                        ORDER BY timestamp DESC LIMIT 200
+                    """).fetchall()
+                if len(rows) >= 30:
+                    X = np.array([[r["confidence"] or 0.5, r["trust_score_at_decision"] or 0.5,
+                                   r["outcome_duration"] or 1.0] + [0.5] * 7 for r in rows])
+                    y = np.array([[r["outcome_pnl"]] for r in rows])
+                    result = ensemble.fit(X, y, epochs=50)
+                    logger.info(f"[Phase28:Ensemble] Refit: loss={result.get('avg_loss', 'N/A'):.4f}")
+                else:
+                    logger.info("[Phase28:Ensemble] Insufficient data for refit")
+            except Exception as e:
+                logger.warning(f"[Phase28:Ensemble] Refit failed: {e}")
 
 
 if __name__ == "__main__":

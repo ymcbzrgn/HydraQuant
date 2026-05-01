@@ -1016,10 +1016,23 @@ class EvidenceEngine:
             weights = base_weights
             raw_score = sum(scores[k] * weights.get(k, 0) for k in scores)
 
-        # ═══ STEP 3: Direction (Phase 24: adaptive thresholds) ═══
-        if raw_score > _p("evidence.synthesis.bullish_threshold", 0.53):
+        # ═══ STEP 3: Direction (regime-driven NEUTRAL band, Sprint 2026-05-01) ═══
+        # The legacy 0.47/0.53 band was uniform across all regimes — this
+        # collapsed mid-strength trending signals (raw=0.51 in a clear
+        # downtrend) to NEUTRAL. RegimeClassifier.neutral_band() returns
+        # tighter bands for trending regimes (0.01) and wider for ranging /
+        # high_vol / illiquid where chop is noise. Result: TRUE direction
+        # makes it through, true NEUTRAL still gets filtered.
+        try:
+            from regime_classifier import RegimeClassifier
+            band = float(RegimeClassifier.neutral_band(regime))
+        except Exception:
+            band = 0.03  # legacy mid-point fallback only on import failure
+        bullish_thr = 0.50 + band
+        bearish_thr = 0.50 - band
+        if raw_score > bullish_thr:
             signal = "BULLISH"
-        elif raw_score < _p("evidence.synthesis.bearish_threshold", 0.47):
+        elif raw_score < bearish_thr:
             signal = "BEARISH"
         else:
             signal = "NEUTRAL"
@@ -1284,8 +1297,24 @@ class EvidenceEngine:
         except Exception as _t21_e:
             logger.debug(f"[EvidenceEngine:T21] failed: {_t21_e}")
 
-        # Final clamp after boosters
-        confidence = max(0.05, min(0.95, confidence))
+        # Final clamp — directional signals get an envelope-driven floor so
+        # a BULL/BEAR call doesn't propagate as conf=0.11 noise. NEUTRAL
+        # signals keep the legacy floor (0.05) — they don't trade anyway.
+        # Sprint 2026-05-01: floor sourced from RiskEnvelope, never hardcoded.
+        try:
+            from risk_envelope import get_risk_envelope
+            env = get_risk_envelope()
+            if signal != "NEUTRAL":
+                # Floor = half of the entry threshold so calibration sees
+                # graduated weak-vs-strong signal labels even when below
+                # the trade gate. Half is a tradeoff: too high → false
+                # confidence in shadow logs; too low → noise.
+                directional_floor = float(env.conviction_floor()) * 0.5
+                confidence = max(directional_floor, min(0.95, confidence))
+            else:
+                confidence = max(0.05, min(0.95, confidence))
+        except Exception:
+            confidence = max(0.05, min(0.95, confidence))
         if evidence_boost_log:
             logger.info(f"[EvidenceEngine:DeadIntelBoost] {pair}: {evidence_boost_log}")
 

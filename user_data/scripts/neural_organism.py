@@ -280,6 +280,23 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "regime.atr_high_vol":    {"organ": "regime", "default": 2.0, "min": 1.3, "max": 3.0},
     "regime.mod_ranging":     {"organ": "regime", "default": 0.80, "min": 0.60, "max": 0.95},
     "regime.mod_high_vol":    {"organ": "regime", "default": 0.75, "min": 0.50, "max": 0.90},
+    # Sprint 2026-05-01: regime-conditional NEUTRAL band half-widths used by
+    # evidence_engine._synthesize. Trending regimes need a tight band
+    # (small score deviations are directionally meaningful), ranging /
+    # high_vol need wider bands (chop is noise).
+    "regime.neutral_band.trending":     {"organ": "regime", "default": 0.01, "min": 0.005, "max": 0.04},
+    "regime.neutral_band.ranging":      {"organ": "regime", "default": 0.05, "min": 0.02,  "max": 0.10},
+    "regime.neutral_band.high_vol":     {"organ": "regime", "default": 0.07, "min": 0.03,  "max": 0.12},
+    "regime.neutral_band.transitional": {"organ": "regime", "default": 0.04, "min": 0.02,  "max": 0.08},
+    "regime.neutral_band.illiquid":     {"organ": "regime", "default": 0.10, "min": 0.05,  "max": 0.20},
+    # Sprint 2026-05-01: regime-conditional protection lookback factors,
+    # consumed by RiskEnvelope.protection_lookback_candles to scale
+    # TIER_BASES[level]['protection_lookback_base'] dynamically.
+    "regime.protection_lb.trending":     {"organ": "regime", "default": 1.0, "min": 0.7, "max": 1.2},
+    "regime.protection_lb.ranging":      {"organ": "regime", "default": 0.6, "min": 0.4, "max": 0.9},
+    "regime.protection_lb.high_vol":     {"organ": "regime", "default": 0.4, "min": 0.2, "max": 0.7},
+    "regime.protection_lb.transitional": {"organ": "regime", "default": 0.7, "min": 0.5, "max": 1.0},
+    "regime.protection_lb.illiquid":     {"organ": "regime", "default": 0.5, "min": 0.3, "max": 0.8},
 
     # ─── ORGAN: calibrator (3 params) — confidence_calibrator.py:42-170 ───
     "calibrator.min_trades":     {"organ": "calibrator", "default": 20,   "min": 10,   "max": 50},
@@ -2095,6 +2112,11 @@ class NeuralOrganism:
 
         # ═══ 16. PERSIST + EVOLUTION LOG ═══
         self._maybe_persist()
+        # Sprint 2026-05-01: snapshot strategy-side hormones into the
+        # time-series table on every closed trade. The autonomous_lifecycle
+        # writer in the scheduler process can't see these values (separate
+        # in-process organism singletons across processes).
+        self._persist_hormone_history(trigger=f"trade_exit:{pair}")
         self._write_audit(pair, pnl_pct, self.hormones.as_dict(), fear_response.get("tier", "normal"),
                           overrides, self_state["phase"])
         # NeuroEvolution: log fitness for weekly tournament
@@ -2417,6 +2439,46 @@ class NeuralOrganism:
                 conn.commit()
         except Exception as e:
             logger.debug(f"[NeuralOrganism:Hormones] Persist failed: {e}")
+
+    def _persist_hormone_history(self, trigger: str = "update_cycle") -> None:
+        """Append a snapshot row to hormone_history for time-series analysis.
+
+        Sprint 2026-05-01: previously hormone_history was only written by
+        autonomous_lifecycle._persist_tick — which runs in the SCHEDULER
+        process and reads its own stale in-process organism state. The
+        STRATEGY process (where real trades flow through update_cycle)
+        never wrote, so the history showed flat 1.0 / 1.0 / 1.0 / 1.0
+        canonical-calm rows forever despite real trade-driven hormonal
+        moves in the strategy organism.
+
+        This writer fires inside update_cycle and captures the strategy-
+        side hormones at the moment of every closed trade — the canonical
+        time series that downstream learners (causal_engine, dream
+        replay) actually need.
+        """
+        try:
+            from db import execute_with_retry
+            h = self.hormones
+            org_health = float(self.interoception.get_organism_health()) \
+                if hasattr(self, "interoception") else 0.5
+            execute_with_retry(
+                """INSERT INTO hormone_history
+                   (cortisol, dopamine, serotonin, adrenaline,
+                    market_stress, organism_health, trigger_event)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    float(h.cortisol),
+                    float(h.dopamine),
+                    float(h.serotonin),
+                    float(h.adrenaline),
+                    float(getattr(h, "_stress", 0.0)),
+                    org_health,
+                    str(trigger),
+                ),
+                max_retries=3,
+            )
+        except Exception as e:
+            logger.debug(f"[NeuralOrganism:HormoneHistory] persist failed: {e}")
 
     def _load_hormones(self):
         """Restore hormonal state (incl. Phase 27 Fix 7 hysteresis trough) on startup.

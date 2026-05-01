@@ -56,6 +56,17 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.10,
         "monthly_target_low": 0.01,
         "monthly_target_high": 0.03,
+        # Sprint 2026-05-01: protection / sizing / signal — dynamic envelope
+        "protection_dd_cap": 0.08,        # Equity-mode MaxDrawdown ceiling (8%)
+        "protection_lookback_base": 48,   # Candles base (× regime factor)
+        "conviction_floor": 0.45,         # Min directional confidence to enter
+        "conviction_ceiling": 0.85,       # Max directional confidence (clamp)
+        "tp_promo_min_conf": 0.55,        # TriplePerception override threshold
+        "tp_promo_haircut": 0.80,         # Haircut on TP-promoted confidence
+        "max_single_stake_pct": 0.05,     # Max single trade as % of portfolio
+        "max_combined_pos_pct": 0.07,     # Max combined (initial + DCA) %
+        "dca_pct": 0.02,                  # DCA increment as % of portfolio
+        "max_dca_levels": 1,              # Max number of DCA additions
     },
     1: {  # L1 — early growth
         "leverage_max": 3.0,
@@ -67,6 +78,16 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.20,
         "monthly_target_low": 0.03,
         "monthly_target_high": 0.05,
+        "protection_dd_cap": 0.11,
+        "protection_lookback_base": 72,
+        "conviction_floor": 0.42,
+        "conviction_ceiling": 0.87,
+        "tp_promo_min_conf": 0.52,
+        "tp_promo_haircut": 0.83,
+        "max_single_stake_pct": 0.08,
+        "max_combined_pos_pct": 0.12,
+        "dca_pct": 0.03,
+        "max_dca_levels": 2,
     },
     2: {  # L2 — proven on 100+ trades
         "leverage_max": 5.0,
@@ -78,6 +99,16 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.35,
         "monthly_target_low": 0.05,
         "monthly_target_high": 0.08,
+        "protection_dd_cap": 0.15,
+        "protection_lookback_base": 96,
+        "conviction_floor": 0.40,
+        "conviction_ceiling": 0.90,
+        "tp_promo_min_conf": 0.50,
+        "tp_promo_haircut": 0.85,
+        "max_single_stake_pct": 0.10,
+        "max_combined_pos_pct": 0.16,
+        "dca_pct": 0.04,
+        "max_dca_levels": 3,
     },
     3: {  # L3 — confident, 200+ trades, Sharpe>0.8
         "leverage_max": 7.0,
@@ -89,6 +120,16 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.50,
         "monthly_target_low": 0.08,
         "monthly_target_high": 0.12,
+        "protection_dd_cap": 0.18,
+        "protection_lookback_base": 120,
+        "conviction_floor": 0.37,
+        "conviction_ceiling": 0.92,
+        "tp_promo_min_conf": 0.47,
+        "tp_promo_haircut": 0.87,
+        "max_single_stake_pct": 0.13,
+        "max_combined_pos_pct": 0.20,
+        "dca_pct": 0.06,
+        "max_dca_levels": 3,
     },
     4: {  # L4 — strong, 500+ trades, Sharpe>1.0
         "leverage_max": 10.0,
@@ -100,6 +141,16 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.60,
         "monthly_target_low": 0.10,
         "monthly_target_high": 0.15,
+        "protection_dd_cap": 0.22,
+        "protection_lookback_base": 144,
+        "conviction_floor": 0.34,
+        "conviction_ceiling": 0.94,
+        "tp_promo_min_conf": 0.43,
+        "tp_promo_haircut": 0.90,
+        "max_single_stake_pct": 0.16,
+        "max_combined_pos_pct": 0.25,
+        "dca_pct": 0.08,
+        "max_dca_levels": 4,
     },
     5: {  # L5 — Renaissance+ multi-strategy ensemble
         "leverage_max": 10.0,
@@ -111,6 +162,16 @@ TIER_BASES: Dict[int, Dict[str, float]] = {
         "kelly_fraction_max": 0.75,
         "monthly_target_low": 0.12,
         "monthly_target_high": 0.18,
+        "protection_dd_cap": 0.25,
+        "protection_lookback_base": 168,
+        "conviction_floor": 0.30,
+        "conviction_ceiling": 0.95,
+        "tp_promo_min_conf": 0.40,
+        "tp_promo_haircut": 0.92,
+        "max_single_stake_pct": 0.20,
+        "max_combined_pos_pct": 0.30,
+        "dca_pct": 0.10,
+        "max_dca_levels": 5,
     },
 }
 
@@ -680,6 +741,191 @@ class RiskEnvelope:
 
     def get_kelly_fraction_max(self) -> float:
         return self.compute().kelly_fraction_max
+
+    # ─── Sprint 2026-05-01: dynamic protection / sizing / signal ─────────
+    # All these accessors derive their values from TIER_BASES[level] then
+    # modulate them by hormonal state, decay multiplier, and (where
+    # appropriate) market regime — never returning a hardcoded number.
+
+    def _tier_base(self, key: str, default: float = 0.0) -> float:
+        """Read TIER_BASES[level][key] — current autonomy tier."""
+        try:
+            am = self._get_autonomy()
+            level = int(am.get_level()) if am is not None else 0
+        except Exception:
+            level = 0
+        level = max(0, min(5, level))
+        return float(TIER_BASES[level].get(key, default))
+
+    def protection_max_drawdown(self) -> float:
+        """Equity-mode MaxDrawdown ceiling.
+
+        Tier base × cortisol panic factor: when cortisol drops (panic) the
+        cap tightens, when calm it widens. Range tightens by up to 40%
+        under full panic, never wider than tier base.
+        """
+        base = self._tier_base("protection_dd_cap", 0.10)
+        try:
+            from neural_organism import get_organism
+            cort = float(get_organism().hormones.cortisol)  # 0.5=panic, 1.0=calm
+        except Exception:
+            cort = 1.0
+        # Map cortisol [0.5, 1.0] → factor [0.6, 1.0]: panic shrinks cap
+        cort_factor = max(0.6, min(1.0, 0.2 + 0.8 * cort))
+        return max(0.05, min(0.30, base * cort_factor))
+
+    def protection_lookback_candles(self) -> int:
+        """MaxDrawdown lookback in candles, regime-modulated.
+
+        Trending → full base (we want to remember disasters).
+        Ranging → 60% (chop is noise; shorter memory).
+        High-vol → 40% (focus on recent action).
+        """
+        base = int(self._tier_base("protection_lookback_base", 96))
+        try:
+            from regime_classifier import RegimeClassifier
+            regime = self._current_regime()
+            factor = RegimeClassifier.protection_lookback_factor(regime)
+        except Exception:
+            factor = 1.0
+        return max(12, min(240, int(base * factor)))
+
+    def protection_trade_limit(self) -> int:
+        """Min closed trades before MaxDrawdown gate evaluates.
+
+        Derived from current max_open_positions × 1.5 so the gate adapts
+        to the bot's natural concurrent trade count.
+        """
+        max_open = int(self._tier_base("max_open_positions", 4))
+        return max(4, min(40, int(max_open * 1.5)))
+
+    def protection_stop_duration(self) -> int:
+        """Stop duration after a MaxDrawdown trip, in candles.
+
+        Cortisol-driven: panic → longer pause (24c), calm → brief (2c).
+        """
+        try:
+            from neural_organism import get_organism
+            cort = float(get_organism().hormones.cortisol)
+        except Exception:
+            cort = 1.0
+        # cort 0.5 (panic) → 24, cort 1.0 (calm) → 2
+        duration = int(round(2 + (1.0 - cort) * 44))
+        return max(2, min(48, duration))
+
+    def conviction_floor(self) -> float:
+        """Minimum directional confidence to enter a REAL trade.
+
+        Tier base × decay multiplier (when decayed, demand higher
+        conviction so the bot doesn't enter weak setups while wounded).
+        """
+        base = self._tier_base("conviction_floor", 0.45)
+        decay = float(self._decay_multiplier)  # ≤ 1.0 when decayed
+        # decayed → floor RAISES (1/decay), capped at conviction_ceiling
+        adjusted = base / max(0.5, decay)
+        ceiling = self._tier_base("conviction_ceiling", 0.90)
+        return max(0.20, min(ceiling - 0.05, adjusted))
+
+    def conviction_ceiling(self) -> float:
+        """Maximum directional confidence (clamp ceiling)."""
+        return max(0.50, min(0.97, self._tier_base("conviction_ceiling", 0.90)))
+
+    def tp_promotion_threshold(self) -> float:
+        """Triple-Perception confidence required to OVERRIDE NEUTRAL ai_signal.
+
+        Tier base × cortisol: under panic, demand higher TP confidence.
+        """
+        base = self._tier_base("tp_promo_min_conf", 0.50)
+        try:
+            from neural_organism import get_organism
+            cort = float(get_organism().hormones.cortisol)
+        except Exception:
+            cort = 1.0
+        # Lower cortisol → higher threshold demanded
+        cort_bump = (1.0 - cort) * 0.10
+        return max(0.30, min(0.85, base + cort_bump))
+
+    def tp_promotion_haircut(self) -> float:
+        """Haircut applied to TP confidence after promotion.
+
+        Tier base × decay: when decayed, additional shrinkage.
+        """
+        base = self._tier_base("tp_promo_haircut", 0.85)
+        decay = float(self._decay_multiplier)
+        return max(0.50, min(0.95, base * (0.7 + 0.3 * decay)))
+
+    def max_single_stake(self, portfolio_value: float) -> float:
+        """Hard ceiling for a single trade's stake amount.
+
+        portfolio × tier_pct × hormonal_factor × decay_multiplier.
+        Apr 17 disaster: HYPE staked $5,481 on a $5,287 portfolio — this
+        cap would have clamped it at L0 to $264 (5%) or L5 to $1,057 (20%).
+        """
+        if portfolio_value <= 0:
+            return 0.0
+        base_pct = self._tier_base("max_single_stake_pct", 0.05)
+        hormonal = self._hormonal_factor()  # [0.30, 1.15]
+        decay = float(self._decay_multiplier)
+        effective = base_pct * hormonal * decay
+        # Hard global ceiling — never exceed 25% of portfolio for a single trade
+        effective = max(0.005, min(0.25, effective))
+        return float(portfolio_value) * effective
+
+    def max_combined_position(self, portfolio_value: float) -> float:
+        """Hard ceiling for combined position (initial + all DCAs) in dollars.
+
+        Ensures even pyramid DCAs cannot exceed tier-bound % of portfolio.
+        Apr 17 ADA went $0.25 → $1,463 via 3 DCAs — this cap would have
+        blocked the third addition.
+        """
+        if portfolio_value <= 0:
+            return 0.0
+        base_pct = self._tier_base("max_combined_pos_pct", 0.10)
+        hormonal = self._hormonal_factor()
+        decay = float(self._decay_multiplier)
+        effective = base_pct * hormonal * decay
+        effective = max(0.01, min(0.40, effective))
+        return float(portfolio_value) * effective
+
+    def dca_increment_pct(self) -> float:
+        """DCA add-stake as fraction of portfolio.
+
+        Replaces the legacy hardcoded `max_stake * 0.30` (which defaulted
+        to ~30% of full wallet — the Apr 17 disaster's mechanism). Now
+        bounded by tier × hormonal × decay so a wounded L0 bot adds at
+        most 1.2% per DCA, while a healthy L5 adds up to 11.5%.
+        """
+        base = self._tier_base("dca_pct", 0.03)
+        hormonal = self._hormonal_factor()
+        decay = float(self._decay_multiplier)
+        effective = base * hormonal * decay
+        return max(0.005, min(0.15, effective))
+
+    def max_dca_levels(self) -> int:
+        """Maximum number of DCA additions on top of initial entry.
+
+        L0 → 1 (cautious), L5 → 5 (aggressive). Decayed envelope shrinks
+        the count proportionally (3 → 1-2 when decay=0.5).
+        """
+        base = int(self._tier_base("max_dca_levels", 1))
+        decay = float(self._decay_multiplier)
+        effective = max(1, int(round(base * decay)))
+        return max(1, min(5, effective))
+
+    def _current_regime(self) -> str:
+        """Resolve current regime from pheromone field (set by HydraSizer
+        each populate_indicators tick). Falls back to 'transitional' so
+        callers never crash on cold start."""
+        try:
+            from pheromone_field import get_pheromone_field
+            r = get_pheromone_field().read("current_regime")
+            if isinstance(r, dict) and r.get("regime"):
+                return str(r["regime"])
+            if isinstance(r, str) and r:
+                return r
+        except Exception:
+            pass
+        return "transitional"
 
 
 # ─── Singleton ───────────────────────────────────────────────────────────────

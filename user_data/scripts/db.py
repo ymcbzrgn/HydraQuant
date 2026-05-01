@@ -654,6 +654,15 @@ def init_db():
             metadata TEXT DEFAULT '{}',
             UNIQUE(graph_type, source, relation, target))''')
 
+        # ⚠️  DEPRECATED 2026-04-23 (Mega Sprint Phase 27 Task 1):
+        # This single-row legacy table was retired when per-pair Beta
+        # posteriors took over (bayesian_kelly_per_pair below). NO live
+        # writers remain — `position_sizer.py:75` whitelists ONLY the new
+        # tables and would raise on any attempt to write here. Kept as
+        # CREATE TABLE IF NOT EXISTS for forward-compatibility (existing
+        # production rows like the alpha=37.22/beta=14.88 fossil from
+        # Apr 17 17:12 are harmless: no consumer reads them). Do NOT
+        # rewire anything to this table.
         c.execute('''CREATE TABLE IF NOT EXISTS bayesian_kelly (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, regime TEXT,
             alpha REAL DEFAULT 1.0, beta_param REAL DEFAULT 1.0,
@@ -981,10 +990,44 @@ def init_db():
             model TEXT, provider TEXT, prompt_tokens INTEGER, completion_tokens INTEGER,
             cost_usd REAL, latency_ms REAL, purpose TEXT, success BOOLEAN DEFAULT 1)''')
 
+        # Sprint 2026-05-01: schema aligned with production (system_monitor.py
+        # already creates this table with metric_value/metadata_json column
+        # names). Two writers exist in this codebase that diverged:
+        #   • db.py legacy: (metric_name, value, metadata)
+        #   • system_monitor.py + scheduler new writers: (metric_name, metric_value, metadata_json)
+        # Production DBs were initialized by system_monitor.py first, so the
+        # new column names are authoritative. This migration aligns db.py to
+        # match. Existing fresh DBs created against the old shape pick up
+        # the new shape on next init via additive ALTER TABLE.
         c.execute('''CREATE TABLE IF NOT EXISTS system_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, metric_name TEXT NOT NULL,
-            value REAL NOT NULL, metadata TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL,
+            metadata_json TEXT)''')
+        # Idempotent forward-migration for DBs created before this change.
+        existing_cols = {r[1] for r in c.execute(
+            "PRAGMA table_info(system_metrics)").fetchall()}
+        if "metric_value" not in existing_cols and "value" in existing_cols:
+            try:
+                c.execute("ALTER TABLE system_metrics RENAME COLUMN value TO metric_value")
+            except Exception:
+                # SQLite < 3.25 doesn't support RENAME COLUMN — fall back to
+                # ADD COLUMN + double-write convention. The new writers all
+                # use metric_value, the legacy writer (scheduler.py:3975)
+                # has been migrated as part of this sprint.
+                try:
+                    c.execute("ALTER TABLE system_metrics ADD COLUMN metric_value REAL")
+                except Exception:
+                    pass
+        if "metadata_json" not in existing_cols and "metadata" in existing_cols:
+            try:
+                c.execute("ALTER TABLE system_metrics RENAME COLUMN metadata TO metadata_json")
+            except Exception:
+                try:
+                    c.execute("ALTER TABLE system_metrics ADD COLUMN metadata_json TEXT")
+                except Exception:
+                    pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS model_slot_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
