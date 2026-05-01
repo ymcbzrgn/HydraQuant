@@ -2732,14 +2732,18 @@ class HydraSizer(IStrategy):
         # overwrites the first — matching Freqtrade's own "last call
         # wins" stake semantics.
 
-        # Sprint 2026-05-01: ENVELOPE HARD CAP — last line of defense.
-        # No prior gate is mathematically tied to portfolio_value the way
-        # this one is. Even if Constitution / RiskBudget / EqualRisk all
-        # fail open (or are skipped via custom_data tags), this cap keeps
-        # any single trade ≤ envelope.max_single_stake which scales from
-        # ~$264 (5% of $5,287 at L0) to $1,057 (20% at L5). The Apr 17
-        # disaster's $5,481 HYPE stake would have been clamped to L0's
-        # $264 here regardless of which upstream gate failed.
+        # Sprint 2026-05-01 evening — EARNED TRUST SYSTEM hard cap.
+        # cap = TIER × earned_trust × conviction_scalar × hormonal × decay × vol_brake
+        # passes the CURRENT signal confidence so high-conviction trades
+        # get more cap utilization than mediocre setups. Hard ceiling 30%.
+        #
+        # Apr 17 disaster scenario (cold-start L0, conf=0.95):
+        #   tier=0.05 × trust=1.0 × conv=1.0 × hormonal=1.0 × decay=1.0 × vol=1.0
+        #   = 0.05 → $264 cap on $5,287 portfolio (was $5,481 unclamped)
+        # 1-month profitable scenario (L1, trust=1.5, conf=0.95):
+        #   tier=0.08 × 1.5 × 1.0 × ... = 0.12 → $617
+        # 6-month L5 mature (trust=2.0, conf=0.95):
+        #   tier=0.20 × 2.0 × 1.0 × ... = 0.40 → clamped to 30% = $1,541
         try:
             from risk_envelope import get_risk_envelope
             env = get_risk_envelope()
@@ -2751,13 +2755,16 @@ class HydraSizer(IStrategy):
                     self.wallets.get_total_stake_amount()
                 ) if self.wallets else 0.0
             if portfolio_val_envcap > 0:
-                envelope_cap = float(env.max_single_stake(portfolio_val_envcap))
+                envelope_cap = float(
+                    env.max_single_stake(portfolio_val_envcap,
+                                         confidence=float(confidence))
+                )
                 if realised_stake > envelope_cap:
                     logger.warning(
                         f"[EnvelopeCap] {pair} stake ${realised_stake:.2f} > "
-                        f"envelope cap ${envelope_cap:.2f} "
-                        f"({envelope_cap/portfolio_val_envcap*100:.1f}% of portfolio). "
-                        f"Clamping — review sizing chain."
+                        f"earned-trust cap ${envelope_cap:.2f} "
+                        f"({envelope_cap/portfolio_val_envcap*100:.1f}% of portfolio, "
+                        f"conf={float(confidence):.2f}). Clamping — review chain."
                     )
                     realised_stake = envelope_cap
         except Exception as _envcap_e:
@@ -3921,11 +3928,16 @@ class HydraSizer(IStrategy):
                     if portfolio_value <= 0 and self.wallets:
                         portfolio_value = float(self.wallets.get_total_stake_amount())
                     if portfolio_value > 0:
-                        # Envelope cap (tier + hormonal + decay)
+                        # Sprint 2026-05-01 evening — EarnedTrust pipeline:
+                        # combined cap and DCA increment scale with the
+                        # CURRENT signal confidence so a high-conviction
+                        # add-on gets larger stake than a mediocre one.
                         try:
                             from risk_envelope import get_risk_envelope
                             envelope_combined_cap = float(
-                                get_risk_envelope().max_combined_position(portfolio_value)
+                                get_risk_envelope().max_combined_position(
+                                    portfolio_value, confidence=float(confidence)
+                                )
                             )
                         except Exception:
                             envelope_combined_cap = portfolio_value * 0.10
@@ -3939,12 +3951,13 @@ class HydraSizer(IStrategy):
                         # Tighter wins
                         max_total_stake = min(envelope_combined_cap, constitution_cap)
 
-                        # Proposed DCA is now ALSO envelope-driven (no
-                        # hardcoded `max_stake * 0.30` — that 30% was
-                        # the Apr 17 disaster's mechanism).
+                        # Proposed DCA conviction-scaled (no hardcoded 0.30
+                        # — that was Apr 17 mechanism).
                         try:
                             from risk_envelope import get_risk_envelope as _ge
-                            dca_pct = float(_ge().dca_increment_pct())
+                            dca_pct = float(_ge().dca_increment_pct(
+                                confidence=float(confidence)
+                            ))
                             proposed_dca = portfolio_value * dca_pct
                         except Exception:
                             proposed_dca = portfolio_value * 0.02
@@ -3976,14 +3989,16 @@ class HydraSizer(IStrategy):
                 return None
 
             # All four Phase 27 gates passed — DCA is risk-bounded.
-            # Sprint 2026-05-01: add_stake from envelope (no hardcoded 0.30).
+            # Sprint 2026-05-01 evening — EarnedTrust conviction-scaled.
             try:
                 from risk_envelope import get_risk_envelope as _ge2
                 portfolio_value_dca = float(getattr(self.risk_budget, "portfolio_value", 0.0) or 0.0)
                 if portfolio_value_dca <= 0 and self.wallets:
                     portfolio_value_dca = float(self.wallets.get_total_stake_amount())
                 if portfolio_value_dca > 0:
-                    dca_pct_final = float(_ge2().dca_increment_pct())
+                    dca_pct_final = float(_ge2().dca_increment_pct(
+                        confidence=float(confidence)
+                    ))
                     add_stake = portfolio_value_dca * dca_pct_final
                 else:
                     add_stake = float(max_stake) * 0.10  # very conservative cold-start

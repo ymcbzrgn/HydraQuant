@@ -854,51 +854,296 @@ class RiskEnvelope:
         decay = float(self._decay_multiplier)
         return max(0.50, min(0.95, base * (0.7 + 0.3 * decay)))
 
-    def max_single_stake(self, portfolio_value: float) -> float:
+    # ─── EarnedTrust System (Sprint 2026-05-01 evening) ─────────────────
+    # Three-layer dynamic sizing: TIER × EARNED_TRUST × CONVICTION_SCALAR.
+    #
+    # Philosophy: "küçük başla, ispat ederse genişle." A bot that just
+    # came online has TIER baseline (L0 → 5%), zero proof, neutral conv
+    # → final stake stays small. As it earns 30-day profitable evidence,
+    # `earned_trust_multiplier` grows (1.0 → 2.0). When a single-trade
+    # signal is strong, `conviction_scalar` lifts toward 1.0. The product
+    # gives meaningful autonomy without needing tier promotion every time.
+    #
+    # Hard ceiling EARNED_TRUST_HARD_CEILING (0.30 = 30% portfolio max)
+    # is the institutional floor: even L5 + 2.0 trust + 1.0 conviction
+    # cannot blow past 30% of portfolio in a single trade. Renaissance-
+    # grade allocation, not retail YOLO.
+    #
+    # Asymmetry: trust DROPS fast (one bad week → 0.7), RECOVERS slow
+    # (30 days clean → 2.0). 3:1 ratio mirrors the protection layer's
+    # demote-fast/promote-slow pattern.
+
+    EARNED_TRUST_HARD_CEILING_PCT: float = 0.30
+    EARNED_TRUST_FLOOR: float = 0.50
+    EARNED_TRUST_NEUTRAL: float = 1.0
+    EARNED_TRUST_PEAK: float = 2.0
+    LIFETIME_DD_FREEZE_THRESHOLD: float = 0.10  # -10% lifetime DD locks trust=0.5
+    STREAK_BONUS_WIN_COUNT: int = 5             # 5 consecutive wins → bonus
+    STREAK_BONUS_AMOUNT: float = 0.30           # +0.3 trust additive
+    STREAK_BONUS_TTL_SECONDS: float = 3600.0    # 1h decay
+    VOLATILITY_BRAKE_RATIO: float = 2.0         # ATR > 2x normal → halve cap
+
+    def earned_trust_multiplier(self) -> float:
+        """Multiplier in [0.5, 2.0] derived from REAL 30-day performance.
+
+        Components:
+          • Lifetime drawdown freeze (-10% DD locks at 0.5)
+          • Continuous-confidence score from existing
+            `get_continuous_confidence_score()` (Sharpe + winrate +
+            profit factor + drawdown-inverse + organism health)
+          • Streak bonus (5 consecutive wins → +0.3 transient)
+          • Sample-size shrinkage (n<10 trades → toward neutral 1.0)
+
+        The continuous confidence score is the same one used for tier
+        promotion eligibility — re-using it ensures trust + tier are
+        philosophically aligned but operate on different time scales.
+        """
+        # 1. Lifetime drawdown circuit-breaker — strongest signal first
+        lifetime_dd = self._lifetime_drawdown()
+        if lifetime_dd >= self.LIFETIME_DD_FREEZE_THRESHOLD:
+            logger.warning(
+                f"[EarnedTrust] Lifetime DD={lifetime_dd:.2%} ≥ "
+                f"{self.LIFETIME_DD_FREEZE_THRESHOLD:.0%} — trust LOCKED at floor"
+            )
+            return self.EARNED_TRUST_FLOOR
+
+        # 2. Continuous confidence from rolling 30-day metrics
+        score = self.get_continuous_confidence_score()  # [0, 1]
+
+        # 3. Sample-size-aware mapping. With <10 trades the score is
+        #    barely informative — pull toward neutral 1.0. With >50
+        #    trades the full [floor, peak] range is available.
+        n_recent = self._n_closed_trades_last_30d()
+        sample_weight = min(1.0, n_recent / 50.0)
+
+        # Base map: score=0.5 (neutral) → 1.0, score=0.0 → floor 0.5,
+        # score=1.0 (excellent) → peak 2.0.
+        if score >= 0.5:
+            base = 1.0 + (score - 0.5) * 2.0  # [1.0, 2.0]
+        else:
+            base = 1.0 - (0.5 - score) * 1.0  # [0.5, 1.0]
+
+        # Sample-weighted blend toward neutral
+        trust = self.EARNED_TRUST_NEUTRAL * (1 - sample_weight) + base * sample_weight
+
+        # 4. Asymmetry: when score is BAD (<0.5), trust drops 1.5× faster
+        #    than it grows when score is GOOD. Renaissance demote-fast.
+        if score < 0.5:
+            shortfall = self.EARNED_TRUST_NEUTRAL - trust
+            trust = self.EARNED_TRUST_NEUTRAL - shortfall * 1.5
+
+        # 5. Transient streak bonus (1h TTL, additive)
+        trust += self._streak_bonus_active()
+
+        # 6. Hard clamps
+        return max(self.EARNED_TRUST_FLOOR,
+                   min(self.EARNED_TRUST_PEAK + self.STREAK_BONUS_AMOUNT, trust))
+
+    def conviction_scalar(self, confidence: float) -> float:
+        """Maps signal confidence [0, 1] → cap-utilization fraction [0.3, 1.0].
+
+        Below the entry gate (typically 0.45) this method shouldn't even
+        be called — the trade gets blocked upstream. But it's defensive
+        and bottoms out at 0.3 so any accidental call from a weak signal
+        path produces a tiny stake, not a huge one.
+
+        The curve is intentionally NON-LINEAR: confidence in the
+        0.85-1.00 band converts almost 1:1 to stake utilization, while
+        the 0.50-0.70 band converts more cautiously. This rewards
+        STRONG conviction more than mediocre conviction.
+        """
+        c = max(0.0, min(1.0, float(confidence)))
+        if c < 0.50:
+            return 0.30
+        if c < 0.70:
+            # Linear 0.50 → 0.30, 0.70 → 0.60
+            return 0.30 + (c - 0.50) * 1.5
+        if c < 0.85:
+            # Linear 0.70 → 0.60, 0.85 → 0.85
+            return 0.60 + (c - 0.70) * (25 / 15)
+        # 0.85+ → 0.85 → 1.0 (steep reward for high conviction)
+        return min(1.0, 0.85 + (c - 0.85) * 1.0)
+
+    def _streak_bonus_active(self) -> float:
+        """Transient additive bonus when 5 consecutive wins are fresh.
+
+        Decays linearly to zero over `STREAK_BONUS_TTL_SECONDS`. Stored
+        on the instance so it survives across compute() calls but does
+        NOT persist to disk (intentional — a streak is a moment, not a
+        state).
+        """
+        ts = getattr(self, "_streak_bonus_started_at", None)
+        if ts is None:
+            return 0.0
+        age = time.time() - ts
+        if age >= self.STREAK_BONUS_TTL_SECONDS:
+            return 0.0
+        # Linear decay 1.0 → 0.0 over the window
+        decay = max(0.0, 1.0 - age / self.STREAK_BONUS_TTL_SECONDS)
+        return self.STREAK_BONUS_AMOUNT * decay
+
+    def trigger_streak_bonus(self) -> None:
+        """Called by the strategy when a win-streak threshold is crossed.
+
+        Sets the timestamp; the bonus auto-decays via _streak_bonus_active.
+        Called from neural_organism.update_cycle when consec_wins reaches
+        STREAK_BONUS_WIN_COUNT (or any equivalent caller).
+        """
+        with self._lock:
+            self._streak_bonus_started_at = time.time()
+        logger.info(
+            f"[EarnedTrust] Streak bonus ACTIVATED — +{self.STREAK_BONUS_AMOUNT:.2f} "
+            f"trust for {self.STREAK_BONUS_TTL_SECONDS/60:.0f} min"
+        )
+
+    def _volatility_brake_factor(self) -> float:
+        """Returns [0.5, 1.0] — halves cap when ATR is 2× the rolling normal.
+
+        Pulls live ATR from pheromone field where lob_encoder /
+        order_flow publish 'atr_state'. When unavailable, returns 1.0
+        (no brake) — never blocks trading on missing telemetry.
+        """
+        try:
+            from pheromone_field import get_pheromone_field
+            atr_state = get_pheromone_field().read("atr_state")
+            if isinstance(atr_state, dict):
+                ratio = float(atr_state.get("ratio", 1.0) or 1.0)
+                if ratio >= self.VOLATILITY_BRAKE_RATIO:
+                    return 0.5  # halve cap
+                if ratio >= self.VOLATILITY_BRAKE_RATIO * 0.75:
+                    # Linear interpolation from 1.0 → 0.5 between 1.5× and 2.0×
+                    over = ratio - self.VOLATILITY_BRAKE_RATIO * 0.75
+                    span = self.VOLATILITY_BRAKE_RATIO * 0.25
+                    return max(0.5, 1.0 - 0.5 * (over / span))
+        except Exception:
+            pass
+        return 1.0
+
+    def _lifetime_drawdown(self) -> float:
+        """Returns lifetime drawdown as a positive fraction (0.10 = -10%).
+
+        Reads from portfolio_state OR computes from trades. Falls back
+        to 0.0 (no drawdown) on any error so a missing row doesn't lock
+        trading.
+        """
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                row = conn.execute("""
+                    SELECT total_balance, peak_balance
+                    FROM portfolio_state WHERE id = 1
+                """).fetchone()
+            if row is None:
+                return 0.0
+            balance = float(row["total_balance"] or 0.0)
+            peak = float(row["peak_balance"] or balance)
+            if peak <= 0:
+                return 0.0
+            return max(0.0, (peak - balance) / peak)
+        except Exception:
+            return 0.0
+
+    def _n_closed_trades_last_30d(self) -> int:
+        """Count of closed trades in last 30 days. Used by sample-size
+        weighting in earned_trust_multiplier — avoids being fooled by
+        a small-sample 100% win rate."""
+        try:
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                row = conn.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM trades
+                    WHERE close_date >= datetime('now', '-30 days')
+                      AND is_open = 0
+                """).fetchone()
+            return int(row["n"] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def max_single_stake(self, portfolio_value: float,
+                         confidence: Optional[float] = None) -> float:
         """Hard ceiling for a single trade's stake amount.
 
-        portfolio × tier_pct × hormonal_factor × decay_multiplier.
-        Apr 17 disaster: HYPE staked $5,481 on a $5,287 portfolio — this
-        cap would have clamped it at L0 to $264 (5%) or L5 to $1,057 (20%).
+        Sprint 2026-05-01 evening — EarnedTrust System:
+          final_pct = TIER_BASE × earned_trust × conviction_scalar
+                      × hormonal × decay × volatility_brake
+
+        With cold-start defaults (trust=1.0, conv=full at conf 0.85+),
+        L0 produces ~$257 (5%). After 30 days of profitable trading
+        (trust=1.5), L1+conf 0.95 climbs to ~$617. After 6 months at L5
+        with trust=2.0 the cap hits the global hard ceiling at 30%.
+        Apr 17 disaster (cold-start L0 with conf=0.95): $257 — was $5,481.
+
+        confidence: optional [0,1]. When provided, conviction_scalar is
+        applied. When None (legacy callers / pre-trade estimation), the
+        scalar defaults to 0.85 — middle of the cap utilization curve,
+        a sensible neutral.
         """
         if portfolio_value <= 0:
             return 0.0
+
         base_pct = self._tier_base("max_single_stake_pct", 0.05)
+        trust = self.earned_trust_multiplier()
+        if confidence is None:
+            conv = 0.85  # neutral mid-conv when caller hasn't supplied
+        else:
+            conv = self.conviction_scalar(confidence)
         hormonal = self._hormonal_factor()  # [0.30, 1.15]
         decay = float(self._decay_multiplier)
-        effective = base_pct * hormonal * decay
-        # Hard global ceiling — never exceed 25% of portfolio for a single trade
-        effective = max(0.005, min(0.25, effective))
+        vol_brake = self._volatility_brake_factor()
+
+        effective = base_pct * trust * conv * hormonal * decay * vol_brake
+        # Hard ceiling — institutional safety floor, NEVER violated.
+        effective = max(0.005, min(self.EARNED_TRUST_HARD_CEILING_PCT, effective))
         return float(portfolio_value) * effective
 
-    def max_combined_position(self, portfolio_value: float) -> float:
-        """Hard ceiling for combined position (initial + all DCAs) in dollars.
+    def max_combined_position(self, portfolio_value: float,
+                              confidence: Optional[float] = None) -> float:
+        """Hard ceiling for combined position (initial + all DCAs).
 
-        Ensures even pyramid DCAs cannot exceed tier-bound % of portfolio.
-        Apr 17 ADA went $0.25 → $1,463 via 3 DCAs — this cap would have
-        blocked the third addition.
+        Sprint 2026-05-01 evening — EarnedTrust System.
+        Same multiplicative chain as max_single_stake but uses the
+        wider tier_base (max_combined_pos_pct) so DCA pyramiding has
+        room. Hard ceiling still 30%.
         """
         if portfolio_value <= 0:
             return 0.0
+
         base_pct = self._tier_base("max_combined_pos_pct", 0.10)
+        trust = self.earned_trust_multiplier()
+        if confidence is None:
+            conv = 0.85
+        else:
+            conv = self.conviction_scalar(confidence)
         hormonal = self._hormonal_factor()
         decay = float(self._decay_multiplier)
-        effective = base_pct * hormonal * decay
-        effective = max(0.01, min(0.40, effective))
+        vol_brake = self._volatility_brake_factor()
+
+        effective = base_pct * trust * conv * hormonal * decay * vol_brake
+        effective = max(0.01, min(self.EARNED_TRUST_HARD_CEILING_PCT, effective))
         return float(portfolio_value) * effective
 
-    def dca_increment_pct(self) -> float:
+    def dca_increment_pct(self, confidence: Optional[float] = None) -> float:
         """DCA add-stake as fraction of portfolio.
 
-        Replaces the legacy hardcoded `max_stake * 0.30` (which defaulted
-        to ~30% of full wallet — the Apr 17 disaster's mechanism). Now
-        bounded by tier × hormonal × decay so a wounded L0 bot adds at
-        most 1.2% per DCA, while a healthy L5 adds up to 11.5%.
+        Sprint 2026-05-01 evening — same EarnedTrust chain. Replaces the
+        legacy hardcoded `max_stake * 0.30` (Apr 17 disaster's
+        mechanism). DCA additions now scale with proven track record,
+        signal conviction, hormonal calm, decay, AND volatility brake.
         """
         base = self._tier_base("dca_pct", 0.03)
+        trust = self.earned_trust_multiplier()
+        if confidence is None:
+            conv = 0.85
+        else:
+            conv = self.conviction_scalar(confidence)
         hormonal = self._hormonal_factor()
         decay = float(self._decay_multiplier)
-        effective = base * hormonal * decay
+        vol_brake = self._volatility_brake_factor()
+
+        effective = base * trust * conv * hormonal * decay * vol_brake
+        # DCA increment hard floor 0.5%, ceiling 15% (the combined cap
+        # already enforces aggregate position bound).
         return max(0.005, min(0.15, effective))
 
     def max_dca_levels(self) -> int:

@@ -1928,6 +1928,21 @@ class NeuralOrganism:
         if won:
             self._consec_wins += 1
             self._consec_losses = 0
+            # Sprint 2026-05-01 evening — EarnedTrust streak bonus.
+            # When the bot crosses the configured win-streak threshold,
+            # poke RiskEnvelope to activate a transient +0.3 trust
+            # multiplier (1h decay). Earnable, not gameable: TTL forces
+            # the bot to keep producing wins to stay hot.
+            try:
+                from risk_envelope import get_risk_envelope as _gre
+                env = _gre()
+                threshold = int(getattr(env, "STREAK_BONUS_WIN_COUNT", 5))
+                # Only fire on the EXACT threshold crossing to avoid
+                # repeatedly resetting the TTL on every subsequent win.
+                if self._consec_wins == threshold:
+                    env.trigger_streak_bonus()
+            except Exception as _streak_e:
+                logger.debug(f"[NeuralOrganism] streak bonus signal failed: {_streak_e}")
         else:
             self._consec_losses += 1
             self._consec_wins = 0
