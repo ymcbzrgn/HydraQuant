@@ -377,6 +377,63 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.indicators.reflex.std_window":       {"organ": "indicators", "default": 50, "min": 20, "max": 100},
     # Audit Finding #14 — Hurst agreement metric uses pairwise distance
     "envelope.hurst.agreement_decay":         {"organ": "envelope", "default": 0.5, "min": 0.3, "max": 0.8},
+    # Sprint 2026-05-02 — AdaptiveExitUrgency (subsystem D).
+    # Taker threshold tuned to 0.5 — empirical NAORIS-like scenario
+    # (+3% profit, 3h held, signal reversal) yields urgency≈0.5; threshold
+    # 1.0 was too strict, threshold 0.5 catches genuine carry-cost cases.
+    "envelope.exit_urgency.taker_threshold":     {"organ": "envelope", "default": 0.5, "min": 0.3, "max": 1.5},
+    "envelope.exit_urgency.weight_profit":       {"organ": "envelope", "default": 0.40, "min": 0.20, "max": 0.60},
+    "envelope.exit_urgency.weight_volatility":   {"organ": "envelope", "default": 0.20, "min": 0.10, "max": 0.40},
+    "envelope.exit_urgency.weight_age":          {"organ": "envelope", "default": 0.15, "min": 0.05, "max": 0.30},
+    "envelope.exit_urgency.weight_regime":       {"organ": "envelope", "default": 0.10, "min": 0.0,  "max": 0.25},
+    "envelope.exit_urgency.weight_reversal":     {"organ": "envelope", "default": 0.15, "min": 0.05, "max": 0.30},
+    "envelope.exit_urgency.target_roi_baseline": {"organ": "envelope", "default": 0.045, "min": 0.01, "max": 0.10},
+    "envelope.exit_urgency.max_age_hours":       {"organ": "envelope", "default": 12.0, "min": 4.0,  "max": 48.0},
+    # Sprint 2026-05-02 — SignalSourceConsensus (subsystem C).
+    "envelope.consensus.min_agreement_to_override": {"organ": "envelope", "default": 4, "min": 2, "max": 6},
+    "envelope.consensus.rag_bias_window":           {"organ": "envelope", "default": 100, "min": 30, "max": 500},
+    "envelope.consensus.rag_bias_mode_pct":         {"organ": "envelope", "default": 0.50, "min": 0.30, "max": 0.80},
+    "envelope.consensus.rag_bias_tolerance":        {"organ": "envelope", "default": 0.05, "min": 0.02, "max": 0.15},
+    "envelope.consensus.weight.rag":                {"organ": "envelope", "default": 0.25, "min": 0.10, "max": 0.50},
+    "envelope.consensus.weight.tp":                 {"organ": "envelope", "default": 0.25, "min": 0.10, "max": 0.40},
+    "envelope.consensus.weight.mtf":                {"organ": "envelope", "default": 0.15, "min": 0.05, "max": 0.30},
+    "envelope.consensus.weight.vpin":               {"organ": "envelope", "default": 0.10, "min": 0.02, "max": 0.25},
+    "envelope.consensus.weight.funding":            {"organ": "envelope", "default": 0.10, "min": 0.02, "max": 0.25},
+    "envelope.consensus.weight.hurst":              {"organ": "envelope", "default": 0.15, "min": 0.05, "max": 0.30},
+    # Audit 2026-05-02 #5/#6/#7: lift remaining hardcodes into PARAM_REGISTRY
+    "envelope.consensus.directional_threshold":     {"organ": "envelope", "default": 0.10, "min": 0.05, "max": 0.30},
+    "envelope.consensus.rag_weak_conf_floor":       {"organ": "envelope", "default": 0.30, "min": 0.10, "max": 0.50},
+    "envelope.consensus.rag_weak_dir_floor":        {"organ": "envelope", "default": 0.50, "min": 0.30, "max": 0.80},
+    "envelope.consensus.funding_conf_scaler":       {"organ": "envelope", "default": 1000.0, "min": 100.0, "max": 5000.0},
+    "envelope.consensus.hurst_trending_floor":      {"organ": "envelope", "default": 0.55, "min": 0.50, "max": 0.65},
+    "envelope.consensus.hurst_mean_revert_ceiling": {"organ": "envelope", "default": 0.45, "min": 0.35, "max": 0.50},
+    "envelope.consensus.hurst_conf_normalizer":     {"organ": "envelope", "default": 0.30, "min": 0.10, "max": 0.50},
+    "envelope.microstructure.min_samples_for_flip": {"organ": "envelope", "default": 5, "min": 3, "max": 30},
+    # Audit 2026-05-02 #13: cgroup weight defaults — sum should approximate
+    # 1.0; auto_cgroup_recommendation normalizes if not. These are the
+    # COLD-START allocation; observed 30-day RSS peaks override at runtime.
+    "system.cgroup.weight.freqtrade":      {"organ": "envelope", "default": 0.18, "min": 0.05, "max": 0.40},
+    "system.cgroup.weight.freqtrade_tr_dry": {"organ": "envelope", "default": 0.18, "min": 0.05, "max": 0.40},
+    "system.cgroup.weight.freqtrade_rag":   {"organ": "envelope", "default": 0.18, "min": 0.05, "max": 0.40},
+    "system.cgroup.weight.freqtrade_scheduler": {"organ": "envelope", "default": 0.27, "min": 0.10, "max": 0.50},
+    "system.cgroup.weight.freqtrade_models":    {"organ": "envelope", "default": 0.19, "min": 0.05, "max": 0.40},
+    # Sprint 2026-05-02 — ExchangeMicrostructureLearner (subsystem B).
+    # Bot self-discovers per-pair venue rules + maker fill behavior.
+    "envelope.microstructure.min_fill_rate_for_maker":  {"organ": "envelope", "default": 0.30, "min": 0.10, "max": 0.60},
+    "envelope.microstructure.maker_observation_window": {"organ": "envelope", "default": 50,   "min": 20,   "max": 200},
+    "envelope.microstructure.notional_safety_margin":   {"organ": "envelope", "default": 1.10, "min": 1.00, "max": 1.50},
+    "envelope.microstructure.cache_refresh_hours":      {"organ": "envelope", "default": 24,   "min": 1,    "max": 168},
+    "envelope.microstructure.ema_alpha":                {"organ": "envelope", "default": 0.10, "min": 0.02, "max": 0.50},
+    # Sprint 2026-05-02 — PredictiveMemoryGuardian (subsystem A).
+    # Linear regression on rolling pressure samples → forecast OOM and
+    # halt heavy ML jobs proactively. Each tunable below tightens or
+    # relaxes the early-warning system.
+    "envelope.mem_guardian.window_minutes":          {"organ": "envelope", "default": 30, "min": 10, "max": 60},
+    "envelope.mem_guardian.forecast_horizon_minutes": {"organ": "envelope", "default": 15, "min": 5,  "max": 30},
+    "envelope.mem_guardian.danger_pressure":         {"organ": "envelope", "default": 0.75, "min": 0.50, "max": 0.90},
+    "envelope.mem_guardian.critical_pressure":       {"organ": "envelope", "default": 0.90, "min": 0.75, "max": 0.97},
+    "envelope.mem_guardian.min_samples_for_forecast": {"organ": "envelope", "default": 10, "min": 5, "max": 30},
+    "envelope.mem_guardian.deposit_interval_seconds": {"organ": "envelope", "default": 60, "min": 15, "max": 300},
     # Stop-hunt defense — spread anomaly threshold (× 1h-rolling median)
     # that triggers a temporary stop loosening + entry pause.
     "envelope.stop_hunt.spread_multiplier": {"organ": "envelope", "default": 3.0, "min": 1.5, "max": 5.0},

@@ -221,9 +221,20 @@ def record_memory_pressure(
 
 
 def tick() -> Dict[str, Any]:
-    """Scheduler convenience: sample → deposit → return brief snapshot."""
+    """Scheduler convenience: sample → deposit → return brief snapshot.
+
+    Sprint 2026-05-02: also feeds PredictiveMemoryGuardian so the bot
+    can FORECAST OOM rather than just react to it.
+    """
     snap = collect_pressure()
     score, payload = record_memory_pressure(snap)
+    # Feed forecaster — non-fatal if module missing (cold-start safety)
+    try:
+        from predictive_memory_guardian import record_sample, publish_forecast
+        record_sample(score)
+        publish_forecast()
+    except Exception as e:
+        logger.debug(f"[MemorySensor] guardian feed failed: {e}")
     return {
         "score": round(score, 4),
         "components": payload["components"],

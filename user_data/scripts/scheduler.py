@@ -380,12 +380,24 @@ class PipelineScheduler:
         # (~30 min) OR when pressure>0.5, run heavy gc.collect(2) + glibc
         # malloc_trim to defrag the heap. Cadence is fixed at 5 min so the
         # afferent channel stays warm; heavy work is gated by pressure.
+        # Sprint 2026-05-02: 5min → 1min cadence so the predictive guardian
+        # gets enough samples for slope estimation. Light tick (sensor +
+        # gen-0 GC) is cheap; heavy work still gated by pressure score
+        # inside _memory_cleanup itself (every 6th tick OR pressure≥0.5).
+        # Audit Finding #12: max_instances=1 + coalesce=False so a slow
+        # heavy tick under pressure does NOT cause backed-up triggers to
+        # all fire on completion (which would compound the pressure).
+        # APScheduler default coalesce=True merges missed runs into one;
+        # we want misses dropped silently instead (the next 1-min tick
+        # will resample anyway).
         self.scheduler.add_job(
             self._memory_cleanup,
-            'interval', minutes=5,
+            'interval', minutes=1,
             id='memory_cleanup',
             name='Memory Groom (sensor + GC + malloc_trim)',
             max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
             replace_existing=True
         )
 
@@ -508,6 +520,24 @@ class PipelineScheduler:
         self.scheduler.add_job(self._portfolio_optimizer_tick, 'interval',
             hours=1, id='portfolio_optimizer',
             name='Portfolio Optimizer (BL+MaxSharpe)',
+            max_instances=1, replace_existing=True)
+        # Sprint 2026-05-02 audit Finding #4 — micro structure learner
+        # publishes a hourly summary for the daily comparison dashboard.
+        self.scheduler.add_job(
+            lambda: __import__("exchange_microstructure_learner").publish_summary(),
+            'interval', hours=1, id='microstructure_summary',
+            name='Microstructure Learner Hourly Summary',
+            max_instances=1, replace_existing=True,
+        )
+        # Sprint 2026-05-02 audit Finding #3 fix — auto-cgroup recalibrate.
+        # Sunday 04:30 UTC, after the heavy ML jobs settle and before the
+        # next week's trading begins. Writes systemd drop-in files with
+        # observed-peak-based MemoryMax. New limits take effect on next
+        # service restart (operator's deploy).
+        self.scheduler.add_job(self._auto_cgroup_recalibrate, 'cron',
+            day_of_week='sun', hour=4, minute=30,
+            id='cgroup_recalibrate',
+            name='Auto Cgroup Recalibration (predictive guardian)',
             max_instances=1, replace_existing=True)
         # Sprint 2026-05-02 (audit Finding #2 fix) — OLMAR cross-pair
         # mean-reversion (Li & Hoi 2012). Hourly cadence; reads
@@ -1897,7 +1927,11 @@ class PipelineScheduler:
 
         Sprint 2026-05-01: jemalloc-purge wrapped — full neuron list (~1758
         items) materialised into memory during _persist_batch.
+        Sprint 2026-05-02: guardian consults predictive forecast.
         """
+        if self._memory_pressure_halt():
+            logger.warning("[Scheduler:Organism] Sleep SKIPPED — memory pressure critical.")
+            return
         with self._heavy_job_gc("organism_sleep"):
             try:
                 from neural_organism import get_organism
@@ -2332,7 +2366,22 @@ class PipelineScheduler:
         Runs daily at 00:30 UTC (off-peak) plus opportunistically when
         the first cycle ticks (so prod gets coverage immediately after
         deploy without waiting until midnight).
+
+        Sprint 2026-05-02 audit Finding #4: this is a NON-CRITICAL job
+        (results are advisory for learning, not safety). Honors the
+        memory guardian's `should_throttle` signal — when memory
+        pressure is high or rising, this job defers to the next cycle.
         """
+        try:
+            from predictive_memory_guardian import should_throttle
+            if should_throttle():
+                logger.info(
+                    "[DecisionsBackfill] DEFERRED — memory pressure forecast indicates throttle"
+                )
+                return
+        except Exception:
+            pass
+
         try:
             import os
             import pandas as pd
@@ -3719,7 +3768,11 @@ class PipelineScheduler:
         Sprint 2026-05-01: wrapped in `_heavy_job_gc` so PyTorch tensor
         allocations are reclaimed via jemalloc purge after training,
         preventing the Sunday-night OOM cascade.
+        Sprint 2026-05-02: guardian consults predictive forecast.
         """
+        if self._memory_pressure_halt():
+            logger.warning("[Sprint2:IQL] SKIPPED — memory pressure forecast critical.")
+            return
         with self._heavy_job_gc("rl_iql_retrain"):
             try:
                 from iql_pretrain import run_iql_training
@@ -3749,7 +3802,11 @@ class PipelineScheduler:
 
         Sprint 2026-05-01: jemalloc-purge wrapped (heavy pandas DataFrames
         for trade replay).
+        Sprint 2026-05-02: guardian consults predictive forecast.
         """
+        if self._memory_pressure_halt():
+            logger.warning("[Sprint2:Counterfactual] SKIPPED — memory pressure forecast critical.")
+            return
         with self._heavy_job_gc("counterfactual_analysis"):
             try:
                 from counterfactual_engine import run_counterfactual_analysis
@@ -3870,8 +3927,121 @@ class PipelineScheduler:
                 "(recent perf degraded vs baseline). Will retry next cycle."
             )
             return
+        if self._memory_pressure_halt():
+            logger.warning("[Sprint2:CatBoost] SKIPPED — memory pressure forecast critical.")
+            return
         with self._heavy_job_gc("catboost_retrain"):
             self._catboost_retrain_inner()
+
+    def _auto_cgroup_recalibrate(self):
+        """Sprint 2026-05-02 audit Finding #3 fix — wires the previously
+        dead `auto_cgroup_recommendation` to ACTUALLY update systemd
+        drop-in files. Runs Sunday 04:30 UTC after the weekly heavy ML
+        cycle settles. Compares observed 30-day RSS peaks to current
+        cgroup limits, writes /etc/systemd/system/<svc>.d/auto.conf
+        with new MemoryMax/MemoryHigh, and triggers a graceful
+        `systemctl daemon-reload` so the next service restart picks up
+        the new bounds.
+
+        Self-healing: as the bot's workload grows or shrinks, its memory
+        budget adapts WITHOUT human intervention. No more 6-OOM-in-12h
+        cycles waiting for an operator to bump MemoryMax.
+        """
+        try:
+            from predictive_memory_guardian import auto_cgroup_recommendation
+            recs = auto_cgroup_recommendation()
+            if not recs:
+                logger.info("[CgroupRecalibrate] no recommendations (cold start)")
+                return
+            # Write drop-in files. Each service gets:
+            #   /etc/systemd/system/<svc>.d/auto.conf
+            # with:
+            #   [Service]
+            #   MemoryMax=<n>
+            #   MemoryHigh=<n*0.85>
+            import subprocess
+            import os
+            changes_made = []
+            for svc, mem_max in recs.items():
+                drop_dir = f"/etc/systemd/system/{svc}.d"
+                drop_file = f"{drop_dir}/auto.conf"
+                mem_high = int(mem_max * 0.85)
+                content = (
+                    f"# Auto-generated by predictive_memory_guardian\n"
+                    f"# DO NOT EDIT — overwritten weekly by scheduler\n"
+                    f"[Service]\nMemoryMax={mem_max}\nMemoryHigh={mem_high}\n"
+                )
+                # Read current file (if any); skip rewrite if identical
+                existing = ""
+                try:
+                    if os.path.isfile(drop_file):
+                        with open(drop_file) as f:
+                            existing = f.read()
+                except Exception:
+                    pass
+                if existing == content:
+                    continue
+                try:
+                    os.makedirs(drop_dir, exist_ok=True)
+                    with open(drop_file, "w") as f:
+                        f.write(content)
+                    changes_made.append((svc, mem_max // (1024**2)))
+                except PermissionError:
+                    logger.warning(
+                        f"[CgroupRecalibrate] no permission to write {drop_file} "
+                        "— scheduler must run as root for self-tune. Skipping."
+                    )
+                    return
+                except Exception as e:
+                    logger.debug(f"[CgroupRecalibrate] {svc} write skipped: {e}")
+            if changes_made:
+                # daemon-reload so new limits are visible at next start.
+                # We DON'T restart services here — that happens at the
+                # operator's next deploy; auto-restart would interrupt
+                # in-flight trades.
+                try:
+                    subprocess.run(
+                        ["systemctl", "daemon-reload"],
+                        check=False, timeout=15,
+                    )
+                except Exception as e:
+                    logger.debug(f"[CgroupRecalibrate] daemon-reload failed: {e}")
+                # Telemetry pheromone for dashboard visibility
+                try:
+                    from pheromone_field import get_pheromone_field
+                    get_pheromone_field().deposit(
+                        "memory_guardian", "cgroup_recalibrated",
+                        {"changes": [{"svc": s, "mem_max_mb": m} for s, m in changes_made]},
+                        half_life=86400.0,
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    f"[CgroupRecalibrate] updated {len(changes_made)} services: "
+                    f"{[(s, f'{m}MB') for s, m in changes_made]} — daemon-reloaded. "
+                    "New limits take effect on next service restart."
+                )
+            else:
+                logger.info("[CgroupRecalibrate] limits already optimal — no changes")
+        except Exception as e:
+            logger.warning(f"[CgroupRecalibrate] tick failed: {e}")
+
+    def _memory_pressure_halt(self) -> bool:
+        """Sprint 2026-05-02: predictive memory guardian — refuses heavy
+        ML jobs when forecast says we'll OOM in <5 min OR current pressure
+        already critical. Prevents the OOM-after-OOM cycle observed in
+        production (6 OOMs in 12h despite reactive memory_cleanup).
+        """
+        try:
+            from predictive_memory_guardian import should_halt_heavy_jobs
+            if should_halt_heavy_jobs():
+                logger.warning(
+                    "[MemoryGuardian] heavy job HALTED — forecast critical"
+                )
+                return True
+        except Exception:
+            pass
+        return False
 
     def _walk_forward_frozen(self) -> bool:
         """Check pheromone field for walk-forward freeze state.
@@ -3981,6 +4151,9 @@ class PipelineScheduler:
         """
         if self._walk_forward_frozen():
             logger.warning("[Phase28:OOD] SKIPPED — walk-forward freeze active.")
+            return
+        if self._memory_pressure_halt():
+            logger.warning("[Phase28:OOD] SKIPPED — memory pressure forecast critical.")
             return
         with self._heavy_job_gc("ood_refit"):
             self._ood_refit_inner()
@@ -4865,6 +5038,9 @@ class PipelineScheduler:
         """
         if self._walk_forward_frozen():
             logger.warning("[Phase28:Ensemble] SKIPPED — walk-forward freeze active.")
+            return
+        if self._memory_pressure_halt():
+            logger.warning("[Phase28:Ensemble] SKIPPED — memory pressure forecast critical.")
             return
         with self._heavy_job_gc("ensemble_refit"):
             try:

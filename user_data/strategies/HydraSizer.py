@@ -241,6 +241,21 @@ class HydraSizer(IStrategy):
 
         import time as _time
 
+        # Audit 2026-05-02 #11 fix: feed the predictive memory guardian
+        # from the strategy process too — scheduler-only sampling misses
+        # strategy-process leaks (and HydraSizer's ai_signal_cache + chart
+        # features are the heaviest strategy-side memory consumers). Cheap
+        # once-per-loop sample.
+        try:
+            if not hasattr(self, "_last_mem_tick_at"):
+                self._last_mem_tick_at = 0.0
+            if (_time.time() - self._last_mem_tick_at) >= 60.0:
+                from memory_sensor import tick as _mem_tick
+                _mem_tick()
+                self._last_mem_tick_at = _time.time()
+        except Exception as _ms_e:
+            logger.debug(f"[bot_loop_start] mem_sensor tick skipped: {_ms_e}")
+
         # D2 (2026-04-25): sweep fill-verification deadlines. Each
         # confirm_trade_entry seeds a 10-min deadline; here we check
         # whether an open trade actually exists for that pair (filled)
@@ -268,9 +283,20 @@ class HydraSizer(IStrategy):
                 except Exception:
                     open_by_side = {}
                 # AUDIT-2/Critic: list-copy so we can safely pop while iterating.
-                expired = [(k, dl) for k, dl in list(self._pending_fill_checks.items())
-                           if _time.time() >= dl]
-                for key, deadline in expired:
+                # Audit 2026-05-02 #2 fix: pending value is now (deadline,
+                # was_maker_at_entry) tuple so the microstructure learner
+                # records the ACTUAL maker/taker decision, not a hardcoded
+                # was_maker=True. Backward-compat: handle legacy bare-float
+                # values left over from before-restart deque carryover.
+                expired = []
+                for k, v in list(self._pending_fill_checks.items()):
+                    if isinstance(v, tuple):
+                        dl_v, was_maker_v = v[0], (v[1] if len(v) > 1 else True)
+                    else:
+                        dl_v, was_maker_v = float(v), True
+                    if _time.time() >= dl_v:
+                        expired.append((k, dl_v, was_maker_v))
+                for key, deadline, was_maker_at_entry in expired:
                     pair, side = key
                     amt = open_by_side.get((pair, side), 0.0)
                     filled = amt > 0
@@ -279,6 +305,25 @@ class HydraSizer(IStrategy):
                         circuit.record_order_attempt(pair, filled=filled, age_seconds=age)
                     except Exception:
                         pass
+                    # Audit 2026-05-02 #2 fix: was_maker reflects the actual
+                    # entry decision. Taker entries always fill so they
+                    # don't pollute the maker-fill EMA — and ExchangeMicro
+                    # structureLearner._refresh_taker_flag only updates
+                    # when was_maker=True (line 193-198), so taker fills
+                    # are now correctly excluded from the rolling rate.
+                    try:
+                        from exchange_microstructure_learner import (
+                            record_fill_attempt
+                        )
+                        record_fill_attempt(
+                            pair=pair, side=side,
+                            price=0.0,
+                            was_maker=bool(was_maker_at_entry),
+                            filled=filled,
+                            fill_time_seconds=age if filled else 0.0,
+                        )
+                    except Exception as _msl_e:
+                        logger.debug(f"[Microstructure] record skipped: {_msl_e}")
                     self._pending_fill_checks.pop(key, None)
                     # AUDIT-6: log rolling fill_rate so the operator sees
                     # convergence toward the 20% dormant threshold.
@@ -509,6 +554,19 @@ class HydraSizer(IStrategy):
                         sig["source"] = parsed["source"]
                     if parsed.get("trust_score") is not None:
                         sig["trust_score"] = parsed["trust_score"]
+                    # Audit 2026-05-02 #1 fix: feed RAG bias detector
+                    # from the parallel-fetch path too. This is the
+                    # bulk producer (~30-50 obs/cycle); without it the
+                    # bias histogram starves and consensus override
+                    # never engages.
+                    try:
+                        from signal_source_consensus import record_rag_observation
+                        record_rag_observation(
+                            float(sig.get("confidence", 0.0)),
+                            str(sig.get("signal", "NEUTRAL")),
+                        )
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"[bot_loop_start] Fetch failed for {p}: {e}")
             # Only cache if we got a real signal (POST with tech_data).
@@ -1093,6 +1151,19 @@ class HydraSizer(IStrategy):
                 if parsed.get("trust_score") is not None:
                     signal_data["trust_score"] = parsed["trust_score"]
                 logger.info(f"RAG Signal: {signal_data['signal']} ({signal_data['confidence']}) for {pair}")
+                # Sprint 2026-05-02: feed RAG observation to consensus
+                # bias detector. Tracks rolling histogram of RAG raw
+                # confidence values; when one bucket dominates >50%
+                # of recent samples, flags RAG as biased and the
+                # consensus override engages.
+                try:
+                    from signal_source_consensus import record_rag_observation
+                    record_rag_observation(
+                        float(signal_data["confidence"]),
+                        str(signal_data["signal"]),
+                    )
+                except Exception:
+                    pass
             else:
                 logger.warning(f"RAG service returned {response.status_code} for {pair}")
         except Exception as e:
@@ -1712,6 +1783,18 @@ class HydraSizer(IStrategy):
                         f"agree={mtf_agree_count}/2 required={mtf_required} "
                         f"verdict={mtf_agreement}"
                     )
+                # Audit 2026-05-02 #8 fix: persist canonical MTF state on
+                # ai_decision so SignalSourceConsensus can read the TRUE
+                # 4h/daily resampled trends instead of mis-deriving them
+                # from 1h ema_50/ema_200 (which approximate ~50h/200h
+                # trends, not 4h/daily).
+                ai_decision["mtf_state"] = {
+                    "trend_4h": trend_4h,
+                    "trend_daily": trend_daily,
+                    "agree_count": mtf_agree_count,
+                    "agreement": mtf_agreement,
+                    "required": mtf_required,
+                }
             except Exception as _mtf_e:
                 logger.debug(f"[MTF-Gate] {pair} agreement check failed: {_mtf_e}")
 
@@ -1744,6 +1827,36 @@ class HydraSizer(IStrategy):
                 geo = hyper_thr
             REAL_TRADE_THRESHOLD = max(env_floor, geo)
             shadow_floor = max(0.20, env_floor * 0.5)
+
+            # Sprint 2026-05-02: SignalSourceConsensus override.
+            # When RAG returned NEUTRAL/weak but 4+ of 6 signal sources
+            # (TP, MTF, VPIN, funding, Hurst) agree directionally, the
+            # consensus replaces RAG's verdict. Also detects RAG bias
+            # (rolling distribution mode > 50% on one value) and demotes
+            # RAG's weight in that case.
+            try:
+                from signal_source_consensus import compute_consensus
+                consensus = compute_consensus(pair, ai_decision, df)
+                if consensus.get("action") == "override":
+                    new_signal = consensus["consensus_signal"]
+                    new_conf = float(consensus["consensus_conf"])
+                    logger.info(
+                        f"[Consensus:Override] {pair} RAG={signal_type}/{confidence:.2f} → "
+                        f"{new_signal}/{new_conf:.2f} "
+                        f"(agreement={consensus['agreement']}/6, "
+                        f"sources_active={consensus['sources_active']}, "
+                        f"rag_biased={consensus['rag_bias_active']})"
+                    )
+                    signal_type = new_signal
+                    confidence = new_conf
+                    is_bullish = (signal_type == "BULLISH")
+                    is_bearish = (signal_type == "BEARISH")
+                    ai_decision["signal"] = signal_type
+                    ai_decision["confidence"] = confidence
+                    ai_decision["source"] = "CONSENSUS_OVERRIDE"
+                    ai_decision["consensus_breakdown"] = consensus.get("breakdown")
+            except Exception as _cons_e:
+                logger.debug(f"[Consensus] {pair} skipped: {_cons_e}")
 
             # Determine execution mode for logging.
             # Sprint 2026-05-01 night — MTF gate downgrades REAL→SHADOW
@@ -3031,6 +3144,25 @@ class HydraSizer(IStrategy):
                         f"Clamping."
                     )
                     realised_stake = envelope_cap
+                # Sprint 2026-05-02: Exchange-Aware Min-Notional Gate.
+                # If the resulting stake is below what Bybit will actually
+                # accept as a real order, downgrade to SHADOW (return 0
+                # so freqtrade aborts the entry). Avoids the $0.05 useless
+                # fill anti-pattern observed in TR-DRY production.
+                try:
+                    from exchange_microstructure_learner import (
+                        get_min_notional, passes_min_notional
+                    )
+                    min_notional = get_min_notional(pair)
+                    if not passes_min_notional(pair, realised_stake):
+                        logger.info(
+                            f"[MinNotional] {pair} stake ${realised_stake:.2f} < "
+                            f"exchange min ${min_notional:.2f} — DOWNGRADED to SHADOW "
+                            f"(no real order). Bot's conviction insufficient for venue."
+                        )
+                        return 0.0
+                except Exception as _mn_e:
+                    logger.debug(f"[MinNotional] {pair} gate skipped: {_mn_e}")
         except Exception as _envcap_e:
             logger.debug(f"[EnvelopeCap] {pair} cap check skipped: {_envcap_e}")
 
@@ -3163,9 +3295,22 @@ class HydraSizer(IStrategy):
         # bot_loop_start sweeps these and reports fill outcome to
         # PairCircuitBreaker so chronic limit-reject pairs flip dormant.
         # AUDIT-12: key by (pair, side) so hedge-mode does not collide.
+        # Audit 2026-05-02 #2 fix: capture the maker/taker decision AT
+        # ENTRY TIME so the sweep records it correctly (instead of
+        # hardcoding was_maker=True which oscillates the taker-flag
+        # self-flip in ExchangeMicrostructureLearner).
         try:
             import time as _tm_d2
-            self._pending_fill_checks[(pair, side)] = _tm_d2.time() + 600.0
+            entry_was_maker = True
+            try:
+                from exchange_microstructure_learner import should_use_maker
+                entry_was_maker = bool(should_use_maker(pair))
+            except Exception:
+                pass
+            self._pending_fill_checks[(pair, side)] = (
+                _tm_d2.time() + 600.0,
+                entry_was_maker,
+            )
         except Exception:
             pass
 
@@ -3584,6 +3729,18 @@ class HydraSizer(IStrategy):
             logger.info("[bot_start] Semantic cache ready.")
         except Exception as e:
             logger.warning(f"[bot_start] Semantic cache init failed: {e}")
+        # Sprint 2026-05-02: register the live CCXT exchange handle with
+        # ExchangeMicrostructureLearner so it can self-discover min_notional
+        # and other venue rules. Falls back gracefully if dataprovider not
+        # ready yet — first signal cycle will retry.
+        try:
+            from exchange_microstructure_learner import set_exchange_handle
+            ex_handle = getattr(self.dp, "_exchange", None) or getattr(self, "exchange", None)
+            if ex_handle is not None:
+                set_exchange_handle(ex_handle)
+                logger.info("[bot_start] Microstructure learner registered exchange handle.")
+        except Exception as e:
+            logger.debug(f"[bot_start] Microstructure init skipped: {e}")
         # Ensure protection_logs table exists for testnet data collection
         conn = self._get_sqlite_connection()
         if conn:
@@ -3981,13 +4138,27 @@ class HydraSizer(IStrategy):
                 logger.debug(f"[MarketMaker:Entry] {pair} skipped: {e}")
 
         # Sprint 2026-05-01 night — MAKER-ONLY pricing.
-        # Bybit fees: taker +0.06%, maker -0.01% (rebate). For round trips
-        # the difference is +0.14% per trade — over a year that's +12-15%
-        # of compounded capital saved. Place limit at bid - offset (long)
-        # or ask + offset (short) so the order rests as a maker. If it
-        # doesn't fill within the freqtrade unfilled timeout (10min entry,
-        # 30min exit per config), Freqtrade auto-cancels and the next
-        # candle re-enters via this same path.
+        # Sprint 2026-05-02: Adaptive maker/taker. ExchangeMicrostructure
+        # Learner observes per-pair × hour fill rates; when a pair shows
+        # < threshold maker fill rate over recent attempts, this method
+        # falls back to taker pricing AUTOMATICALLY for that pair.
+        # No human intervention — bot learns each venue's behavior.
+        try:
+            from exchange_microstructure_learner import should_use_maker
+            use_maker = should_use_maker(pair)
+        except Exception:
+            use_maker = True
+
+        if not use_maker:
+            # Microstructure learner says maker won't fill on this pair —
+            # use proposed_rate directly (taker fill, lose rebate but win
+            # the trade). Logged so operator sees adaptive behavior.
+            logger.info(
+                f"[MakerAdaptive] {pair} → TAKER (learner observed low maker "
+                f"fill rate; rebate sacrificed for fill probability)"
+            )
+            return proposed_rate
+
         try:
             from neural_organism import _p as _np_maker
             offset_bps = float(_np_maker("envelope.maker_only.offset_bps", 5.0))  # 5 bps = 0.05%
@@ -4056,13 +4227,56 @@ class HydraSizer(IStrategy):
     def custom_exit_price(self, pair: str, trade: 'Trade', current_time: datetime,
                           proposed_rate: float, current_profit: float,
                           exit_tag: str | None, **kwargs) -> float:
-        """Orderbook-aware exit pricing (Phase 22 #12)."""
+        """Orderbook-aware exit pricing (Phase 22 #12).
+
+        Sprint 2026-05-02: AdaptiveExitUrgency. The bot computes per-trade
+        urgency from profit, volatility, age, regime, and signal reversal.
+        High urgency → cross the spread (taker, immediate fill, save the
+        gain). Low urgency → place at maker price (capture rebate, wait).
+
+        This fixes the NAORIS pattern: a +3% ROI hit at 09:03 sat unfilled
+        as a maker until 11:48 then trailing-stop wiped the gain. With
+        urgency-aware routing, +3% profit + age >2h + non-trivial vol
+        → urgency >> threshold → taker exit fires fill immediately.
+        """
         try:
             from pair_circuit import get_pair_circuit
             if get_pair_circuit().is_dormant(pair):
                 return proposed_rate
         except Exception:
             pass
+
+        # Compute urgency
+        last_candle = None
+        regime = None
+        ai_sig = None
+        try:
+            df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if df is not None and len(df):
+                last_candle = df.iloc[-1].squeeze().to_dict()
+        except Exception:
+            pass
+        try:
+            cached = self.ai_signal_cache.get(pair, {})
+            ai_sig = cached.get("signal", "NEUTRAL")
+            regime = cached.get("regime")
+        except Exception:
+            pass
+        try:
+            from adaptive_exit_urgency import compute_urgency
+            urgency = compute_urgency(
+                trade, current_profit, last_candle, ai_sig, regime, current_time
+            )
+            use_taker = urgency.get("should_use_taker", False)
+            if use_taker:
+                logger.info(
+                    f"[ExitUrgency] {pair} TAKER — urgency={urgency['urgency_score']} "
+                    f"profit={current_profit:+.2%} dominant={urgency['dominant_factor']}"
+                )
+        except Exception as _u_e:
+            logger.debug(f"[ExitUrgency] {pair} skipped: {_u_e}")
+            use_taker = False
+
         try:
             ob = self.dp.orderbook(pair, 5)
             try:
@@ -4071,12 +4285,27 @@ class HydraSizer(IStrategy):
             except Exception:
                 pass
             if ob:
-                if not trade.is_short and ob.get('asks'):
-                    best_ask = ob['asks'][0][0]
-                    return max(proposed_rate, best_ask * 0.999)
-                elif trade.is_short and ob.get('bids'):
-                    best_bid = ob['bids'][0][0]
-                    return min(proposed_rate, best_bid * 1.001)
+                # When taker urgency triggered, cross the spread aggressively
+                # (place inside the opposite side). Otherwise stay passive
+                # at our own side for maker rebate.
+                if not trade.is_short and ob.get('asks') and ob.get('bids'):
+                    best_ask = float(ob['asks'][0][0])
+                    best_bid = float(ob['bids'][0][0])
+                    if use_taker:
+                        # Long exit: SELL aggressively at the bid (cross the spread)
+                        return min(proposed_rate, best_bid * 0.999)
+                    else:
+                        # Long exit: stay at ask (passive maker)
+                        return max(proposed_rate, best_ask * 0.999)
+                elif trade.is_short and ob.get('bids') and ob.get('asks'):
+                    best_bid = float(ob['bids'][0][0])
+                    best_ask = float(ob['asks'][0][0])
+                    if use_taker:
+                        # Short exit: BUY-back aggressively at the ask (cross spread)
+                        return max(proposed_rate, best_ask * 1.001)
+                    else:
+                        # Short exit: stay at bid (passive maker)
+                        return min(proposed_rate, best_bid * 1.001)
         except Exception:
             pass
         return proposed_rate
