@@ -131,7 +131,10 @@ def detect_rag_bias() -> Dict[str, Any]:
     cfg = _params()
     with _LOCK:
         history = list(_RAG_HISTORY)[-int(cfg["rag_bias_window"]):]
-    if len(history) < 20:
+    if len(history) < 5:
+        # Sprint 2026-05-04: cold-start floor lowered from 20→5
+        # so bias-detector engages quickly after restart, preventing
+        # RAG-default-0.225 from dominating consensus weighting.
         return {"biased": False, "n": len(history), "reason": "insufficient_data"}
     values = [h[1] for h in history]
     # Bucketize by tolerance

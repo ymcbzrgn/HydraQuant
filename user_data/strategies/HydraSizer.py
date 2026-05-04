@@ -1568,7 +1568,7 @@ class HydraSizer(IStrategy):
                 if isinstance(fear, dict):
                     tier = fear.get("tier", "normal")
                     fear_lvl = float(fear.get("fear_level", 0.0))
-                    if tier in ("PANIC", "EXTREME") or fear_lvl >= 2.0:
+                    if str(tier or "").lower() in ("panic", "extreme") or fear_lvl >= 2.0:
                         logger.info(
                             f"[T16:FearGate] {pair} SKIP — fear tier={tier} level={fear_lvl:.2f} "
                             f"(no new exposure under amygdala panic)"

@@ -253,8 +253,13 @@ class MarketOODDetector:
         #   3.0 → mult ≈ 0.10 (floor)
         if threshold > 1e-10:
             ratio = distance / threshold
+            # Sprint 2026-05-04: floor raised 0.10 → 0.50. Old setting let the
+            # OOD detector cut sizing by 90% on extreme distance, which combined
+            # with cortisol/streak multipliers and Platt-collapsed confidence
+            # routinely pushed final stake under min_notional → silent SHADOW.
+            # 0.50 floor keeps a usable channel even at high distance.
             defensive_multiplier = 1.0 / (1.0 + math.exp(3.0 * (ratio - 1.0)))
-            floor = float(_p("ood.defensive_floor", 0.10))
+            floor = float(_p("ood.defensive_floor", 0.50))
             defensive_multiplier = max(floor, min(1.0, defensive_multiplier))
         else:
             defensive_multiplier = 1.0

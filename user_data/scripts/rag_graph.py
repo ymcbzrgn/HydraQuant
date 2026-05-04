@@ -2437,15 +2437,62 @@ if __name__ == "__main__":
         import gc
         import threading
 
-        # Periodic GC daemon — forces garbage collection every 5 min
-        # Prevents glibc memory fragmentation from making RSS grow indefinitely
+        # Sprint 2026-05-04: replaced 5-min GC-only daemon with 60-sec
+        # GC + glibc malloc_trim purge. Prior version leaked arenas →
+        # 236 OOM-kills in the boot before 2026-05-03 21:13 power-off.
+        # Mirrors scheduler.py memory_cleanup loop so RAG actively
+        # returns memory to the kernel instead of holding fragmented arenas.
         def _gc_daemon():
             import time as _time
+            import ctypes
+            import os as _os
+
+            # Try glibc malloc_trim — the canonical way to release
+            # unused arena memory back to the OS. Returns 1 if anything
+            # was released, 0 otherwise.
+            _libc = None
+            try:
+                _libc = ctypes.CDLL("libc.so.6")
+                _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+                _libc.malloc_trim.restype = ctypes.c_int
+            except Exception as _e:
+                logger.warning(f"[RAG-MemCleanup] libc.malloc_trim unavailable: {_e}")
+                _libc = None
+
+            def _rss_mb():
+                try:
+                    with open(f"/proc/{_os.getpid()}/status") as _f:
+                        for _ln in _f:
+                            if _ln.startswith("VmRSS:"):
+                                return int(_ln.split()[1]) / 1024.0
+                except Exception:
+                    return -1.0
+                return -1.0
+
+            _last_log_rss = -1.0
             while True:
-                _time.sleep(300)
-                collected = gc.collect()
-                if collected:
-                    logger.info(f"[GC] Collected {collected} objects")
+                _time.sleep(60)
+                try:
+                    rss_before = _rss_mb()
+                    collected_g0 = gc.collect(0)
+                    collected_g2 = gc.collect(2)
+                    trim_ok = False
+                    if _libc is not None:
+                        try:
+                            trim_ok = bool(_libc.malloc_trim(0))
+                        except Exception:
+                            pass
+                    rss_after = _rss_mb()
+                    delta = rss_before - rss_after
+                    # Only log when something actually happened OR every ~5 min
+                    if (collected_g0 + collected_g2) > 0 or trim_ok or abs(rss_after - _last_log_rss) > 50:
+                        logger.info(
+                            f"[RAG-MemCleanup] g0={collected_g0} g2={collected_g2} "
+                            f"trim={trim_ok} rss={rss_after:.0f}MB Δ={delta:+.0f}MB"
+                        )
+                        _last_log_rss = rss_after
+                except Exception as _gc_e:
+                    logger.warning(f"[RAG-MemCleanup] tick failed: {_gc_e}")
 
         gc_thread = threading.Thread(target=_gc_daemon, daemon=True)
         gc_thread.start()

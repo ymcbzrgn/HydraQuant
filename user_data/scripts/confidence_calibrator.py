@@ -166,6 +166,17 @@ class ConfidenceCalibrator:
         Calibrate raw AI confidence using Platt scaling.
         If not calibrated yet or Brier >= 0.25, returns raw confidence unchanged.
         """
+        # Sprint 2026-05-04 EMERGENCY: Platt scaling fitted with imbalanced
+        # win/loss data (consec_losses=5) collapsed every raw 0.40-0.60 confidence
+        # to ≈0.08-0.10 → all signals SHADOW_WEAK → no new trades → calibrator
+        # never sees fresh wins → loop tightens. Bypass until trade flow resumes
+        # and balanced training data exists. Re-enable via param "calibrator.bypass=0".
+        try:
+            if float(_p("calibrator.bypass", 1.0)) >= 0.5:
+                return raw_confidence
+        except Exception:
+            return raw_confidence
+
         # Phase 21: If Brier check already disabled calibration, pass through without re-fitting
         if self._brier_disabled:
             return raw_confidence
