@@ -673,10 +673,13 @@ def init_db():
         # Replaces legacy single-row bayesian_kelly. Every (pair, regime) has
         # its own Beta posterior + vol drag + vol-of-vol inputs for the
         # 7-step sizing pipeline in position_sizer.py.
+        # Sprint 2026-05-05 (B-CONNECT C1): `side` column splits long vs short
+        # Beta posteriors. Live migration handled by position_sizer._ensure_schema.
         c.execute('''CREATE TABLE IF NOT EXISTS bayesian_kelly_per_pair (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pair TEXT NOT NULL,
             regime TEXT NOT NULL DEFAULT '_global',
+            side TEXT NOT NULL DEFAULT '_any',
             alpha REAL DEFAULT 2.0,
             beta_param REAL DEFAULT 2.0,
             avg_win REAL DEFAULT 0.0,
@@ -686,9 +689,9 @@ def init_db():
             vol_of_vol REAL,
             last_sharpe REAL,
             updated_at TEXT,
-            UNIQUE(pair, regime))''')
+            UNIQUE(pair, regime, side))''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_per_pair
-            ON bayesian_kelly_per_pair(pair, regime)''')
+            ON bayesian_kelly_per_pair(pair, regime, side)''')
 
         # EK Sprint 2026-04-23: shadow ledger. Same schema as the real one
         # but only updated by the forgone-feedback scheduler job. Live
@@ -697,6 +700,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pair TEXT NOT NULL,
             regime TEXT NOT NULL DEFAULT '_global',
+            side TEXT NOT NULL DEFAULT '_any',
             alpha REAL DEFAULT 2.0,
             beta_param REAL DEFAULT 2.0,
             avg_win REAL DEFAULT 0.0,
@@ -706,9 +710,9 @@ def init_db():
             vol_of_vol REAL,
             last_sharpe REAL,
             updated_at TEXT,
-            UNIQUE(pair, regime))''')
+            UNIQUE(pair, regime, side))''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_bk_shadow_per_pair
-            ON bayesian_kelly_shadow_per_pair(pair, regime)''')
+            ON bayesian_kelly_shadow_per_pair(pair, regime, side)''')
 
         # Phase 27 Fix 2C (J4 Ajani): Argument quality scoring — each agent's
         # argument patterns (regex-bucketed) get win-rate + avg PnL tracked so

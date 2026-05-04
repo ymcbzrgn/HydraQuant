@@ -90,11 +90,58 @@ class PairCircuitBreaker:
             return slot
 
     def is_dormant(self, pair: str) -> bool:
+        # 1. Exchange-level dormancy (orderbook empty, fill failure, etc.)
         with self._lock:
             slot = self._slots.get(pair)
-        if slot is None:
+        if slot is not None and time.time() < slot.blacklisted_until:
+            return True
+        # 2. Sprint 2026-05-05 (B-CONNECT C3): PnL-axis dormancy.
+        # If BOTH long and short Beta posteriors are at the Kelly floor
+        # AND we have enough samples to trust the verdict, the pair has
+        # no structural edge in either direction → dormant. Catches the
+        # BTC/ETH-style "fills perfectly but bleeds money" failure mode
+        # that exchange-level checks cannot see.
+        try:
+            return self._is_pnl_dormant(pair)
+        except Exception:
             return False
-        return time.time() < slot.blacklisted_until
+
+    def _is_pnl_dormant(self, pair: str) -> bool:
+        """PnL-axis dormancy via Beta posterior Kelly fraction.
+
+        Returns True ONLY if BOTH long and short directions have
+        sufficient samples AND Kelly fraction at floor (no edge).
+        Single-direction edge keeps the pair active so the bot can
+        still profit from one side (BTC SHORT was +469 USDT in the
+        2026-05-04 forensic audit — must not freeze the entire pair).
+        """
+        try:
+            from position_sizer import get_real_kelly
+        except Exception:
+            return False
+        kelly = get_real_kelly()
+
+        floor_threshold = 0.005
+        min_samples = 30
+
+        long_stats = kelly._load_pair(pair, regime="_global", side="long")
+        short_stats = kelly._load_pair(pair, regime="_global", side="short")
+        long_n = int(long_stats.get("n_trades", 0))
+        short_n = int(short_stats.get("n_trades", 0))
+
+        if (long_n + short_n) < min_samples:
+            return False
+
+        long_active = (long_n < min_samples) or (
+            kelly.kelly_fraction(pair=pair, regime="_global", side="long")
+            > floor_threshold
+        )
+        short_active = (short_n < min_samples) or (
+            kelly.kelly_fraction(pair=pair, regime="_global", side="short")
+            > floor_threshold
+        )
+
+        return not (long_active or short_active)
 
     def status(self, pair: str) -> Dict[str, float]:
         with self._lock:

@@ -104,32 +104,97 @@ class BayesianKelly:
     def _ensure_schema(self, conn) -> None:
         """Idempotent with db.py — mirrors the per-pair Beta posterior schema.
         Used for both the real and shadow ledgers; the table name is chosen
-        by the constructor."""
+        by the constructor.
+
+        Sprint 2026-05-05 (B-CONNECT C1): adds `side` column to separate
+        long vs short Beta posteriors. Live migration: existing rows are
+        labelled side='_any' and a backup copy is kept under
+        `{table}_pre_side_v1`. New rows must use side='long'/'short'.
+        """
         if self._table_ready:
             return
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {self.table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pair TEXT NOT NULL,
-                regime TEXT NOT NULL DEFAULT '_global',
-                alpha REAL DEFAULT 2.0,
-                beta_param REAL DEFAULT 2.0,
-                avg_win REAL DEFAULT 0.0,
-                avg_loss REAL DEFAULT 0.0,
-                n_trades INTEGER DEFAULT 0,
-                annual_volatility REAL,
-                vol_of_vol REAL,
-                last_sharpe REAL,
-                updated_at TEXT,
-                UNIQUE(pair, regime)
+
+        # Detect existing schema
+        cur = conn.execute(f"PRAGMA table_info({self.table_name})")
+        cols = {row[1] for row in cur.fetchall()}
+
+        if not cols:
+            # Fresh install — create new schema directly
+            conn.execute(
+                f"""
+                CREATE TABLE {self.table_name} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    regime TEXT NOT NULL DEFAULT '_global',
+                    side TEXT NOT NULL DEFAULT '_any',
+                    alpha REAL DEFAULT 2.0,
+                    beta_param REAL DEFAULT 2.0,
+                    avg_win REAL DEFAULT 0.0,
+                    avg_loss REAL DEFAULT 0.0,
+                    n_trades INTEGER DEFAULT 0,
+                    annual_volatility REAL,
+                    vol_of_vol REAL,
+                    last_sharpe REAL,
+                    updated_at TEXT,
+                    UNIQUE(pair, regime, side)
+                )
+                """
             )
-            """
-        )
+        elif "side" not in cols:
+            # Live migration — rename old, create new, copy with side='_any'
+            backup_name = f"{self.table_name}_pre_side_v1"
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {backup_name}")
+                conn.execute(
+                    f"ALTER TABLE {self.table_name} RENAME TO {backup_name}"
+                )
+                conn.execute(
+                    f"""
+                    CREATE TABLE {self.table_name} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        pair TEXT NOT NULL,
+                        regime TEXT NOT NULL DEFAULT '_global',
+                        side TEXT NOT NULL DEFAULT '_any',
+                        alpha REAL DEFAULT 2.0,
+                        beta_param REAL DEFAULT 2.0,
+                        avg_win REAL DEFAULT 0.0,
+                        avg_loss REAL DEFAULT 0.0,
+                        n_trades INTEGER DEFAULT 0,
+                        annual_volatility REAL,
+                        vol_of_vol REAL,
+                        last_sharpe REAL,
+                        updated_at TEXT,
+                        UNIQUE(pair, regime, side)
+                    )
+                    """
+                )
+                conn.execute(
+                    f"""
+                    INSERT INTO {self.table_name}
+                        (pair, regime, side, alpha, beta_param, avg_win, avg_loss,
+                         n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at)
+                    SELECT pair, regime, '_any', alpha, beta_param, avg_win, avg_loss,
+                           n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at
+                    FROM {backup_name}
+                    """
+                )
+                logger.warning(
+                    f"[BayesianKelly:migration] {self.table_name} migrated to "
+                    f"side-aware schema (existing rows → side='_any', backup at {backup_name})"
+                )
+            except Exception as exc:
+                logger.error(
+                    f"[BayesianKelly:migration] {self.table_name} migration failed: {exc}"
+                )
+                raise
+        # else: schema already has side column → no-op
+
+        # Index — drop legacy, create side-aware
         idx_name = f"idx_bk_{self.table_name}"
+        conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
         conn.execute(
-            f"CREATE INDEX IF NOT EXISTS {idx_name} "
-            f"ON {self.table_name}(pair, regime)"
+            f"CREATE INDEX {idx_name} "
+            f"ON {self.table_name}(pair, regime, side)"
         )
         conn.commit()
         self._table_ready = True
@@ -146,8 +211,15 @@ class BayesianKelly:
             "last_sharpe": None,
         }
 
-    def _load_pair(self, pair: str, regime: str = "_global") -> Dict[str, Any]:
-        """Load row for (pair, regime). Returns informative prior if no row exists."""
+    def _load_pair(self, pair: str, regime: str = "_global",
+                   side: str = "_any") -> Dict[str, Any]:
+        """Load row for (pair, regime, side). Returns informative prior if no row exists.
+
+        Sprint 2026-05-05 (B-CONNECT C1): `side` separates long vs short
+        Beta posteriors. Default '_any' preserves backward compat for callers
+        that have not yet been side-aware. New writes from HydraSizer must
+        pass side='long' or side='short'.
+        """
         if not pair:
             raise ValueError("BayesianKelly: pair is required (Prensip 0).")
         with self._conn() as conn:
@@ -155,26 +227,46 @@ class BayesianKelly:
             row = conn.execute(
                 f"SELECT alpha, beta_param, avg_win, avg_loss, n_trades, "
                 f"annual_volatility, vol_of_vol, last_sharpe "
-                f"FROM {self.table_name} WHERE pair = ? AND regime = ?",
-                (pair, regime),
+                f"FROM {self.table_name} "
+                f"WHERE pair = ? AND regime = ? AND side = ?",
+                (pair, regime, side),
             ).fetchone()
         if row is None:
+            # Fallback to '_any' bucket if side-specific row absent — gives
+            # a warm prior carried over from pre-migration data.
+            if side != "_any":
+                with self._conn() as conn:
+                    fallback = conn.execute(
+                        f"SELECT alpha, beta_param, avg_win, avg_loss, n_trades, "
+                        f"annual_volatility, vol_of_vol, last_sharpe "
+                        f"FROM {self.table_name} "
+                        f"WHERE pair = ? AND regime = ? AND side = '_any'",
+                        (pair, regime),
+                    ).fetchone()
+                if fallback is not None:
+                    return {k: fallback[k] for k in fallback.keys()}
             return self._default_row()
         return {k: row[k] for k in row.keys()}
 
     # ─── Mutation ──────────────────────────────────────────────────────────
 
     def update(self, won: bool, pnl_pct: float = 0.0,
-               pair: Optional[str] = None, regime: str = "_global") -> None:
+               pair: Optional[str] = None, regime: str = "_global",
+               side: str = "_any") -> None:
         """Update per-pair Beta posterior with decay after a trade completes.
 
         DECAY=0.98 shrinks old evidence so α+β does not grow unbounded.
         Without decay, after 1000 trades α≈850 → new trades are invisible.
+
+        Sprint 2026-05-05 (B-CONNECT C1): `side` keys long vs short separately
+        so the BTC LONG losing/SHORT winning asymmetry visible in the
+        2026-05-04 forensic audit (1387 LONG = -223 USDT vs 170 SHORT = +469
+        USDT) no longer averages into a single posterior.
         """
         if not pair:
             raise ValueError("BayesianKelly.update: pair is required (Prensip 0).")
 
-        stats = self._load_pair(pair, regime)
+        stats = self._load_pair(pair, regime, side)
 
         alpha = max(1.0, float(stats["alpha"]) * _DECAY)
         beta_p = max(1.0, float(stats["beta_param"]) * _DECAY)
@@ -211,10 +303,10 @@ class BayesianKelly:
             conn.execute(
                 f"""
                 INSERT INTO {self.table_name}
-                    (pair, regime, alpha, beta_param, avg_win, avg_loss,
+                    (pair, regime, side, alpha, beta_param, avg_win, avg_loss,
                      n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pair, regime) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pair, regime, side) DO UPDATE SET
                     alpha = excluded.alpha,
                     beta_param = excluded.beta_param,
                     avg_win = excluded.avg_win,
@@ -223,7 +315,7 @@ class BayesianKelly:
                     updated_at = excluded.updated_at
                 """,
                 (
-                    pair, regime, alpha, beta_p, avg_win, avg_loss, n_trades,
+                    pair, regime, side, alpha, beta_p, avg_win, avg_loss, n_trades,
                     stats.get("annual_volatility"), stats.get("vol_of_vol"),
                     stats.get("last_sharpe"), now,
                 ),
@@ -255,6 +347,7 @@ class BayesianKelly:
         return n
 
     def set_pair_stats(self, pair: str, regime: str = "_global",
+                       side: str = "_any",
                        alpha: float = _PRIOR_ALPHA, beta_param: float = _PRIOR_BETA,
                        avg_win: float = 0.0, avg_loss: float = 0.0,
                        n_trades: int = 0,
@@ -271,10 +364,10 @@ class BayesianKelly:
             conn.execute(
                 f"""
                 INSERT INTO {self.table_name}
-                    (pair, regime, alpha, beta_param, avg_win, avg_loss,
+                    (pair, regime, side, alpha, beta_param, avg_win, avg_loss,
                      n_trades, annual_volatility, vol_of_vol, last_sharpe, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pair, regime) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pair, regime, side) DO UPDATE SET
                     alpha = excluded.alpha,
                     beta_param = excluded.beta_param,
                     avg_win = excluded.avg_win,
@@ -285,7 +378,7 @@ class BayesianKelly:
                     last_sharpe = excluded.last_sharpe,
                     updated_at = excluded.updated_at
                 """,
-                (pair, regime, alpha, beta_param, avg_win, avg_loss, n_trades,
+                (pair, regime, side, alpha, beta_param, avg_win, avg_loss, n_trades,
                  annual_volatility, vol_of_vol, last_sharpe, now),
             )
             conn.commit()
@@ -293,17 +386,19 @@ class BayesianKelly:
     # ─── Read (Kelly math) ─────────────────────────────────────────────────
 
     def win_probability(self, pair: Optional[str] = None,
-                        regime: str = "_global") -> float:
+                        regime: str = "_global",
+                        side: str = "_any") -> float:
         """Beta posterior mean: p = α/(α+β)."""
         if not pair:
             raise ValueError("BayesianKelly.win_probability: pair is required.")
-        stats = self._load_pair(pair, regime)
+        stats = self._load_pair(pair, regime, side)
         a = float(stats["alpha"])
         b = float(stats["beta_param"])
         return a / (a + b)
 
     def kelly_fraction(self, pair: Optional[str] = None,
-                       regime: str = "_global") -> float:
+                       regime: str = "_global",
+                       side: str = "_any") -> float:
         """Raw Kelly with sanity cap (0.25). Used by calculate_stake_fraction.
 
         For the full E1 7-step pipeline with vol drag, Baker-McHale, graduation,
@@ -311,7 +406,7 @@ class BayesianKelly:
         """
         if not pair:
             raise ValueError("BayesianKelly.kelly_fraction: pair is required.")
-        stats = self._load_pair(pair, regime)
+        stats = self._load_pair(pair, regime, side)
         a = float(stats["alpha"])
         b = float(stats["beta_param"])
         p = a / (a + b)
@@ -463,7 +558,8 @@ class PositionSizer:
         self.autonomy = AutonomyManager()
         self.bayesian_kelly = BayesianKelly()
 
-    def _effective_max_risk(self, pair: str, regime: str = "_global") -> float:
+    def _effective_max_risk(self, pair: str, regime: str = "_global",
+                            side: str = "_any") -> float:
         # RE-4 (2026-04-25): max_risk is now envelope-driven. The static
         # field `self.max_risk` survives as a hyperopt knob and as a hard
         # ceiling — envelope can only LOWER it, never raise above it.
@@ -475,7 +571,7 @@ class PositionSizer:
             effective_max_risk = self.max_risk
 
         kelly_autonomy = self.autonomy.get_kelly_fraction()
-        kelly_bayesian = self.bayesian_kelly.kelly_fraction(pair, regime)
+        kelly_bayesian = self.bayesian_kelly.kelly_fraction(pair, regime, side)
         # Mega Sprint 2026-04-23 (B.2): Kelly floor lifted from 0.5% → 1.5%.
         floor = float(_p("sizing.kelly_floor_fraction", 0.015))
         return min(effective_max_risk, kelly_autonomy, max(kelly_bayesian, floor))
@@ -483,7 +579,8 @@ class PositionSizer:
     def calculate_stake_fraction(self, confidence: float,
                                  pair: Optional[str] = None,
                                  regime: str = "_global",
-                                 current_regime_modifier: float = 1.0) -> float:
+                                 current_regime_modifier: float = 1.0,
+                                 side: str = "_any") -> float:
         """Fraction of proposed stake to use for this trade.
 
         Args:
@@ -502,7 +599,7 @@ class PositionSizer:
             )
 
         trust_curve_multiplier = math.pow(max(confidence, 0.01), self.exponent)
-        effective_risk = self._effective_max_risk(pair, regime)
+        effective_risk = self._effective_max_risk(pair, regime, side)
         fraction = effective_risk * trust_curve_multiplier * current_regime_modifier
 
         min_fraction = effective_risk * _p("sizing.min_fraction_mult", 0.01)

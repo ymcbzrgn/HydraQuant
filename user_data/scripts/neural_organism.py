@@ -225,6 +225,25 @@ PARAM_REGISTRY: Dict[str, dict] = {
     # ─── ORGAN: strategy_exit (8 params) — HydraSizer.py:1449-1498 ───
     "strategy.stale_trade_hours":     {"organ": "strategy_exit", "default": 8,    "min": 4,    "max": 24},
     "strategy.stale_flat_pct":        {"organ": "strategy_exit", "default": 0.005, "min": 0.001, "max": 0.02},
+    # Sprint 2026-05-05 (B-CONNECT C2): regime-aware stale window. Trending
+    # markets need wider patience (24h) — momentum trades take longer to
+    # reach ROI. Ranging/choppy/high_vol cut faster (4-8h) — flat trades
+    # in choppy markets just bleed fees. Neural BCM+STDP credit assignment
+    # adapts these per regime from trade outcomes.
+    "strategy.stale_hours.trending_bull": {"organ": "strategy_exit", "default": 24, "min": 8,  "max": 48},
+    "strategy.stale_hours.trending_bear": {"organ": "strategy_exit", "default": 24, "min": 8,  "max": 48},
+    "strategy.stale_hours.ranging":       {"organ": "strategy_exit", "default": 6,  "min": 3,  "max": 18},
+    "strategy.stale_hours.choppy":        {"organ": "strategy_exit", "default": 8,  "min": 4,  "max": 24},
+    "strategy.stale_hours.high_vol":      {"organ": "strategy_exit", "default": 4,  "min": 2,  "max": 12},
+    # Sprint 2026-05-05 (B-CONNECT C4): cortisol → stop-mult coupling.
+    # Old hardcoded formula was `mult *= (2 − cortisol)` so panic widened
+    # stops to 1.5×. Combined with sizer shrinking position to 70% under
+    # panic, net dollar exposure ≈ 1.05× baseline — defeated the
+    # protective intent. New formula: factor = min + slope*cortisol so
+    # panic TIGHTENS (calm=1.0 → factor=min+slope, panic=0.5 → factor<1.0).
+    # Defaults symmetric with sizer behavior; neural BCM+STDP can adapt.
+    "strategy.cortisol_stop_min":         {"organ": "stop_coupling", "default": 0.70, "min": 0.50, "max": 1.00},
+    "strategy.cortisol_stop_slope":       {"organ": "stop_coupling", "default": 0.30, "min": 0.00, "max": 0.60},
     "strategy.flip_exit_conf":        {"organ": "strategy_exit", "default": 0.55, "min": 0.40, "max": 0.70},
     "strategy.conf_degrade_exit":     {"organ": "strategy_exit", "default": 0.30, "min": 0.15, "max": 0.50},
     "strategy.first_hour_atr_mult":   {"organ": "strategy_exit", "default": 2.5,  "min": 1.5,  "max": 4.0},
@@ -538,9 +557,15 @@ PARAM_REGISTRY: Dict[str, dict] = {
     "strategy.trailing_pnl_high":     {"organ": "strategy_trailing", "default": 0.06, "min": 0.04, "max": 0.15},
     "strategy.trailing_pnl_med":      {"organ": "strategy_trailing", "default": 0.03, "min": 0.02, "max": 0.08},
     "strategy.trailing_pnl_low":      {"organ": "strategy_trailing", "default": 0.01, "min": 0.005, "max": 0.04},
-    "strategy.trailing_atr_high":     {"organ": "strategy_trailing", "default": 1.0, "min": 0.3, "max": 1.8},
-    "strategy.trailing_atr_med":      {"organ": "strategy_trailing", "default": 1.3, "min": 0.8, "max": 2.2},
-    "strategy.trailing_atr_low":      {"organ": "strategy_trailing", "default": 1.6, "min": 1.0, "max": 2.8},
+    # Sprint 2026-05-05 (K1-K3): trailing tier defaults widened. Old _high=1.0
+    # forced stops to 1.0×ATR at PnL≥15% which caused 362 premature trailing
+    # stop-outs (-1891 USDT in 2026-05-04 audit). New defaults give winners
+    # more breathing room; min ranges raised so neural BCM cannot drift back
+    # into the over-tight zone that hyperopt found locally optimal but
+    # globally toxic.
+    "strategy.trailing_atr_high":     {"organ": "strategy_trailing", "default": 1.4, "min": 0.8, "max": 2.0},
+    "strategy.trailing_atr_med":      {"organ": "strategy_trailing", "default": 1.7, "min": 1.2, "max": 2.5},
+    "strategy.trailing_atr_low":      {"organ": "strategy_trailing", "default": 2.0, "min": 1.4, "max": 3.0},
 
     # ─── ORGAN: strategy_dca (~8 params) — HydraSizer.py:1620-1685 ───
     "strategy.dca_max_entries":       {"organ": "strategy_dca", "default": 4, "min": 1, "max": 8},

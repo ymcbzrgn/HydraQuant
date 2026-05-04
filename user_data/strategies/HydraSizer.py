@@ -2342,10 +2342,19 @@ class HydraSizer(IStrategy):
         try:
             from neural_organism import get_organism
             cortisol = float(get_organism().hormones.cortisol)
-            # cortisol ∈ [0.5, 1.0] in code convention (1.0 calm / 0.5 stressed)
-            # factor = (2 − cortisol): calm → 1.0, stressed → 1.5 (widen).
-            mult *= (2.0 - max(0.5, min(1.0, cortisol)))
-            mult = max(1.0, min(5.0, mult))  # safety clamp
+            # Sprint 2026-05-05 (B-CONNECT C4): PARAM-driven cortisol-stop
+            # coupling that TIGHTENS under panic (was: widened, defeating
+            # protective intent — see audit 2026-05-04). cortisol ∈ [0.5,1.0],
+            # factor = min + slope * cortisol so panic shrinks dollar exposure
+            # symmetric with sizer. Neural BCM+STDP adapts both knobs.
+            cs_min = float(_np("strategy.cortisol_stop_min", 0.70))
+            cs_slope = float(_np("strategy.cortisol_stop_slope", 0.30))
+            cortisol_clamped = max(0.5, min(1.0, cortisol))
+            factor = cs_min + cs_slope * cortisol_clamped
+            # Hard guard: factor ∈ [0.5, 1.5] regardless of param drift
+            factor = max(0.5, min(1.5, factor))
+            mult *= factor
+            mult = max(0.5, min(5.0, mult))  # safety clamp (lowered floor for tighten)
         except Exception:
             pass
 
@@ -2562,7 +2571,7 @@ class HydraSizer(IStrategy):
             # Phase 27 Task 1: pair is REQUIRED so per-pair Kelly (not the old global Kelly) drives sizing.
             regime_for_kelly = ai_decision.get("regime") or "_global"
             fraction = self._position_sizer.calculate_stake_fraction(
-                confidence, pair=pair, regime=regime_for_kelly
+                confidence, pair=pair, regime=regime_for_kelly, side=side
             )
 
             # Let it scale down to "dust" sizes if confidence is terribly low
@@ -2606,7 +2615,12 @@ class HydraSizer(IStrategy):
             cerebellum_mult = 1.0
             try:
                 from cerebellum_timing import get_cerebellum
-                cerebellum_mult = float(get_cerebellum().get_timing_multiplier())
+                # Sprint 2026-05-05 (B-CONNECT C5): pair-aware timing
+                # multiplier — falls back to global when per-pair sample
+                # count < MIN_TRADES_PER_SLOT (5).
+                cerebellum_mult = float(
+                    get_cerebellum().get_timing_multiplier(pair=pair)
+                )
             except Exception as e:
                 logger.debug(f"[Sprint2:Cerebellum] timing skipped: {e}")
 
@@ -3378,13 +3392,20 @@ class HydraSizer(IStrategy):
                 or trade.get_custom_data("entry_regime")
                 or "_global"
             )
+            # Sprint 2026-05-05 (B-CONNECT C1): side-aware Beta posterior.
+            side_for_kelly = "short" if trade.is_short else "long"
             self._bayesian_kelly.update(
-                won=won, pnl_pct=pnl_pct, pair=pair, regime=regime_for_exit
+                won=won, pnl_pct=pnl_pct, pair=pair,
+                regime=regime_for_exit, side=side_for_kelly,
             )
-            wp = self._bayesian_kelly.win_probability(pair=pair, regime=regime_for_exit)
-            kf = self._bayesian_kelly.kelly_fraction(pair=pair, regime=regime_for_exit)
+            wp = self._bayesian_kelly.win_probability(
+                pair=pair, regime=regime_for_exit, side=side_for_kelly,
+            )
+            kf = self._bayesian_kelly.kelly_fraction(
+                pair=pair, regime=regime_for_exit, side=side_for_kelly,
+            )
             logger.info(
-                f"[BayesianKelly:{pair}/{regime_for_exit}] Updated: "
+                f"[BayesianKelly:{pair}/{regime_for_exit}/{side_for_kelly}] Updated: "
                 f"{'WIN' if won else 'LOSS'} pnl={pnl_pct:.4f} → "
                 f"win_p={wp:.3f} kelly_f={kf:.4f}"
             )
@@ -3946,9 +3967,29 @@ class HydraSizer(IStrategy):
         if age_days > 14.0:
             return f"age_14d_reversal_{age_days:.1f}d"
 
-        # 1. STALE TRADE
-        if hours_held > self.stale_trade_hours.value and abs(current_profit) < 0.005:
-            return f"stale_{hours_held:.0f}h_flat"
+        # 1. STALE TRADE — Sprint 2026-05-05 (B-CONNECT C2): regime-aware.
+        # Trending markets get wider patience (24h default), ranging/choppy
+        # get cut faster (4-8h). Read PARAM_REGISTRY per detected regime;
+        # neural BCM+STDP adapts these from trade outcomes over time.
+        cached_for_stale = self.ai_signal_cache.get(pair, {})
+        regime_for_stale = (
+            cached_for_stale.get("regime")
+            or trade.get_custom_data("entry_regime")
+            or "_global"
+        )
+        _stale_hours_map = {
+            "trending_bull": _np("strategy.stale_hours.trending_bull", 24),
+            "trending_bear": _np("strategy.stale_hours.trending_bear", 24),
+            "ranging":       _np("strategy.stale_hours.ranging", 6),
+            "choppy":        _np("strategy.stale_hours.choppy", 8),
+            "high_vol":      _np("strategy.stale_hours.high_vol", 4),
+        }
+        stale_hr = _stale_hours_map.get(
+            regime_for_stale, float(self.stale_trade_hours.value)
+        )
+        stale_pct = float(_np("strategy.stale_flat_pct", 0.005))
+        if hours_held > stale_hr and abs(current_profit) < stale_pct:
+            return f"stale_{hours_held:.0f}h_flat_{regime_for_stale}"
 
         # 2. SIGNAL REVERSAL
         cached = self.ai_signal_cache.get(pair, {})
@@ -4425,8 +4466,10 @@ class HydraSizer(IStrategy):
                 regime_for_dca = cached.get("regime") or "_global"
                 # Gate 1: per-pair Bayesian Kelly — 0 means "this pair / regime
                 # has structurally negative edge right now, no more capital".
+                # Sprint 2026-05-05 (B-CONNECT C1): side-aware Kelly for DCA decisions.
+                side_for_dca = "short" if trade.is_short else "long"
                 kelly_dca = self._position_sizer.bayesian_kelly.kelly_fraction(
-                    pair=trade.pair, regime=regime_for_dca
+                    pair=trade.pair, regime=regime_for_dca, side=side_for_dca,
                 )
                 if kelly_dca <= 0.005:
                     self._emit_dca_gate(

@@ -42,29 +42,38 @@ MAX_TIMING_MULT = 1.3   # Best hours get 130% sizing
 
 
 class CerebellumTiming:
-    """24-hour performance optimizer — the organism's timing center."""
+    """24-hour performance optimizer — the organism's timing center.
+
+    Sprint 2026-05-05 (B-CONNECT C5): pair-aware grid. _hour_stats keys
+    are now (pair_or_None, hour). pair=None entries hold the global
+    cross-pair view (backward-compatible default), and per-pair entries
+    only contribute when the pair has ≥ MIN_TRADES_PER_SLOT samples in
+    that hour bucket. Falls back to global multiplier otherwise so
+    sparsely-traded pairs do not get jittered by 1-2 datapoints.
+    """
 
     def __init__(self):
-        self._hour_stats: Dict[int, Dict] = {}  # hour → {wins, losses, pnl_sum, count}
-        self._sizing_multipliers: Dict[int, float] = {}
+        # Key: Tuple[Optional[str], int]  — (pair or None, hour)
+        self._hour_stats: Dict = {}
+        self._sizing_multipliers: Dict = {}
         self._last_update = None
         init_db()
 
     def update_from_trades(self, lookback_days: int = 30):
-        """Update hourly statistics from trade history."""
+        """Update hourly statistics from trade history (per-pair + global)."""
         conn = get_db_connection(AI_DB_PATH)
         try:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
 
             rows = conn.execute("""
-                SELECT timestamp, outcome_pnl
+                SELECT pair, timestamp, outcome_pnl
                 FROM ai_decisions
                 WHERE outcome_pnl IS NOT NULL AND timestamp >= ?
                 ORDER BY timestamp ASC
             """, (cutoff,)).fetchall()
 
-            # Reset stats
-            self._hour_stats = {h: {"wins": 0, "losses": 0, "pnl_sum": 0.0, "count": 0}
+            # Reset stats — initialise global slots
+            self._hour_stats = {(None, h): {"wins": 0, "losses": 0, "pnl_sum": 0.0, "count": 0}
                                 for h in range(N_SLOTS)}
 
             for row in rows:
@@ -72,74 +81,105 @@ class CerebellumTiming:
                     ts = str(row["timestamp"])
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                     hour = dt.hour
+                    pair = row["pair"] if "pair" in row.keys() and row["pair"] else None
                     pnl = row["outcome_pnl"] or 0
 
-                    self._hour_stats[hour]["count"] += 1
-                    self._hour_stats[hour]["pnl_sum"] += pnl
-                    if pnl > 0:
-                        self._hour_stats[hour]["wins"] += 1
-                    else:
-                        self._hour_stats[hour]["losses"] += 1
+                    # Update both global and per-pair buckets
+                    for key in ((None, hour), (pair, hour) if pair else None):
+                        if key is None:
+                            continue
+                        if key not in self._hour_stats:
+                            self._hour_stats[key] = {
+                                "wins": 0, "losses": 0, "pnl_sum": 0.0, "count": 0
+                            }
+                        self._hour_stats[key]["count"] += 1
+                        self._hour_stats[key]["pnl_sum"] += pnl
+                        if pnl > 0:
+                            self._hour_stats[key]["wins"] += 1
+                        else:
+                            self._hour_stats[key]["losses"] += 1
                 except Exception:
                     continue
 
-            # Compute sizing multipliers
+            # Compute sizing multipliers (per-pair + global)
             self._compute_multipliers()
             self._last_update = datetime.now(timezone.utc)
 
-            total_trades = sum(s["count"] for s in self._hour_stats.values())
-            active_hours = sum(1 for s in self._hour_stats.values()
-                             if s["count"] >= MIN_TRADES_PER_SLOT)
-            logger.info(f"[Cerebellum] Updated: {total_trades} trades across "
-                       f"{active_hours} active hours")
+            total_trades = sum(s["count"] for (p, _), s in self._hour_stats.items() if p is None)
+            unique_pairs = len({p for (p, _) in self._hour_stats.keys() if p is not None})
+            active_hours = sum(1 for (p, _), s in self._hour_stats.items()
+                             if p is None and s["count"] >= MIN_TRADES_PER_SLOT)
+            logger.info(
+                f"[Cerebellum] Updated: {total_trades} trades, "
+                f"{unique_pairs} pairs tracked, {active_hours} global active hours"
+            )
 
         finally:
             conn.close()
 
     def _compute_multipliers(self):
-        """Compute per-hour sizing multipliers from win rates."""
-        win_rates = {}
-        for hour, stats in self._hour_stats.items():
-            if stats["count"] >= MIN_TRADES_PER_SLOT:
-                win_rates[hour] = stats["wins"] / stats["count"]
-            else:
-                win_rates[hour] = 0.5  # Default for insufficient data
+        """Compute per-hour sizing multipliers per (pair-or-global, hour)."""
+        # Group by pair (None = global)
+        pairs = {p for (p, _) in self._hour_stats.keys()}
+        self._sizing_multipliers = {}
 
-        if not win_rates:
-            self._sizing_multipliers = {h: 1.0 for h in range(N_SLOTS)}
-            return
+        for p in pairs:
+            win_rates = {}
+            for h in range(N_SLOTS):
+                stats = self._hour_stats.get((p, h), {"count": 0, "wins": 0})
+                if stats["count"] >= MIN_TRADES_PER_SLOT:
+                    win_rates[h] = stats["wins"] / stats["count"]
+                else:
+                    win_rates[h] = 0.5  # neutral default — flat 1.0× via wr_range==0
 
-        # Normalize: best hour gets MAX_TIMING_MULT, worst gets MIN_TIMING_MULT
-        min_wr = min(win_rates.values())
-        max_wr = max(win_rates.values())
-        wr_range = max_wr - min_wr
+            if not win_rates:
+                continue
+            min_wr = min(win_rates.values())
+            max_wr = max(win_rates.values())
+            wr_range = max_wr - min_wr
 
-        for hour in range(N_SLOTS):
-            wr = win_rates.get(hour, 0.5)
-            if wr_range > 0.01:
-                normalized = (wr - min_wr) / wr_range
-                mult = MIN_TIMING_MULT + normalized * (MAX_TIMING_MULT - MIN_TIMING_MULT)
-            else:
-                mult = 1.0
-            self._sizing_multipliers[hour] = round(mult, 3)
+            for h in range(N_SLOTS):
+                wr = win_rates.get(h, 0.5)
+                if wr_range > 0.01:
+                    normalized = (wr - min_wr) / wr_range
+                    mult = MIN_TIMING_MULT + normalized * (MAX_TIMING_MULT - MIN_TIMING_MULT)
+                else:
+                    mult = 1.0
+                self._sizing_multipliers[(p, h)] = round(mult, 3)
 
-    def get_timing_multiplier(self, hour_utc: int = None) -> float:
-        """Get sizing multiplier for current (or specified) hour."""
+    def get_timing_multiplier(self, hour_utc: int = None,
+                              pair: Optional[str] = None) -> float:
+        """Get sizing multiplier — per-pair if sufficient data, else global.
+
+        Sprint 2026-05-05 (B-CONNECT C5): per-pair × hour resolution. When
+        the pair has ≥ MIN_TRADES_PER_SLOT in that hour we use the pair's
+        own multiplier (e.g. BTC at 21UTC differs from ETH at 21UTC); else
+        we fall back to the cross-pair global multiplier.
+        """
         if hour_utc is None:
             hour_utc = datetime.now(timezone.utc).hour
 
         if not self._sizing_multipliers:
             self.update_from_trades()
 
-        return self._sizing_multipliers.get(hour_utc, 1.0)
+        if pair is not None:
+            per_pair_stats = self._hour_stats.get(
+                (pair, hour_utc), {"count": 0}
+            )
+            if per_pair_stats.get("count", 0) >= MIN_TRADES_PER_SLOT:
+                return self._sizing_multipliers.get((pair, hour_utc), 1.0)
+        return self._sizing_multipliers.get((None, hour_utc), 1.0)
 
-    def get_best_hours(self, top_n: int = 5) -> List[Dict]:
-        """Get top N best performing hours."""
+    def get_best_hours(self, top_n: int = 5,
+                       pair: Optional[str] = None) -> List[Dict]:
+        """Get top N best performing hours (global view by default)."""
         if not self._hour_stats:
             self.update_from_trades()
 
         hours = []
-        for h, stats in self._hour_stats.items():
+        for (p, h), stats in self._hour_stats.items():
+            if p != pair:  # filter by pair (None = global)
+                continue
             if stats["count"] >= MIN_TRADES_PER_SLOT:
                 wr = stats["wins"] / stats["count"]
                 avg_pnl = stats["pnl_sum"] / stats["count"]
@@ -148,7 +188,7 @@ class CerebellumTiming:
                     "win_rate": round(wr, 3),
                     "avg_pnl": round(avg_pnl, 4),
                     "trade_count": stats["count"],
-                    "multiplier": self._sizing_multipliers.get(h, 1.0),
+                    "multiplier": self._sizing_multipliers.get((pair, h), 1.0),
                 })
 
         hours.sort(key=lambda x: x["win_rate"], reverse=True)
@@ -160,21 +200,23 @@ class CerebellumTiming:
         best.sort(key=lambda x: x["win_rate"])
         return best[:top_n]
 
-    def get_full_schedule(self) -> List[Dict]:
-        """Get full 24-hour performance schedule."""
+    def get_full_schedule(self, pair: Optional[str] = None) -> List[Dict]:
+        """Get full 24-hour performance schedule (global by default)."""
         if not self._hour_stats:
             self.update_from_trades()
 
         schedule = []
         for h in range(N_SLOTS):
-            stats = self._hour_stats.get(h, {"wins": 0, "losses": 0, "pnl_sum": 0, "count": 0})
+            stats = self._hour_stats.get(
+                (pair, h), {"wins": 0, "losses": 0, "pnl_sum": 0, "count": 0}
+            )
             wr = stats["wins"] / max(stats["count"], 1)
             schedule.append({
                 "hour_utc": h,
                 "win_rate": round(wr, 3) if stats["count"] >= MIN_TRADES_PER_SLOT else None,
                 "avg_pnl": round(stats["pnl_sum"] / max(stats["count"], 1), 4),
                 "trade_count": stats["count"],
-                "multiplier": self._sizing_multipliers.get(h, 1.0),
+                "multiplier": self._sizing_multipliers.get((pair, h), 1.0),
                 "sufficient_data": stats["count"] >= MIN_TRADES_PER_SLOT,
             })
         return schedule

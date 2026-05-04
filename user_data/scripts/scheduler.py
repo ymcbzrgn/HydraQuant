@@ -4478,11 +4478,15 @@ class PipelineScheduler:
                 # alpha means "we picked losers" → raise it.
                 normalized = max(-1.0, min(1.0, alpha / 10.0))
                 base_step = 0.05  # max single-tick movement
-                # Hysteresis: tiny |alpha| < 0.5 → don't jitter
-                if abs(alpha) < 0.5:
+                # Sprint 2026-05-05 (K4): hysteresis lowered 0.5→0.2 so
+                # marginal forgone signals get adapted instead of skipped.
+                # Audit found 8 weeks of low-magnitude alpha never moved
+                # the threshold — slow learning was causing drift.
+                if abs(alpha) < 0.2:
                     continue
-                # Larger samples → trust the signal more (linear up to 50 signals)
-                trust = min(1.0, n_signals / 50.0)
+                # Sprint 2026-05-05 (K5): trust ramps faster (n/30 not n/50)
+                # so per-pair thresholds reach full trust sooner.
+                trust = min(1.0, n_signals / 30.0)
                 delta = -normalized * base_step * trust
                 reason = (f"sym_alpha={alpha:+.2f} n={n_signals} "
                           f"trust={trust:.2f} delta={delta:+.3f}")
