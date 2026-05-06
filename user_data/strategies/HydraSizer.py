@@ -104,6 +104,12 @@ class HydraSizer(IStrategy):
         # actual concurrent trade universe — never a static number.
         from collections import OrderedDict
         self.ai_signal_cache: "OrderedDict[str, dict]" = OrderedDict()
+        # Sprint 2026-05-06 (F1): Triple Perception result cache mirrors
+        # ai_signal_cache LRU pattern. Was unbounded dict at :1662 (forensic
+        # 2026-05-06: tr-dry RSS 1GB → 4.4GB over 35h, ~100MB/h drift). Now
+        # uses dynamic maxlen identical to ai_signal_cache so it scales
+        # with whitelist × envelope × hormones (no hardcode).
+        self._perception_cache: "OrderedDict[str, dict]" = OrderedDict()
         self.cache_ttl_hours = 6 # Non-NEUTRAL signals valid for 6 hours (Phase 22: increased from 4h)
         self._neutral_ttl_hours = 8.0  # NEUTRAL signals retried after 8h (reduced LLM calls for free tier)
 
@@ -185,20 +191,36 @@ class HydraSizer(IStrategy):
             sizing, but pulling whole batches saves CPU + LLM tokens)
           - llm_router fleet_exhausted (B1 deposit, ratio < 0.10)
         """
-        # ── C1: RAG health probe (cached 60s) ─────────────────────────
+        # ── C1: RAG health probe — Sprint 2026-05-06 (F5) ─────────────
+        # PARAM-driven probe URL, timeout, and cache TTL. Old hardcoded
+        # `127.0.0.1:8891` + 5s timeout + 60s cache caused testnet bot to
+        # sit at "rag_health_unreachable" for 36h while tr-dry on the same
+        # endpoint kept trading. Adaptive cache: HEALTHY result is cached
+        # longer (cheap), UNREACHABLE result is re-probed soon (recovery).
         try:
-            probe_ts, healthy = self._rag_health_cache
-            if (now_ts - probe_ts) > 60.0:
+            rag_url = (
+                self.config.get("ai_config", {}).get("rag_service_url")
+                or "http://127.0.0.1:8891"
+            )
+            health_url = rag_url.rstrip("/") + "/health"
+            probe_timeout = float(_np("rag.probe_timeout_s", 2.0))
+            unreach_cache_s = float(_np("rag.unreachable_cache_s", 15))
+            healthy_cache_s = max(unreach_cache_s * 4.0, 60.0)
+
+            probe_ts, last_healthy = self._rag_health_cache
+            cache_window = healthy_cache_s if last_healthy else unreach_cache_s
+            if (now_ts - probe_ts) > cache_window:
                 healthy = True
                 try:
                     import urllib.request as _ur
-                    req = _ur.Request("http://127.0.0.1:8891/health")
-                    with _ur.urlopen(req, timeout=5) as resp:
+                    req = _ur.Request(health_url)
+                    with _ur.urlopen(req, timeout=probe_timeout) as resp:
                         healthy = (200 <= resp.status < 500)
                 except Exception:
                     healthy = False
                 self._rag_health_cache = (now_ts, healthy)
-            if not healthy:
+                last_healthy = healthy
+            if not last_healthy:
                 return "rag_health_unreachable"
         except Exception:
             pass
@@ -1084,6 +1106,28 @@ class HydraSizer(IStrategy):
         except Exception:
             pass
 
+    def _perception_cache_set(self, pair: str, perception: dict) -> None:
+        """Sprint 2026-05-06 (F1): LRU-bounded write to `_perception_cache`.
+
+        Triple Perception results retain large feature tensors (chart features,
+        Kronos hidden states, OOD distances). Forensic 2026-05-06 found the
+        old unbounded dict drifted tr-dry RSS by ~100MB/h over 35h. Mirrors
+        ai_signal_cache LRU policy with the SAME dynamic maxlen so the two
+        caches respect a shared, organism-aware budget — no hardcoded knob.
+        """
+        try:
+            self._perception_cache[pair] = perception
+            self._perception_cache.move_to_end(pair)
+        except Exception:
+            self._perception_cache[pair] = perception
+            return
+        try:
+            limit = self._ai_cache_maxlen
+            while len(self._perception_cache) > limit:
+                self._perception_cache.popitem(last=False)
+        except Exception:
+            pass
+
     def _get_ai_signal(self, pair: str, current_time: datetime, dataframe: pd.DataFrame = None) -> dict:
         """
         The Bridge (Phase 5.1): Asks the RAG Signal Service for a decision.
@@ -1659,9 +1703,10 @@ class HydraSizer(IStrategy):
                 )
                 if _tp_result:
                     # Store for sizing/confidence enrichment downstream
-                    if not hasattr(self, '_perception_cache'):
-                        self._perception_cache = {}
-                    self._perception_cache[pair] = _tp_result
+                    # Sprint 2026-05-06 (F1): LRU-bounded — was unbounded dict
+                    # leaking ~100MB/h. Init now in __init__; setter applies
+                    # dynamic maxlen via shared organism-aware budget.
+                    self._perception_cache_set(pair, _tp_result)
                     logger.info(
                         f"[Phase26:TriplePerception] {pair}: {_tp_result['signal']} "
                         f"conf={_tp_result['confidence']:.2f} sizing={_tp_result['sizing_multiplier']:.2f}"

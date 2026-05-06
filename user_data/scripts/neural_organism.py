@@ -244,6 +244,30 @@ PARAM_REGISTRY: Dict[str, dict] = {
     # Defaults symmetric with sizer behavior; neural BCM+STDP can adapt.
     "strategy.cortisol_stop_min":         {"organ": "stop_coupling", "default": 0.70, "min": 0.50, "max": 1.00},
     "strategy.cortisol_stop_slope":       {"organ": "stop_coupling", "default": 0.30, "min": 0.00, "max": 0.60},
+    # Sprint 2026-05-06 (F3+F4): auto_backtest hardening parameters.
+    # orphan_age_min: pgrep-based reaper kills freqtrade backtest processes
+    # older than this (default 90 min — well over 30-min normal runtime).
+    # timeout_s: subprocess.run timeout. Tunable so heavy backtest universes
+    # can extend window without code change.
+    "scheduler.auto_backtest.orphan_age_min": {"organ": "infra", "default": 90, "min": 45, "max": 240},
+    "scheduler.auto_backtest.timeout_s":      {"organ": "infra", "default": 1800, "min": 600, "max": 7200},
+    # Sprint 2026-05-06 (F5): RAG probe adaptive parameters. Hardcoded
+    # 5s timeout + 60s cache caused testnet "RAG_UNREACHABLE" drought
+    # (36h, 0 trades) under swap thrash even though tr-dry was OK on the
+    # same endpoint. Tighter probe + shorter unreachable cache = bot
+    # recovers within seconds when RAG comes back.
+    "rag.probe_timeout_s":             {"organ": "infra", "default": 2.0, "min": 0.5, "max": 8.0},
+    "rag.unreachable_cache_s":         {"organ": "infra", "default": 15, "min": 3, "max": 120},
+    # Sprint 2026-05-06 (F6): model_server reaper PARAM-driven. Old
+    # hardcoded 5min reaper interval + 10min idle threshold meant under
+    # continuous tr-dry traffic no model ever idled long enough to unload
+    # → cgroup steady-state ate every byte. Tighter reaper + shorter idle
+    # window lets LRU eviction actually fire.
+    "model_server.reaper_interval_s":  {"organ": "infra", "default": 60, "min": 30, "max": 600},
+    "model_server.idle_limit_s":       {"organ": "infra", "default": 300, "min": 120, "max": 1800},
+    "model_server.idle_warn_s":        {"organ": "infra", "default": 900, "min": 300, "max": 3600},
+    "model_server.rss_limit_mb":       {"organ": "infra", "default": 4200, "min": 3000, "max": 6000},
+    "model_server.rss_warn_mb":        {"organ": "infra", "default": 3300, "min": 2000, "max": 5000},
     "strategy.flip_exit_conf":        {"organ": "strategy_exit", "default": 0.55, "min": 0.40, "max": 0.70},
     "strategy.conf_degrade_exit":     {"organ": "strategy_exit", "default": 0.30, "min": 0.15, "max": 0.50},
     "strategy.first_hour_atr_mult":   {"organ": "strategy_exit", "default": 2.5,  "min": 1.5,  "max": 4.0},

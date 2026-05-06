@@ -43,17 +43,29 @@ _load_lock = threading.Lock()
 # Serialize ColBERT requests — only 1 at a time to prevent OOM from concurrent tensors
 _colbert_lock = threading.Semaphore(1)
 
-_RSS_WARN_MB = 3500   # trigger gc.collect() proactively (models alone ~3.5GB)
-_RSS_LIMIT_MB = 4500  # reject requests with 503 (31GB server, 4.5GB safe for model_server)
+# Sprint 2026-05-06 (F6): static fallbacks for memory thresholds. Real
+# values come from PARAM_REGISTRY via _param() so the cgroup_recalibrate
+# cron + neural BCM/STDP weight updates can adapt them weekly without a
+# code redeploy. Defaults here are tighter than the prior 3500/4500/3600/
+# 1800/600/300 set so that under traffic the reaper actually fires and
+# the 8 cgroup OOM-kills observed on 2026-05-05 do not recur.
+_RSS_WARN_MB = 3300
+_RSS_LIMIT_MB = 4200
+_IDLE_DEFAULT_S = 3600.0
+_IDLE_WARN_S = 900.0
+_IDLE_LIMIT_S = 300.0
+_REAPER_INTERVAL_S = 60.0
 
-# Idle eviction thresholds. The reaper picks the tightest window the
-# current RSS justifies, so under memory pressure cold-loaded models
-# drop within 10 min instead of an hour. Restart of the service is no
-# longer required to reclaim memory.
-_IDLE_DEFAULT_S = 3600.0    # 1h base — typical RAG cycle gap
-_IDLE_WARN_S = 1800.0       # 30 min when RSS > _RSS_WARN_MB
-_IDLE_LIMIT_S = 600.0       # 10 min when RSS > _RSS_LIMIT_MB
-_REAPER_INTERVAL_S = 300.0  # check every 5 min — cheap, no model touch
+
+def _param(key: str, fallback: float) -> float:
+    """Read a tunable from PARAM_REGISTRY when neural_organism is importable;
+    otherwise fall back to the static value above. The lookup is best-effort
+    and cheap — neural_organism caches per-key reads in its own LRU."""
+    try:
+        from neural_organism import _p as _neural_p  # type: ignore
+        return float(_neural_p(key, fallback))
+    except Exception:
+        return float(fallback)
 
 
 def _get_rss_mb() -> float:
@@ -164,20 +176,32 @@ def _unload(name: str) -> bool:
 
 
 def _idle_threshold() -> float:
-    """Pick the tightest idle window the current RSS justifies."""
+    """Pick the tightest idle window the current RSS justifies.
+
+    Sprint 2026-05-06 (F6): thresholds re-read from PARAM_REGISTRY each
+    call so the auto cgroup recalibration job + neural BCM/STDP credit
+    assignment can drift them based on memory-pressure outcomes without
+    requiring a service restart.
+    """
     rss = _get_rss_mb()
-    if rss > _RSS_LIMIT_MB:
-        return _IDLE_LIMIT_S
-    if rss > _RSS_WARN_MB:
-        return _IDLE_WARN_S
-    return _IDLE_DEFAULT_S
+    rss_limit = _param("model_server.rss_limit_mb", _RSS_LIMIT_MB)
+    rss_warn = _param("model_server.rss_warn_mb", _RSS_WARN_MB)
+    if rss > rss_limit:
+        return _param("model_server.idle_limit_s", _IDLE_LIMIT_S)
+    if rss > rss_warn:
+        return _param("model_server.idle_warn_s", _IDLE_WARN_S)
+    return _param("model_server.idle_default_s", _IDLE_DEFAULT_S)
 
 
 def _reaper_loop():
-    """Daemon thread: every 5 min, evict any model idle past the threshold."""
+    """Daemon thread: every reaper-interval, evict any model idle past
+    the threshold. Sprint 2026-05-06 (F6): interval is PARAM-driven —
+    weekly auto-cgroup recalibrate can tighten it under memory pressure.
+    """
     while True:
         try:
-            time.sleep(_REAPER_INTERVAL_S)
+            interval = _param("model_server.reaper_interval_s", _REAPER_INTERVAL_S)
+            time.sleep(max(15.0, interval))
             now = time.time()
             threshold = _idle_threshold()
 
@@ -223,19 +247,23 @@ def _load_models():
 
 @app.middleware("http")
 async def memory_guard(request: Request, call_next):
-    """RSS circuit breaker: reject at 2.5GB, gc at 2.0GB."""
+    """RSS circuit breaker — Sprint 2026-05-06 (F6): PARAM-driven thresholds
+    so the cgroup_recalibrate job can tighten/loosen them weekly without a
+    service redeploy."""
     rss = _get_rss_mb()
-    if rss > _RSS_LIMIT_MB:
+    rss_limit = _param("model_server.rss_limit_mb", _RSS_LIMIT_MB)
+    rss_warn = _param("model_server.rss_warn_mb", _RSS_WARN_MB)
+    if rss > rss_limit:
         gc.collect()
         rss = _get_rss_mb()
-        if rss > _RSS_LIMIT_MB:
-            logger.warning(f"[MemoryGuard] RSS={rss:.0f}MB > {_RSS_LIMIT_MB}MB, returning 503")
+        if rss > rss_limit:
+            logger.warning(f"[MemoryGuard] RSS={rss:.0f}MB > {rss_limit:.0f}MB, returning 503")
             return JSONResponse(
                 status_code=503,
                 content={"error": "memory_pressure", "rss_mb": round(rss)},
                 headers={"Retry-After": "5"},
             )
-    elif rss > _RSS_WARN_MB:
+    elif rss > rss_warn:
         gc.collect()
     return await call_next(request)
 
@@ -281,7 +309,7 @@ def health():
             "flashrank": _idle(_flashrank_last_ts),
         },
         "rss_mb": round(rss),
-        "memory_pressure": rss > _RSS_WARN_MB,
+        "memory_pressure": rss > _param("model_server.rss_warn_mb", _RSS_WARN_MB),
         "idle_threshold_s": _idle_threshold(),
     }
 

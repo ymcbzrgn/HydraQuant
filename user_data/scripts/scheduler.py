@@ -1672,9 +1672,79 @@ class PipelineScheduler:
           3. Run freqtrade backtesting (last 30 days, or incremental 1 day)
           4. Feed results into BacktestEmbedder → PatternStatStore + ChromaDB
           5. Clean up old backtest results (>30 days)
+
+        Sprint 2026-05-06 (F3+F4): adaptive flock + orphan reaper. The
+        2026-05-05 forensic found a 6-hour orphan freqtrade backtest
+        (4 GB RAM) created by an OOM-killed scheduler whose subprocess
+        survived as PID-1-reparented zombie. New scheduler then spawned
+        another backtest at the next 03:00 UTC → cascade global OOM.
+        Lock file + age-based reaping prevent recurrence; stdout/stderr
+        also redirected to disk so parent heap stays bounded.
         """
         import subprocess
         import tempfile
+        import fcntl
+        import time as _bt_time
+
+        # ─── F3: adaptive flock + orphan reaper ────────────────────────
+        lock_path = "/tmp/freqtrade_auto_backtest.lock"
+        # Reap any orphan freqtrade backtest processes older than the
+        # configured timeout. Self-healing: scheduler restart automatically
+        # cleans up zombies left from prior crashes.
+        try:
+            max_age_min = int(_p("scheduler.auto_backtest.orphan_age_min", 90))
+        except Exception:
+            max_age_min = 90
+        try:
+            ps_out = subprocess.run(
+                ["pgrep", "-af", "freqtrade backtesting"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.splitlines()
+            now_epoch = _bt_time.time()
+            for line in ps_out:
+                parts = line.split(maxsplit=1)
+                if not parts:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    with open(f"/proc/{pid}/stat") as _stat:
+                        starttime = int(_stat.read().split()[21])
+                    btime_line = [l for l in open("/proc/stat") if l.startswith("btime")]
+                    if not btime_line:
+                        continue
+                    btime = int(btime_line[0].split()[1])
+                    clk_tck = os.sysconf("SC_CLK_TCK")
+                    proc_start = btime + starttime / clk_tck
+                    age_min = (now_epoch - proc_start) / 60.0
+                    if age_min > max_age_min:
+                        logger.warning(
+                            f"[Scheduler:AutoBacktest:OrphanReaper] killing PID {pid} "
+                            f"age={age_min:.1f}min > {max_age_min}min — leftover from prior crash"
+                        )
+                        try:
+                            os.kill(pid, 15)  # SIGTERM
+                            _bt_time.sleep(2)
+                            if os.path.exists(f"/proc/{pid}"):
+                                os.kill(pid, 9)  # SIGKILL
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.debug(f"[Scheduler:AutoBacktest:OrphanReaper] skipped: {exc}")
+
+        # PID-tracked lock — fail-fast if another instance is running
+        try:
+            lock_fd = open(lock_path, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd.write(f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}\n")
+            lock_fd.flush()
+        except (BlockingIOError, IOError) as exc:
+            logger.warning(
+                f"[Scheduler:AutoBacktest] lock busy ({exc}) — another instance running, skip"
+            )
+            return
+
         logger.info("[Scheduler:AutoBacktest] Starting auto backtest & bootstrap...")
 
         try:
@@ -1775,13 +1845,41 @@ class PipelineScheduler:
                 "--export", "trades",
             ]
 
-            logger.info(f"[Scheduler:AutoBacktest] Running: {' '.join(bt_cmd)}")
-            bt_result = subprocess.run(bt_cmd, capture_output=True, text=True, timeout=1800,
-                                      cwd=os.path.join(base_dir, ".."))
+            # Sprint 2026-05-06 (F4): redirect stdout/stderr to disk to keep
+            # parent heap bounded. capture_output=True buffered 10-100MB of
+            # backtest output in scheduler memory until subprocess returned;
+            # combined with the orphan-on-OOM bug, this caused scheduler to
+            # OOM at RSS 6GB. Files use timestamp suffix and are auto-pruned
+            # by the existing cleanup job.
+            bt_log_dir = os.path.join(base_dir, "..", "user_data", "logs", "auto_backtest")
+            os.makedirs(bt_log_dir, exist_ok=True)
+            bt_log_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            bt_log_path = os.path.join(bt_log_dir, f"auto_backtest_{bt_log_stamp}.log")
+            logger.info(f"[Scheduler:AutoBacktest] Running: {' '.join(bt_cmd)} → {bt_log_path}")
+            try:
+                bt_timeout = int(_p("scheduler.auto_backtest.timeout_s", 1800))
+            except Exception:
+                bt_timeout = 1800
+            with open(bt_log_path, "w") as bt_log_f:
+                bt_result = subprocess.run(
+                    bt_cmd,
+                    stdout=bt_log_f, stderr=subprocess.STDOUT,
+                    text=True, timeout=bt_timeout,
+                    cwd=os.path.join(base_dir, ".."),
+                )
 
             if bt_result.returncode != 0:
-                logger.error(f"[Scheduler:AutoBacktest] Backtest failed (rc={bt_result.returncode}): "
-                           f"{bt_result.stderr[:500]}")
+                # Read tail of log for error context (bounded — won't bloat heap)
+                err_tail = ""
+                try:
+                    with open(bt_log_path) as _f:
+                        err_tail = "".join(_f.readlines()[-20:])[:500]
+                except Exception:
+                    pass
+                logger.error(
+                    f"[Scheduler:AutoBacktest] Backtest failed (rc={bt_result.returncode}); "
+                    f"see {bt_log_path}\n{err_tail}"
+                )
                 return
 
             logger.info(f"[Scheduler:AutoBacktest] Backtest complete")
@@ -1830,9 +1928,19 @@ class PipelineScheduler:
             logger.info("[Scheduler:AutoBacktest] Auto backtest & bootstrap complete.")
 
         except subprocess.TimeoutExpired:
-            logger.error("[Scheduler:AutoBacktest] Backtest timed out (30min)")
+            logger.error(f"[Scheduler:AutoBacktest] Backtest timed out ({bt_timeout}s)")
         except Exception as e:
             logger.error(f"[Scheduler:AutoBacktest] Failed: {e}")
+        finally:
+            # Sprint 2026-05-06 (F3): always release flock + remove pidfile
+            # so a crash here does not lock the next 03:00 UTC run forever.
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+                if os.path.exists(lock_path):
+                    os.unlink(lock_path)
+            except Exception:
+                pass
 
     def _get_top_traded_pairs(self, n: int = 10) -> list:
         """Get top N most-traded pairs from Freqtrade's trade history."""
