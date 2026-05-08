@@ -989,10 +989,10 @@ def phase30_agent_scorecard():
 
 @app.get("/api/v1/ai/promotion_gate")
 def phase30_promotion_gate():
-    """Phase 30 C.9/D.9 — PromotionGate.vue feed."""
+    """Phase 30 C.9/D.9 — PromotionGate.vue feed (read-only, no DB write)."""
     try:
         from promotion_gate import evaluate_gate
-        r = evaluate_gate(window_days=14)
+        r = evaluate_gate(window_days=14, persist=False)
         return {
             "passed": r.passed,
             "eligibility_pct": r.eligibility_pct,

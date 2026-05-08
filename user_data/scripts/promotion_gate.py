@@ -31,9 +31,13 @@ class GateResult:
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
-def evaluate_gate(window_days: int = 14) -> GateResult:
+def evaluate_gate(window_days: int = 14, persist: bool = True) -> GateResult:
     """Phase 30 D.9 — `trades` lives in tradesv3.sqlite (freqtrade DB), other state
-    in ai_data.sqlite. Read both."""
+    in ai_data.sqlite. Read both.
+
+    persist=False: read-only mode for hot-path API callers (Vue dashboard).
+    Weekly scheduler cron always uses persist=True.
+    """
     try:
         import os, sqlite3
         from pathlib import Path
@@ -107,14 +111,15 @@ def evaluate_gate(window_days: int = 14) -> GateResult:
                 "autonomy_level": autonomy_level, "linucb_var": linucb_var,
             }
 
-            conn.execute(
-                """INSERT INTO promotion_gate_history
-                   (eligibility_pct, passed, blocked_by, metrics_json)
-                   VALUES (?, ?, ?, ?)""",
-                (sum(gates.values()) / len(gates), int(all(gates.values())),
-                 json.dumps(blocked), json.dumps(metrics, default=str)),
-            )
-            conn.commit()
+            if persist:
+                conn.execute(
+                    """INSERT INTO promotion_gate_history
+                       (eligibility_pct, passed, blocked_by, metrics_json)
+                       VALUES (?, ?, ?, ?)""",
+                    (sum(gates.values()) / len(gates), int(all(gates.values())),
+                     json.dumps(blocked), json.dumps(metrics, default=str)),
+                )
+                conn.commit()
             return GateResult(
                 passed=all(gates.values()),
                 eligibility_pct=sum(gates.values()) / len(gates),
