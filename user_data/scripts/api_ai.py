@@ -895,25 +895,28 @@ def get_counterfactual_insights():
 
 @app.get("/api/v1/ai/regime")
 def phase30_regime_watch():
-    """Phase 30 C.9 — RegimeWatch.vue feed."""
+    """Phase 30 C.9 — RegimeWatch.vue feed (regime_layers schema-aware)."""
     try:
         from db import AI_DB_PATH, get_db_connection
         with get_db_connection(AI_DB_PATH) as conn:
             rows = conn.execute(
-                """SELECT pair, regime, COALESCE(adx, 0) AS adx,
-                          COALESCE(ttl_seconds, 300) AS ttl_seconds
+                """SELECT pair,
+                          COALESCE(layer3_adx_regime, 'unknown') AS regime,
+                          COALESCE(regime_change_prob * 100, 0) AS adx,
+                          300 AS ttl_seconds
                    FROM regime_layers
                    WHERE timestamp >= datetime('now', '-30 minutes')
                    ORDER BY timestamp DESC LIMIT 50"""
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [{"pair": r[0], "regime": r[1], "adx": float(r[2] or 0),
+                     "ttl_seconds": int(r[3])} for r in rows]
     except Exception as e:
         return [{"error": str(e)}]
 
 
 @app.get("/api/v1/ai/organism")
 def phase30_organism_health():
-    """Phase 30 C.9 — OrganismHealth.vue feed."""
+    """Phase 30 C.9 — OrganismHealth.vue feed (streak_state schema-aware)."""
     try:
         from db import AI_DB_PATH, get_db_connection
         with get_db_connection(AI_DB_PATH) as conn:
@@ -923,12 +926,14 @@ def phase30_organism_health():
                    FROM hormone_state WHERE id=1"""
             ).fetchone()
             streak_row = conn.execute(
-                "SELECT current_streak FROM streak_state WHERE id=1"
+                "SELECT consec_wins, consec_losses FROM streak_state WHERE id=1"
             ).fetchone()
             if not row:
                 return {"cortisol": 1, "dopamine": 1, "serotonin": 1,
                         "adrenaline": 1, "market_stress": 0,
                         "portfolio_health": 0.5, "streak": 0}
+            wins = int(streak_row[0] if streak_row else 0)
+            losses = int(streak_row[1] if streak_row else 0)
             return {
                 "cortisol": float(row[0] or 1.0),
                 "dopamine": float(row[1] or 1.0),
@@ -936,7 +941,7 @@ def phase30_organism_health():
                 "adrenaline": float(row[3] or 1.0),
                 "market_stress": float(row[4] or 0.0),
                 "portfolio_health": float(row[5] or 0.5),
-                "streak": int(streak_row[0] if streak_row else 0),
+                "streak": wins - losses,
             }
     except Exception as e:
         return {"error": str(e)}
@@ -944,7 +949,7 @@ def phase30_organism_health():
 
 @app.get("/api/v1/ai/agents/scorecard")
 def phase30_agent_scorecard():
-    """Phase 30 C.9 — AgentScorecard.vue feed."""
+    """Phase 30 C.9 — AgentScorecard.vue (agent_performance schema-aware)."""
     try:
         from db import AI_DB_PATH, get_db_connection
         from audit_recovery_rate import weekly_summary
@@ -955,21 +960,29 @@ def phase30_agent_scorecard():
 
         with get_db_connection(AI_DB_PATH) as conn:
             rows = conn.execute(
-                """SELECT agent_type, COUNT(*) AS n,
-                          AVG(score) AS trust,
-                          SUM(CASE WHEN score > 0.5 THEN 1 ELSE 0 END) AS wins
+                """SELECT agent_type,
+                          COUNT(*) AS n,
+                          SUM(CASE WHEN was_correct=1 THEN 1 ELSE 0 END) AS wins,
+                          AVG(COALESCE(outcome_pnl, 0)) AS avg_pnl
                    FROM agent_performance
                    WHERE timestamp >= datetime('now', '-30 days')
                    GROUP BY agent_type
                    ORDER BY n DESC"""
             ).fetchall()
-            return [{
-                "name": r[0] or "?",
-                "trust": float(r[2] or 0.5),
-                "n_decisions": int(r[1]),
-                "winrate": float((r[3] or 0) / (r[1] or 1)),
-                "recovery_rate": float(rec_by_agent.get(r[0] or "?", 0.0)),
-            } for r in rows]
+            out = []
+            for agent_type, n, wins, avg_pnl in rows:
+                n = int(n or 0)
+                wins = int(wins or 0)
+                trust = (wins / n) if n else 0.5
+                out.append({
+                    "name": agent_type or "?",
+                    "trust": float(trust),
+                    "n_decisions": n,
+                    "winrate": float(trust),
+                    "recovery_rate": float(rec_by_agent.get(agent_type or "?", 0.0)),
+                    "avg_pnl": float(avg_pnl or 0.0),
+                })
+            return out
     except Exception as e:
         return [{"error": str(e)}]
 

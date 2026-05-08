@@ -32,41 +32,55 @@ class GateResult:
 
 
 def evaluate_gate(window_days: int = 14) -> GateResult:
+    """Phase 30 D.9 — `trades` lives in tradesv3.sqlite (freqtrade DB), other state
+    in ai_data.sqlite. Read both."""
     try:
+        import os, sqlite3
+        from pathlib import Path
         from db import AI_DB_PATH, get_db_connection
 
+        # Locate tradesv3.sqlite (sibling of ai_data.sqlite or env override)
+        _trades_db = os.environ.get("TRADES_DB_PATH")
+        if not _trades_db:
+            _candidate = Path(AI_DB_PATH).parent.parent / "tradesv3.sqlite"
+            _trades_db = str(_candidate)
+        n = wins = liquid = 0
+        pnl = worst = mean_p = 0.0
+        pnls = []
+        try:
+            with sqlite3.connect(_trades_db) as tdb:
+                row = tdb.execute(
+                    f"""SELECT COUNT(*),
+                              COALESCE(SUM(close_profit_abs), 0),
+                              SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN close_profit < -0.95 THEN 1 ELSE 0 END),
+                              MIN(close_profit),
+                              AVG(close_profit)
+                       FROM trades
+                       WHERE close_date >= datetime('now', '-{int(window_days)} days')
+                         AND close_profit IS NOT NULL"""
+                ).fetchone()
+                n, pnl, wins, liquid, worst, mean_p = row
+                n = int(n or 0); wins = int(wins or 0)
+                cur = tdb.execute(
+                    f"""SELECT close_profit FROM trades
+                       WHERE close_date >= datetime('now', '-{int(window_days)} days')
+                         AND close_profit IS NOT NULL"""
+                )
+                pnls = [float(r[0]) for r in cur.fetchall()]
+        except Exception as _trades_e:
+            logger.error(f"[D.9] tradesv3.sqlite read failed: {_trades_e}")
+
+        winrate = (wins / n) if n else 0.0
+        sharpe = 0.0
+        if pnls and len(pnls) > 1:
+            std = statistics.stdev(pnls)
+            sharpe = ((mean_p or 0) / std) if std > 0 else 0.0
+
         with get_db_connection(AI_DB_PATH) as conn:
-            row = conn.execute(
-                f"""SELECT COUNT(*),
-                          COALESCE(SUM(close_profit_abs), 0),
-                          SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END),
-                          SUM(CASE WHEN close_profit < -0.95 THEN 1 ELSE 0 END),
-                          MIN(close_profit),
-                          AVG(close_profit)
-                   FROM trades
-                   WHERE close_date >= datetime('now', '-{int(window_days)} days')
-                     AND close_profit IS NOT NULL"""
-            ).fetchone()
-            n, pnl, wins, liquid, worst, mean_p = row
-            n = int(n or 0)
-            wins = int(wins or 0)
-            winrate = (wins / n) if n else 0.0
-
-            cur = conn.execute(
-                f"""SELECT close_profit FROM trades
-                   WHERE close_date >= datetime('now', '-{int(window_days)} days')
-                     AND close_profit IS NOT NULL"""
-            )
-            pnls = [float(r[0]) for r in cur.fetchall()]
-            sharpe = 0.0
-            if pnls and len(pnls) > 1:
-                std = statistics.stdev(pnls)
-                sharpe = ((mean_p or 0) / std) if std > 0 else 0.0
-
             cur = conn.execute("SELECT level FROM autonomy_state WHERE id=1")
             r = cur.fetchone()
             autonomy_level = int(r[0]) if r and r[0] is not None else 0
-
             try:
                 cur = conn.execute("SELECT AVG(reward_variance) FROM linucb_state")
                 r = cur.fetchone()
