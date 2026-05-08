@@ -891,6 +891,116 @@ def get_counterfactual_insights():
         return {"error": str(e)}
 
 
+# ═══ PHASE 30 — Vue dashboard backends (C.9) ═══
+
+@app.get("/api/v1/ai/regime")
+def phase30_regime_watch():
+    """Phase 30 C.9 — RegimeWatch.vue feed."""
+    try:
+        from db import AI_DB_PATH, get_db_connection
+        with get_db_connection(AI_DB_PATH) as conn:
+            rows = conn.execute(
+                """SELECT pair, regime, COALESCE(adx, 0) AS adx,
+                          COALESCE(ttl_seconds, 300) AS ttl_seconds
+                   FROM regime_layers
+                   WHERE timestamp >= datetime('now', '-30 minutes')
+                   ORDER BY timestamp DESC LIMIT 50"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@app.get("/api/v1/ai/organism")
+def phase30_organism_health():
+    """Phase 30 C.9 — OrganismHealth.vue feed."""
+    try:
+        from db import AI_DB_PATH, get_db_connection
+        with get_db_connection(AI_DB_PATH) as conn:
+            row = conn.execute(
+                """SELECT cortisol, dopamine, serotonin, adrenaline,
+                          market_stress, portfolio_health
+                   FROM hormone_state WHERE id=1"""
+            ).fetchone()
+            streak_row = conn.execute(
+                "SELECT current_streak FROM streak_state WHERE id=1"
+            ).fetchone()
+            if not row:
+                return {"cortisol": 1, "dopamine": 1, "serotonin": 1,
+                        "adrenaline": 1, "market_stress": 0,
+                        "portfolio_health": 0.5, "streak": 0}
+            return {
+                "cortisol": float(row[0] or 1.0),
+                "dopamine": float(row[1] or 1.0),
+                "serotonin": float(row[2] or 1.0),
+                "adrenaline": float(row[3] or 1.0),
+                "market_stress": float(row[4] or 0.0),
+                "portfolio_health": float(row[5] or 0.5),
+                "streak": int(streak_row[0] if streak_row else 0),
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/v1/ai/agents/scorecard")
+def phase30_agent_scorecard():
+    """Phase 30 C.9 — AgentScorecard.vue feed."""
+    try:
+        from db import AI_DB_PATH, get_db_connection
+        from audit_recovery_rate import weekly_summary
+
+        rec = weekly_summary()
+        rec_by_agent = {r["agent"]: r["recovery_rate"]
+                        for r in rec.get("per_agent_class", [])}
+
+        with get_db_connection(AI_DB_PATH) as conn:
+            rows = conn.execute(
+                """SELECT agent_type, COUNT(*) AS n,
+                          AVG(score) AS trust,
+                          SUM(CASE WHEN score > 0.5 THEN 1 ELSE 0 END) AS wins
+                   FROM agent_performance
+                   WHERE timestamp >= datetime('now', '-30 days')
+                   GROUP BY agent_type
+                   ORDER BY n DESC"""
+            ).fetchall()
+            return [{
+                "name": r[0] or "?",
+                "trust": float(r[2] or 0.5),
+                "n_decisions": int(r[1]),
+                "winrate": float((r[3] or 0) / (r[1] or 1)),
+                "recovery_rate": float(rec_by_agent.get(r[0] or "?", 0.0)),
+            } for r in rows]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@app.get("/api/v1/ai/promotion_gate")
+def phase30_promotion_gate():
+    """Phase 30 C.9/D.9 — PromotionGate.vue feed."""
+    try:
+        from promotion_gate import evaluate_gate
+        r = evaluate_gate(window_days=14)
+        return {
+            "passed": r.passed,
+            "eligibility_pct": r.eligibility_pct,
+            "blocked_by": r.blocked_by,
+            "metrics": r.metrics,
+        }
+    except Exception as e:
+        return {"passed": False, "eligibility_pct": 0.0,
+                "blocked_by": ["error"], "metrics": {"error": str(e)}}
+
+
+@app.get("/api/v1/ai/telemetry")
+def phase30_telemetry(kind_prefix: str = "", since_hours: int = 24, limit: int = 100):
+    """Phase 30 B.18 — Telemetry single feed."""
+    try:
+        from telemetry import query
+        return query(kind_prefix=kind_prefix, since_hours=since_hours, limit=limit)
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8890)

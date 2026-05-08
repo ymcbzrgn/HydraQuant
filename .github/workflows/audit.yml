@@ -1,0 +1,37 @@
+name: audit-as-code
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 06:00 UTC
+
+jobs:
+  run-audits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install minimal deps
+        run: |
+          pip install --upgrade pip
+          pip install pyyaml
+      - name: Seed schema (db.init_db)
+        env:
+          AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
+        run: |
+          PYTHONPATH=user_data/scripts python -c "from db import init_db; init_db()"
+      - name: Run audits
+        env:
+          AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
+        run: |
+          PYTHONPATH=user_data/scripts python user_data/scripts/audit_runner.py
+      - name: Run Phase 30 pytest
+        env:
+          AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
+        run: |
+          pip install pytest
+          PYTHONPATH=user_data/scripts pytest tests/test_phase30.py -v --noconftest -o "addopts="

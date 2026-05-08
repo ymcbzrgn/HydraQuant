@@ -172,7 +172,18 @@ class ConfidenceCalibrator:
         # never sees fresh wins → loop tightens. Bypass until trade flow resumes
         # and balanced training data exists. Re-enable via param "calibrator.bypass=0".
         try:
-            if float(_p("calibrator.bypass", 1.0)) >= 0.5:
+            # ═══ PHASE 30 A.2 — Conditional bypass via health check ═══
+            # If trade_count_30d >= 50 AND brier < 0.18, bypass is auto-disabled
+            # for that scope; the static PARAM is still consulted as a safety net.
+            _phase30_bypass = True
+            try:
+                from calibrator_health_check import health_report as _phase30_hc
+                _phase30_rep = _phase30_hc()
+                if not _phase30_rep.get("recommend_bypass", True):
+                    _phase30_bypass = False
+            except Exception:
+                pass
+            if _phase30_bypass and float(_p("calibrator.bypass", 1.0)) >= 0.5:
                 return raw_confidence
         except Exception:
             return raw_confidence

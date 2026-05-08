@@ -113,13 +113,22 @@ class LLMCostTracker:
 
     def log_call(self, model: str, provider: str, input_tokens: int, output_tokens: int,
                  cost_usd: float, latency_ms: float, agent_name: str = "",
-                 cache_hit: bool = False, pair: str = "", status: str = "success"):
+                 cache_hit: bool = False, pair: str = "", status: str = "success",
+                 error: Optional[str] = None, error_class: Optional[str] = None):
+        # Phase 30 A.31 — error/error_class columns now persisted; defaults remain
+        # backward-compatible (NULL when unset) so legacy callers are unaffected.
         try:
             execute_with_retry(
                 """INSERT INTO llm_calls
-                   (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, cache_hit, trading_pair)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms, status, int(cache_hit), pair),
+                   (model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms,
+                    status, cache_hit, trading_pair, error, error_class)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    model, provider, agent_name, input_tokens, output_tokens, cost_usd, latency_ms,
+                    status, int(cache_hit), pair,
+                    (error[:500] if error else None),
+                    error_class,
+                ),
                 max_retries=5,
                 db_path=self.db_path,
             )

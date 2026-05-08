@@ -140,7 +140,22 @@ class AITelegramNotifier:
         """Send critical alerts with dedup cooldown to prevent spam.
 
         Same alert message won't be re-sent within cooldown window (default 6h).
+
+        Phase 30 A.5 — heartbeat_suppression second-level filter for non-CRITICAL
+        events: if same (level, message_head) seen <300s ago, drop silently. This
+        is on TOP of the per-message cooldown above and catches near-identical
+        messages whose body text varies (timestamps, counts).
         """
+        # ═══ PHASE 30 A.5 — Heartbeat suppression on lower-severity alerts ═══
+        try:
+            if level.upper() not in ("CRITICAL", "ERROR"):
+                from heartbeat_suppression import should_emit as _phase30_he
+                if not _phase30_he(f"telegram.{level.lower()}", message[:120]):
+                    logger.debug(f"[Phase30:Heartbeat] suppressed {level} alert: {message[:60]}")
+                    return
+        except Exception:
+            pass
+
         cooldown = cooldown_secs if cooldown_secs is not None else _ALERT_COOLDOWN_SECS
 
         # Dedup check: skip if same message was sent recently

@@ -1,0 +1,5 @@
+name: A28_no_duplicate_lessons
+kind: sql_check
+sql: SELECT COUNT(*) FROM (SELECT decision_id, pair, COUNT(*) c FROM ai_lessons GROUP BY decision_id, pair HAVING c > 1)
+op: eq
+expected: 0

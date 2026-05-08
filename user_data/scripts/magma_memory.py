@@ -177,7 +177,20 @@ class MAGMAMemory:
             if sig not in seen:
                 seen.add(sig)
                 unique.append(e)
-        unique.sort(key=lambda x: x.get('weight', 0), reverse=True)
+        # ═══ PHASE 30 B.11 — Temporal decay weights edges by age ═══
+        try:
+            from memory_decay import weight as _phase30_decay
+            for _e in unique:
+                _ts = _e.get("timestamp") or _e.get("ts")
+                if _ts:
+                    _w = float(_e.get("weight", 0))
+                    _e["decay_weight"] = _phase30_decay(str(_ts))
+                    _e["effective_weight"] = _w * _e["decay_weight"]
+                else:
+                    _e["effective_weight"] = float(_e.get("weight", 0))
+            unique.sort(key=lambda x: x.get("effective_weight", x.get("weight", 0)), reverse=True)
+        except Exception:
+            unique.sort(key=lambda x: x.get('weight', 0), reverse=True)
         return unique[:50]
 
     def prune(self, min_weight: float = 0.5, max_age_days: int = 180):

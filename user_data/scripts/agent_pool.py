@@ -927,6 +927,98 @@ class AgentPool:
                 votes[name] = 0.0
         result["agent_votes"] = votes
 
+        # ═══ PHASE 30 — Wire integration on debate completion ═══
+        # A.12 4-state veto aggregation (overlay; result still drives downstream)
+        try:
+            from four_state_veto import Vote, aggregate
+            _phase30_votes = []
+            for _name, _score in votes.items():
+                if _score > 0.3:
+                    _phase30_votes.append(Vote(_name, "ALLOW", float(min(1.0, abs(_score)))))
+                elif _score < -0.3:
+                    _phase30_votes.append(Vote(_name, "DENY", float(min(1.0, abs(_score)))))
+                else:
+                    _phase30_votes.append(Vote(_name, "PASS", 0.5))
+            _phase30_veto = aggregate(_phase30_votes)
+            result["phase30_veto"] = {
+                "decision": _phase30_veto.decision,
+                "score": round(_phase30_veto.aggregate_score, 3),
+                "blocked_by": _phase30_veto.blocked_by,
+            }
+        except Exception:
+            pass
+
+        # A.8 audit_recovery_rate — record agents that didn't vote (silent failure)
+        try:
+            from audit_recovery_rate import record_failure as _phase30_record_fail
+            _expected_agents = result.get("debating_agents", []) or list(votes.keys())
+            for _exp in _expected_agents:
+                if _exp not in votes:
+                    _phase30_record_fail(pair, _exp, 0, "no_vote",
+                                         f"Agent {_exp} did not return vote")
+        except Exception:
+            pass
+
+        # A.11 tee_logger — capture raw debate transcript for offline replay
+        try:
+            from tee_logger import tee as _phase30_tee
+            _raw_dump = str(result)
+            if len(_raw_dump) > 500:
+                _phase30_tee(f"agent_pool_{pair.replace('/', '_')}", _raw_dump, kind="debate")
+        except Exception:
+            pass
+
+        # A.6 decision_doom_loop — fingerprint verdict, alert if same hash repeats x5 in 30min
+        try:
+            from decision_doom_loop import hash_decision as _phase30_dl_hash, record as _phase30_dl_rec
+            _entry_price = None
+            if isinstance(tech_data, dict):
+                _entry_price = tech_data.get("close") or tech_data.get("price")
+            _phase30_h = _phase30_dl_hash(
+                pair=pair,
+                signal=str(result.get("signal", "")),
+                entry_price=_entry_price,
+                reasoning=str(result.get("reasoning", ""))[:200],
+            )
+            _phase30_dl_rec(pair, _phase30_h, threshold=5, window_sec=1800)
+        except Exception:
+            pass
+
+        # B.8 tool_guardrails — record successful debate output for no_progress detection
+        try:
+            from tool_guardrails import _GLOBAL as _phase30_tg
+            _phase30_tg.record_success(
+                f"agent_pool.run_debate.{pair}",
+                f"{result.get('signal', '')}/{round(result.get('confidence', 0), 2)}",
+            )
+        except Exception:
+            pass
+
+        # C.10 contradiction matrix — record agent disagreements
+        try:
+            from contradiction_matrix import _GLOBAL as _phase30_cm
+            _phase30_names = list(votes.keys())
+            for _i in range(len(_phase30_names)):
+                for _j in range(_i + 1, len(_phase30_names)):
+                    _a, _b = _phase30_names[_i], _phase30_names[_j]
+                    _va, _vb = votes[_a], votes[_b]
+                    _agree = (_va * _vb > 0) or (_va == 0 and _vb == 0)
+                    _phase30_cm.record(_a, _b, agree=_agree, pair=pair)
+        except Exception:
+            pass
+
+        # A.25 trade event emission — debate completion
+        try:
+            from trade_event_emitter import emit as _phase30_evt
+            _phase30_evt("agent.debate_complete", {
+                "pair": pair, "regime": regime,
+                "signal": result.get("signal", ""),
+                "confidence": float(result.get("confidence", 0.0)),
+                "n_votes": len(votes),
+            })
+        except Exception:
+            pass
+
         return result
 
     def _process_retrieval_requests(self, response_text: str, pair: str,

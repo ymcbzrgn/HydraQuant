@@ -1,0 +1,5 @@
+name: A35_recent_restarts_classified
+kind: sql_check
+sql: SELECT COUNT(*) FROM service_restart_events WHERE detection_ts >= datetime('now', '-7 days') AND suspected_cause = 'unknown'
+op: lte
+expected: 1

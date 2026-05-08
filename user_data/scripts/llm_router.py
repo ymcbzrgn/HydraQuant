@@ -729,6 +729,23 @@ class LLMRouter:
         self._state_lock = threading.Lock()
         self._provider_map: Dict[int, str] = {}
 
+        # ═══ PHASE 30 A.24 — Provider lifecycle hook ═══
+        try:
+            from provider_lifecycle import register as _phase30_lifecycle_register
+            _phase30_lifecycle_register(
+                "llm_router",
+                lambda: logger.info("[Phase30:Lifecycle] LLMRouter shutdown_all"),
+            )
+        except Exception:
+            pass
+
+        # ═══ PHASE 30 B.6 — Provider capabilities seed ═══
+        try:
+            from provider_capabilities import init_default as _phase30_pc_init
+            _phase30_pc_init()
+        except Exception:
+            pass
+
         # ── Core state ──
         self.slots: List[ModelSlot] = []
         self.gemini_circuit = GeminiCircuitBreaker()
@@ -1357,6 +1374,16 @@ class LLMRouter:
                 )
             except Exception:
                 pass
+            # ═══ PHASE 30 B.8 — Tool-loop guardrails on failure path ═══
+            try:
+                from tool_guardrails import _GLOBAL as _phase30_tg
+                _phase30_tg.record_failure(
+                    tool_name=f"llm.{slot.provider}.{slot.model_name}",
+                    input_repr=str(getattr(messages[-1] if messages else "", "content", ""))[:200],
+                    error_text=error_type or "unknown",
+                )
+            except Exception:
+                pass
             return None, error_type, latency_ms
 
     # ── Retroactive feedback (Task 9.3) ─────────────────────────────────
@@ -1464,12 +1491,50 @@ class LLMRouter:
                 "hour_utc": _dt.datetime.now(_dt.timezone.utc).hour,
             }
 
+        # ═══ PHASE 30 A.17 — Hash-based LLM response cache (read) ═══
+        _phase30_cache_key = None
+        _phase30_cache_model = None
+        try:
+            from llm_response_cache import make_cache_key, get_cached
+            _phase30_prompt = "\n".join(str(getattr(m, "content", "") or "") for m in messages)
+            _phase30_cache_key = make_cache_key("__router__", _phase30_prompt,
+                                                temperature=float(temperature or 0.0))
+            _phase30_hit = get_cached(_phase30_cache_key)
+            if _phase30_hit:
+                cached_text, cached_model = _phase30_hit
+                logger.info(f"[Phase30:LLMCache] HIT model={cached_model}")
+                try:
+                    from langchain_core.messages import AIMessage
+                    return AIMessage(content=cached_text)
+                except Exception:
+                    class _FakeAI:
+                        def __init__(self, content): self.content = content
+                    return _FakeAI(cached_text)
+        except Exception as _ce:
+            logger.debug(f"[Phase30:LLMCache] read skipped: {_ce}")
+
         estimated_tokens = sum(len(str(getattr(m, "content", ""))) for m in messages) // 3
         candidates = self._select_slots(priority, estimated_tokens,
                                         task_context=task_context)
 
         wall_start = time.time()
         last_exception = None
+
+        # ═══ PHASE 30 B.15 — Effort probe re-ranks cascade by priority label ═══
+        try:
+            if priority and str(priority).lower() in ("high", "low", "default", "coord", "probe", "fast"):
+                from effort_probe import select_models as _phase30_effort
+                _phase30_preferred = _phase30_effort(str(priority).lower())
+                _phase30_pref_set = set(_phase30_preferred)
+                candidates = sorted(
+                    candidates,
+                    key=lambda s: (
+                        0 if s.model_name in _phase30_pref_set else 1,
+                        _phase30_preferred.index(s.model_name) if s.model_name in _phase30_pref_set else 99,
+                    ),
+                )
+        except Exception:
+            pass
 
         for slot in candidates:
             elapsed = time.time() - wall_start
@@ -1480,6 +1545,16 @@ class LLMRouter:
             # Re-check availability (may have been penalized during earlier iteration)
             if not slot.is_available(time.time()):
                 continue
+
+            # ═══ PHASE 30 B.7 — Cross-process rate guard ═══
+            try:
+                from rate_guard import acquire as _phase30_rg
+                _allowed, _count = _phase30_rg(slot.provider, int(getattr(slot, "rpm_limit", 60) or 60))
+                if not _allowed:
+                    logger.info(f"[Phase30:RateGuard] {slot.provider} rpm exhausted ({_count}); skip slot")
+                    continue
+            except Exception:
+                pass
 
             _task_name = (task_context or {}).get("task", "") if isinstance(task_context, dict) else ""
             response, error_type, latency_ms = self._try_model(
@@ -1498,6 +1573,25 @@ class LLMRouter:
                                          task_context=task_context)
                 if slot.provider == "gemini":
                     self.gemini_circuit.record_success()
+
+                # ═══ PHASE 30 — adaptive concurrency + response cache (write) + scrub ═══
+                try:
+                    from adaptive_concurrency import _GLOBAL as _phase30_ac
+                    _phase30_ac.record(slot.model_name, int(latency_ms or 0), success=True)
+                except Exception:
+                    pass
+                try:
+                    from think_scrubber import scrub as _phase30_scrub
+                    if hasattr(response, "content"):
+                        response.content = _phase30_scrub(str(response.content))
+                except Exception:
+                    pass
+                if _phase30_cache_key and content:
+                    try:
+                        from llm_response_cache import put_cached
+                        put_cached(_phase30_cache_key, slot.model_name, content)
+                    except Exception:
+                        pass
                 self._maybe_persist()
                 return response
 
@@ -1507,6 +1601,16 @@ class LLMRouter:
                                      latency_ms=latency_ms)
             if slot.provider == "gemini":
                 self.gemini_circuit.record_failure()
+            try:
+                from adaptive_concurrency import _GLOBAL as _phase30_ac_fail
+                _phase30_ac_fail.record(slot.model_name, int(latency_ms or 0), success=False)
+            except Exception:
+                pass
+            try:
+                from error_classifier import classify as _phase30_classify
+                _phase30_classify(ValueError(f"{slot.model_name}: {error_type}"))
+            except Exception:
+                pass
             last_exception = ValueError(f"{slot.model_name}: {error_type}")
 
         logger.error("Complete LLM Failure (All Fallbacks Exhausted)")

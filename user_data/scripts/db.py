@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 from ai_config import AI_DB_PATH as DB_PATH
 
+# Phase 30 A.32 — Canonical re-export for downstream imports
+AI_DB_PATH = DB_PATH
+
+# Phase 30 A.32 — Cleanup 0-byte legacy ai_data.sqlite at user_data/ root
+try:
+    from pathlib import Path as _Path
+    _legacy = _Path(__file__).parent.parent / "ai_data.sqlite"
+    if _legacy.exists() and _legacy.stat().st_size == 0:
+        _legacy.unlink()
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Connection Pool — Thread-safe Singleton
 # ---------------------------------------------------------------------------
@@ -187,14 +199,21 @@ class _PooledConnection:
         self._pool = pool
 
     def _retry_on_locked(self, func, *args, **kwargs):
-        """Retry a database operation on 'database is locked' errors."""
+        """Retry a database operation on 'database is locked' errors.
+
+        Phase 30 A.7: jittered exponential backoff so concurrent freqtrade +
+        scheduler + rag-service processes don't synchronize their retries on
+        the same SQLITE_BUSY tick.
+        """
+        import random as _r
         for attempt in range(self._RETRY_MAX):
             try:
                 return func(*args, **kwargs)
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt < self._RETRY_MAX - 1:
-                    wait = self._RETRY_BASE_WAIT * (attempt + 1)
-                    logger.warning(f"[DB] database is locked, retry {attempt+1}/{self._RETRY_MAX} in {wait:.1f}s")
+                    base = self._RETRY_BASE_WAIT * (attempt + 1)
+                    wait = base * _r.uniform(0.5, 1.5)
+                    logger.warning(f"[DB] database is locked, retry {attempt+1}/{self._RETRY_MAX} in {wait:.2f}s (jittered)")
                     time.sleep(wait)
                 else:
                     raise
@@ -1290,6 +1309,347 @@ def init_db():
                 c.execute(f"ALTER TABLE organism_audit ADD COLUMN {col} {typedef}")
             except sqlite3.OperationalError:
                 pass
+
+        # === PHASE 30 — Production Forensics + Hardening Migrations ===
+        # A.27: Realtime price anomaly detector
+        c.execute('''CREATE TABLE IF NOT EXISTS price_anomaly_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            magnitude REAL NOT NULL,
+            close REAL,
+            prev_close REAL,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.28: ai_lessons UNIQUE dedup index (existing duplicates removed by migrate helper)
+        try:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_lessons_uniq ON ai_lessons(decision_id, pair)")
+        except sqlite3.OperationalError:
+            pass
+
+        # A.31: llm_calls error/status columns (idempotent)
+        for col, typedef in [
+            ("error", "TEXT DEFAULT NULL"),
+            ("error_class", "TEXT DEFAULT NULL"),
+            ("status", "TEXT DEFAULT 'success'"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+
+        # A.33: RAG endpoint latency
+        c.execute('''CREATE TABLE IF NOT EXISTS rag_endpoint_latency (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint TEXT NOT NULL,
+            pair TEXT,
+            regime TEXT,
+            latency_ms INTEGER,
+            status_code INTEGER,
+            timeout_breach INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.35: Service restart events
+        c.execute('''CREATE TABLE IF NOT EXISTS service_restart_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service TEXT NOT NULL,
+            n_restarts INTEGER,
+            last_restart_ts TEXT,
+            detection_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            delta_since_last INTEGER DEFAULT 0,
+            suspected_cause TEXT)''')
+
+        # A.4: Tool result disk persist
+        c.execute('''CREATE TABLE IF NOT EXISTS tool_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_name TEXT NOT NULL,
+            preview TEXT,
+            full_path TEXT,
+            byte_size INTEGER,
+            kind TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.6: Doom loop detector result hash
+        c.execute('''CREATE TABLE IF NOT EXISTS doom_loop_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            decision_hash TEXT,
+            consecutive_count INTEGER,
+            window_start TEXT,
+            window_end TEXT,
+            severity TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.8: Unsuccessful agent decisions
+        c.execute('''CREATE TABLE IF NOT EXISTS agent_pool_unsuccessful_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            agent_name TEXT,
+            round_idx INTEGER,
+            failure_class TEXT,
+            failure_text TEXT,
+            recovered INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.10: SHA-256 prompt integrity
+        c.execute('''CREATE TABLE IF NOT EXISTS prompt_hashes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL UNIQUE,
+            prompt_sha256 TEXT NOT NULL,
+            recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_verified_at DATETIME)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS prompt_integrity_violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            expected_hash TEXT,
+            actual_hash TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.14: JSON parse failures
+        c.execute('''CREATE TABLE IF NOT EXISTS parse_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            raw_text TEXT,
+            error_text TEXT,
+            recovery_method TEXT,
+            recovered INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.15: News cluster
+        c.execute('''CREATE TABLE IF NOT EXISTS news_clusters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cluster_key TEXT NOT NULL,
+            news_id INTEGER,
+            jaccard_score REAL,
+            cluster_size INTEGER,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.16: Threat classification
+        c.execute('''CREATE TABLE IF NOT EXISTS threat_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            news_id INTEGER,
+            tier TEXT NOT NULL,
+            score REAL,
+            keywords TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.17: LLM response cache
+        c.execute('''CREATE TABLE IF NOT EXISTS llm_response_cache (
+            cache_key TEXT PRIMARY KEY,
+            model TEXT,
+            response_text TEXT,
+            tokens_in INTEGER,
+            tokens_out INTEGER,
+            hit_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_hit_at DATETIME)''')
+
+        # A.20: JSONL scratchpad index
+        c.execute('''CREATE TABLE IF NOT EXISTS scratchpad_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            scratchpad_path TEXT,
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            ended_at DATETIME,
+            status TEXT,
+            line_count INTEGER DEFAULT 0)''')
+
+        # A.23: Plateau detection
+        c.execute('''CREATE TABLE IF NOT EXISTS plateau_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric TEXT NOT NULL,
+            window_days INTEGER,
+            std_pct REAL,
+            mean REAL,
+            severity TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.25: Workflow event bus
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            payload_json TEXT,
+            consumer TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # A.29: Autonomy diagnostic snapshots
+        c.execute('''CREATE TABLE IF NOT EXISTS autonomy_diagnostics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level INTEGER,
+            days_stuck INTEGER,
+            n_trades_30d INTEGER,
+            winrate_30d REAL,
+            sharpe_approx_30d REAL,
+            worst_drawdown_30d REAL,
+            eligible INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.6: Provider capabilities + B.5 adaptive concurrency
+        c.execute('''CREATE TABLE IF NOT EXISTS provider_capabilities (
+            model TEXT PRIMARY KEY,
+            context_window INTEGER,
+            supports_json INTEGER DEFAULT 0,
+            supports_tools INTEGER DEFAULT 0,
+            cost_per_1m_in REAL DEFAULT 0,
+            cost_per_1m_out REAL DEFAULT 0,
+            current_concurrency INTEGER DEFAULT 1,
+            target_concurrency INTEGER DEFAULT 1,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.7: Cross-process rate guard state
+        c.execute('''CREATE TABLE IF NOT EXISTS rate_guard_state (
+            provider TEXT PRIMARY KEY,
+            window_start TEXT,
+            count INTEGER DEFAULT 0,
+            limit_rpm INTEGER,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.8: Tool loop guardrails events
+        c.execute('''CREATE TABLE IF NOT EXISTS tool_loop_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern TEXT NOT NULL,
+            context_json TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.9: Error taxonomy
+        c.execute('''CREATE TABLE IF NOT EXISTS error_taxonomy_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            error_class TEXT,
+            taxonomy_label TEXT,
+            retryable INTEGER DEFAULT 0,
+            permanent INTEGER DEFAULT 0,
+            count INTEGER DEFAULT 1,
+            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.13: Iteration budget
+        c.execute('''CREATE TABLE IF NOT EXISTS iteration_budget_state (
+            run_id TEXT PRIMARY KEY,
+            parent_iters INTEGER DEFAULT 0,
+            child_iters INTEGER DEFAULT 0,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            budget_breached INTEGER DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.16: Hourly KPI rollup
+        c.execute('''CREATE TABLE IF NOT EXISTS kpi_rollup_hourly (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hour_bucket TEXT NOT NULL UNIQUE,
+            n_trades INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            pnl_sum REAL DEFAULT 0,
+            n_llm_calls INTEGER DEFAULT 0,
+            avg_latency_ms REAL DEFAULT 0,
+            n_anomalies INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # B.18: Telemetry single
+        c.execute('''CREATE TABLE IF NOT EXISTS telemetry_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            severity TEXT DEFAULT 'info',
+            source_module TEXT,
+            payload_json TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # C.1/C.2: Composite risk manager decisions
+        c.execute('''CREATE TABLE IF NOT EXISTS composite_risk_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            check_name TEXT NOT NULL,
+            passed INTEGER DEFAULT 0,
+            reason TEXT,
+            modifier_applied REAL,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # C.6/C.7: Redteam audit
+        c.execute('''CREATE TABLE IF NOT EXISTS redteam_audit_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_kind TEXT NOT NULL,
+            agent_name TEXT,
+            attack_template TEXT,
+            success INTEGER DEFAULT 0,
+            iterations INTEGER DEFAULT 0,
+            details_json TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # C.10: Contradiction matrix
+        c.execute('''CREATE TABLE IF NOT EXISTS contradiction_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            agent_a TEXT,
+            agent_b TEXT,
+            disagreement REAL,
+            time_decay_weight REAL DEFAULT 1.0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # C.13: Deploy hash history
+        c.execute('''CREATE TABLE IF NOT EXISTS deploy_hash_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_hash TEXT,
+            mismatches INTEGER,
+            ts TEXT)''')
+
+        # D.1: Shadow Kelly promotions
+        c.execute('''CREATE TABLE IF NOT EXISTS shadow_kelly_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            score REAL,
+            streak INTEGER,
+            promoted INTEGER DEFAULT 0,
+            blocked_by TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # D.2: Plan/verify SOP
+        c.execute('''CREATE TABLE IF NOT EXISTS plan_verify_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            plan_json TEXT,
+            verify_verdict TEXT,
+            verify_reason TEXT,
+            executed INTEGER DEFAULT 0,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # D.9: Real-capital promotion gate history
+        c.execute('''CREATE TABLE IF NOT EXISTS promotion_gate_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eligibility_pct REAL,
+            passed INTEGER,
+            blocked_by TEXT,
+            metrics_json TEXT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # === PHASE 30 INDICES ===
+        for idx_sql in [
+            'CREATE INDEX IF NOT EXISTS idx_anomaly_pair_ts ON price_anomaly_events(pair, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_rag_lat_ts ON rag_endpoint_latency(ts)',
+            'CREATE INDEX IF NOT EXISTS idx_rag_lat_endpoint ON rag_endpoint_latency(endpoint)',
+            'CREATE INDEX IF NOT EXISTS idx_restart_svc ON service_restart_events(service, detection_ts)',
+            'CREATE INDEX IF NOT EXISTS idx_tool_results_ts ON tool_results(ts)',
+            'CREATE INDEX IF NOT EXISTS idx_doom_pair ON doom_loop_events(pair, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_unsuccessful_pair ON agent_pool_unsuccessful_decisions(pair, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_parse_failures_src ON parse_failures(source, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_news_clusters_key ON news_clusters(cluster_key, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_threat_tier ON threat_events(tier, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_llm_cache_last_hit ON llm_response_cache(last_hit_at)',
+            'CREATE INDEX IF NOT EXISTS idx_workflow_kind ON workflow_events(kind, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_autonomy_diag_ts ON autonomy_diagnostics(ts)',
+            'CREATE INDEX IF NOT EXISTS idx_telemetry_kind ON telemetry_events(kind, severity, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_composite_risk_pair ON composite_risk_decisions(pair, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_redteam_kind ON redteam_audit_runs(run_kind, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_contradiction_pair ON contradiction_events(pair, ts)',
+            'CREATE INDEX IF NOT EXISTS idx_promotion_ts ON promotion_gate_history(ts)',
+            'CREATE INDEX IF NOT EXISTS idx_plan_verify_pair ON plan_verify_runs(pair, ts)',
+        ]:
+            c.execute(idx_sql)
+
+        # === PHASE 30 — Dedup helper for ai_lessons (A.28) ===
+        try:
+            c.execute("""DELETE FROM ai_lessons
+                         WHERE id NOT IN (SELECT MAX(id) FROM ai_lessons GROUP BY decision_id, pair)""")
+        except sqlite3.OperationalError:
+            pass
 
         conn.commit()
 

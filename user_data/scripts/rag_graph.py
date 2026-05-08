@@ -1602,6 +1602,18 @@ def coordinator_debate(state: GraphState):
     except Exception as e:
         logger.debug(f"[Phase27:SHAP] {pair} injection failed: {e}")
 
+    # ═══ PHASE 30 B.10 — Context compression if raw_block exceeds 6K chars ═══
+    try:
+        if isinstance(raw_block, str) and len(raw_block) > 6000:
+            from context_compressor import compress as _phase30_compress
+            _orig_len = len(raw_block)
+            raw_block = _phase30_compress(raw_block, target_chars=6000, use_llm=False)
+            logger.info(
+                f"[Phase30:B.10] {pair} raw_block compressed {_orig_len}→{len(raw_block)} chars"
+            )
+    except Exception as _ccx:
+        logger.debug(f"[Phase30:B.10] compression skipped: {_ccx}")
+
     prompt = f"""You are the Master Coordinator (Executive AI) for a quantitative trading firm trading {pair}.
 
 === AGENT REPORTS ===
@@ -2561,6 +2573,18 @@ if __name__ == "__main__":
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+        # ═══ PHASE 30 A.33 — RAG endpoint latency profiler middleware ═══
+        try:
+            from rag_latency_profiler import fastapi_middleware_factory
+            _phase30_lat_mw = fastapi_middleware_factory(timeout_threshold_ms=40_000)
+
+            @serve_app.middleware("http")
+            async def _phase30_latency_track(request, call_next):
+                return await _phase30_lat_mw(request, call_next)
+            logger.info("[Phase30:A.33] RAG latency profiler middleware installed")
+        except Exception as _phase30_e:
+            logger.warning(f"[Phase30:A.33] middleware install skipped: {_phase30_e}")
 
         @serve_app.get("/signal/{pair:path}")
         def signal_endpoint(pair: str):

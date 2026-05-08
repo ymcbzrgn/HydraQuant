@@ -1,0 +1,5 @@
+name: A26_no_oversized_positions
+kind: sql_check
+sql: SELECT COUNT(*) FROM trades WHERE stake_amount > 0 AND open_date >= datetime('now', '-7 days') AND stake_amount > 1000
+op: lte
+expected: 0

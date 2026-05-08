@@ -1,0 +1,3 @@
+name: assertions_importable
+kind: module_import
+module: assertions

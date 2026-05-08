@@ -3262,6 +3262,179 @@ class HydraSizer(IStrategy):
         except Exception:
             pass
 
+        # ═══ PHASE 30 B.13 — Iteration budget for this trade decision ═══
+        _phase30_run_id = f"trade_{pair}_{int(current_time.timestamp())}"
+        try:
+            from iteration_budget import begin as _phase30_ib_begin
+            _phase30_ib_begin(_phase30_run_id, parent_max=6, child_max=3, token_budget=50000)
+        except Exception:
+            pass
+
+        # ═══ PHASE 30 — A.27 Realtime Anomaly Halt (testnet SHORT bias defense) ═══
+        try:
+            from realtime_anomaly_detector import get_detector
+            df_1m, _ = self.dp.get_analyzed_dataframe(pair, "1m") if "1m" in getattr(self, "informative_pairs", lambda: [])() or True else (None, None)
+            if df_1m is None or (hasattr(df_1m, "empty") and df_1m.empty):
+                df_1m = self.dp.ohlcv(pair, "1m") if hasattr(self.dp, "ohlcv") else None
+            if df_1m is not None and len(df_1m) >= 2:
+                last_close = float(df_1m["close"].iat[-1])
+                last_volume = float(df_1m.get("volume", df_1m["close"]).iat[-1])
+                anom = get_detector().check_bar(pair, last_close, last_volume)
+                if anom:
+                    logger.error(f"[Phase30:AnomalyHalt] BLOCKED entry {pair}: {anom}")
+                    return False
+            halted, halt_reason = get_detector().is_halted(pair)
+            if halted:
+                logger.warning(f"[Phase30:AnomalyHalt] {pair} cooldown active: {halt_reason}")
+                return False
+        except Exception as _aex:
+            logger.debug(f"[Phase30:AnomalyHalt] check failed (non-fatal): {_aex}")
+
+        # ═══ PHASE 30 — A.18 + A.26 Custom assert chain + position cap (LINK -1016 onlemi) ═══
+        try:
+            from assertions import (
+                check_kelly_floor, check_kelly_ceiling, check_stop_loss_present,
+                check_leverage_bound, check_single_position_cap,
+                check_aggregate_exposure_cap, check_min_notional,
+            )
+            _portfolio_value = 0.0
+            try:
+                _portfolio_value = float(self.wallets.get_total(self.config.get("stake_currency", "USDT")))
+            except Exception:
+                _portfolio_value = float(self.wallets.get_starting_balance()) if hasattr(self, "wallets") else 0.0
+            _stake_now = float(amount) * float(rate) if rate else 0.0
+            _ai_dec = self.ai_signal_cache.get(pair, {}) or {}
+            _kelly = float(_ai_dec.get("kelly_fraction", 0.01) or 0.01)
+            _stop = float(_ai_dec.get("stop_loss_pct", -0.05) or -0.05)
+            _lev = float(_ai_dec.get("leverage", 1.0) or 1.0)
+
+            for _r, _label in (
+                (check_kelly_floor(_kelly), "kelly_floor"),
+                (check_kelly_ceiling(_kelly), "kelly_ceiling"),
+                (check_stop_loss_present(_stop), "stop_loss"),
+                (check_leverage_bound(_lev), "leverage"),
+            ):
+                if not _r.passed and _r.severity == "error":
+                    logger.warning(f"[Phase30:Assert:{_label}] BLOCKED {pair}: {_r.reason}")
+                    return False
+
+            _cap = check_single_position_cap(_stake_now, _portfolio_value, max_pct=0.025)
+            if not _cap.passed:
+                logger.error(f"[Phase30:PositionCap] BLOCKED {pair}: {_cap.reason}")
+                return False
+            try:
+                from freqtrade.persistence import Trade as _T
+                _open_value = float(sum((t.stake_amount or 0) for t in _T.get_open_trades()))
+            except Exception:
+                _open_value = 0.0
+            _agg = check_aggregate_exposure_cap(_open_value + _stake_now, _portfolio_value, max_pct=0.50)
+            if not _agg.passed:
+                logger.error(f"[Phase30:AggregateCap] BLOCKED {pair}: {_agg.reason}")
+                return False
+            _mn = check_min_notional(_stake_now)
+            if not _mn.passed:
+                logger.warning(f"[Phase30:MinNotional] BLOCKED {pair}: {_mn.reason}")
+                return False
+        except Exception as _ax:
+            logger.debug(f"[Phase30:AssertChain] non-fatal: {_ax}")
+
+        # ═══ PHASE 30 — A.25 Workflow event emission ═══
+        try:
+            from trade_event_emitter import emit as _evt_emit
+            _evt_emit("trade.opened", {
+                "pair": pair, "side": side, "rate": float(rate),
+                "stake": float(amount) * float(rate) if rate else 0.0,
+                "confidence": float(self.ai_signal_cache.get(pair, {}).get("confidence", 0.0)),
+                "regime": self.ai_signal_cache.get(pair, {}).get("regime", ""),
+            })
+        except Exception:
+            pass
+
+        # ═══ PHASE 30 C.1 — Strangler Fig: Controllers/Executors shadow chain ═══
+        # The legacy 22-callback HydraSizer flow remains canonical. This block
+        # runs the new Controllers (Signal -> Risk -> Timing) + OrderExecutor
+        # in parallel and records the verdict to telemetry_events. After 30
+        # days of observation showing chain matches legacy within tolerance,
+        # the override flag (PARAM `controllers.canonical`) can be flipped.
+        try:
+            from controllers import (
+                SignalController, RiskController, TimingController, ControllerContext,
+            )
+            from executors import OrderExecutor, OrderRequest
+            from composite_risk_manager import build_default as _phase30_crm
+            from freqtrade.persistence import Trade as _PT  # safe in strategy context
+            _phase30_open = []
+            try:
+                _phase30_open = [
+                    {"pair": t.pair, "stake_amount": float(t.stake_amount or 0)}
+                    for t in _PT.get_open_trades()
+                ]
+            except Exception:
+                _phase30_open = []
+            _phase30_pv = 0.0
+            try:
+                _phase30_pv = float(self.wallets.get_total(self.config.get("stake_currency", "USDT")))
+            except Exception:
+                _phase30_pv = 0.0
+            _phase30_ai = self.ai_signal_cache.get(pair, {}) or {}
+            _phase30_ctx = ControllerContext(
+                pair=pair, side=side,
+                portfolio_value=_phase30_pv,
+                open_positions=_phase30_open,
+                market_regime=str(_phase30_ai.get("regime", "")),
+                metadata={
+                    "proposed_stake": float(amount) * float(rate) if rate else 0.0,
+                    "decision_metadata": {
+                        "kelly_fraction": float(_phase30_ai.get("kelly_fraction", 0.01) or 0.01),
+                        "leverage": float(_phase30_ai.get("leverage", 1.0) or 1.0),
+                        "stop_loss_pct": float(_phase30_ai.get("stop_loss_pct", -0.05) or -0.05),
+                    },
+                },
+            )
+            _phase30_sig = SignalController().decide(_phase30_ctx)
+            _phase30_risk = RiskController(composite_risk_manager=_phase30_crm()).decide(_phase30_ctx)
+            _phase30_time = TimingController().decide(_phase30_ctx)
+            _phase30_ord = OrderExecutor(dry_run=True).submit(OrderRequest(
+                pair=pair, side=side,
+                stake_amount=float(amount) * float(rate) if rate else 0.0,
+                rate=float(rate or 0),
+                metadata={"kelly_fraction": float(_phase30_ai.get("kelly_fraction", 0.01) or 0.01)},
+            ))
+            _phase30_chain_proceed = _phase30_sig.proceed and _phase30_risk.proceed and _phase30_time.proceed
+            _phase30_chain_blocked = []
+            if not _phase30_sig.proceed:
+                _phase30_chain_blocked.append(f"signal:{_phase30_sig.blocked_by or _phase30_sig.reason}")
+            if not _phase30_risk.proceed:
+                _phase30_chain_blocked.append(f"risk:{_phase30_risk.blocked_by or _phase30_risk.reason}")
+            if not _phase30_time.proceed:
+                _phase30_chain_blocked.append(f"timing:{_phase30_time.blocked_by or _phase30_time.reason}")
+            try:
+                from telemetry import record as _phase30_t
+                _phase30_t(
+                    kind="controllers.shadow_decision",
+                    severity="info",
+                    source_module="HydraSizer.confirm_trade_entry",
+                    payload={
+                        "pair": pair,
+                        "legacy_will_proceed": True,
+                        "controller_chain_proceed": bool(_phase30_chain_proceed),
+                        "blocked_by": _phase30_chain_blocked,
+                        "executor_dry_run_ok": bool(_phase30_ord.success),
+                        "stake_signal": _phase30_sig.stake_amount,
+                        "stake_risk": _phase30_risk.stake_amount,
+                        "stake_timing": _phase30_time.stake_amount,
+                    },
+                )
+            except Exception:
+                pass
+            if not _phase30_chain_proceed:
+                logger.info(
+                    f"[Phase30:C.1:ShadowDiverge] {pair} controller-chain would BLOCK "
+                    f"({','.join(_phase30_chain_blocked) or 'no_reason'}) — legacy still proceeds (observation only)"
+                )
+        except Exception as _phase30_cx:
+            logger.debug(f"[Phase30:C.1] strangler chain skipped: {_phase30_cx}")
+
         # ═══ POST-QUANTIZATION NOTIONAL CHECK (Hummingbot BudgetChecker pattern) ═══
         # Freqtrade truncates amount in create_order() AFTER this callback.
         # But we can pre-check: if notional is borderline, exchange will reject.
@@ -3397,6 +3570,12 @@ class HydraSizer(IStrategy):
             logger.debug(f"[Sprint2:Contract] Creation skipped: {e}")
 
         logger.info(f"[Trade Entry] {pair} {signal_type} conf={confidence:.2f} stake=${amount*rate:.2f} — {reasoning}")
+        # ═══ PHASE 30 B.13 — Close iteration budget on commit ═══
+        try:
+            from iteration_budget import end as _phase30_ib_end
+            _phase30_ib_end(_phase30_run_id)
+        except Exception:
+            pass
         return True
 
     def confirm_trade_exit(self, pair: str, trade: 'Trade', order_type: str, amount: float,

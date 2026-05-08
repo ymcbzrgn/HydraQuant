@@ -100,11 +100,32 @@ def _fetch_rss_feeds_inner():
     except sqlite3.OperationalError:
         pass
     
+    # ═══ PHASE 30 A.15 — News cluster (Jaccard 24h) singleton ═══
+    try:
+        import sys as _phase30_sys
+        if "_phase30_news_cluster" not in globals():
+            from news_cluster import NewsCluster as _phase30_NC
+            globals()["_phase30_news_cluster"] = _phase30_NC()
+    except Exception:
+        pass
+    _phase30_cluster = globals().get("_phase30_news_cluster")
+
     for source_name, url in RSS_FEEDS.items():
         logger.info(f"Fetching RSS feed from {source_name}...")
         feed = None
         try:
-            feed = feedparser.parse(url)
+            # ═══ PHASE 30 A.21 — Browser UA rotation for fetch ═══
+            try:
+                import requests as _phase30_req
+                from scripts.browser_ua import random_headers as _phase30_ua, is_access_denied as _phase30_blocked
+                _phase30_resp = _phase30_req.get(url, headers=_phase30_ua(), timeout=30)
+                _denied, _kind = _phase30_blocked(_phase30_resp.status_code, _phase30_resp.text[:5000])
+                if _denied:
+                    logger.warning(f"[Phase30:A.21] {source_name} access denied: {_kind}; skipping")
+                    continue
+                feed = feedparser.parse(_phase30_resp.text)
+            except Exception:
+                feed = feedparser.parse(url)
 
             for entry in feed.entries:
                 title = entry.get('title', '')
@@ -113,6 +134,13 @@ def _fetch_rss_feeds_inner():
 
                 if not title or not link:
                     continue
+
+                # ═══ PHASE 30 A.13 + A.15 + A.16 — News tag/cluster/threat ═══
+                try:
+                    if _phase30_cluster is not None and _phase30_cluster.is_duplicate(title):
+                        continue
+                except Exception:
+                    pass
 
                 pub_date = parse_date(entry)
                 thash = title_hash(title)
@@ -124,6 +152,22 @@ def _fetch_rss_feeds_inner():
                     ''', (source_name, title, summary, link, pub_date, thash))
                     if c.rowcount > 0:
                         new_articles += 1
+                        _phase30_news_id = c.lastrowid
+                        try:
+                            if _phase30_cluster is not None:
+                                _phase30_cluster.assign(_phase30_news_id, title)
+                        except Exception:
+                            pass
+                        try:
+                            from news_ai_tagger import classify_headline as _phase30_tag
+                            _phase30_tag(title, summary, use_llm=False)
+                        except Exception:
+                            pass
+                        try:
+                            from threat_classifier import classify as _phase30_threat
+                            _phase30_threat(title, summary, news_id=_phase30_news_id)
+                        except Exception:
+                            pass
                 except sqlite3.IntegrityError:
                     continue
 

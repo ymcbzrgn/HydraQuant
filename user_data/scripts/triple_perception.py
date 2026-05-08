@@ -460,6 +460,55 @@ class TriplePerception:
                 chart_features=chart_features,
             )
 
+        # ═══ PHASE 30 D.7 — Quintuple Perception (5th + 6th source overlay) ═══
+        # Adds long-horizon (TimesFM-style) and visual chart pattern (YOLO)
+        # alongside existing 9-stage triple_perception output. Result fields:
+        # - quintuple_direction, quintuple_confidence, quintuple_n_sources,
+        #   quintuple_disagreement_penalty, quintuple_breakdown
+        # When foundation/long-horizon/YOLO weights are absent the modules
+        # gracefully fall back; this is observation-mode and never overrides
+        # the primary fused signal — sizing_multiplier remains canonical.
+        try:
+            from quintuple_perception import collect_votes, fuse
+            _closes_1m = []
+            try:
+                if df_1h is not None and len(df_1h):
+                    _closes_1m = list(df_1h["close"].tail(120).astype(float).values)
+            except Exception:
+                _closes_1m = []
+            _closes_1h = list(_closes_1m)
+            _votes = collect_votes(
+                pair=pair or "",
+                ohlcv_close=_closes_1m,
+                ohlcv_1h_close=_closes_1h,
+                png_path=None,
+            )
+            if _votes:
+                _fused = fuse(_votes)
+                result["quintuple_direction"] = _fused.direction
+                result["quintuple_confidence"] = _fused.confidence
+                result["quintuple_n_sources"] = _fused.n_sources
+                result["quintuple_disagreement_penalty"] = _fused.disagreement_penalty
+                result["quintuple_breakdown"] = _fused.breakdown
+                # Telemetry — record observation-mode fused signal
+                try:
+                    from telemetry import record as _phase30_tm
+                    _phase30_tm(
+                        kind="perception.quintuple",
+                        severity="debug",
+                        source_module="triple_perception",
+                        payload={
+                            "pair": pair, "n_sources": _fused.n_sources,
+                            "direction": round(_fused.direction, 3),
+                            "confidence": round(_fused.confidence, 3),
+                            "disagreement": round(_fused.disagreement_penalty, 3),
+                        },
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return result
 
     def _persist_world_model_state(
