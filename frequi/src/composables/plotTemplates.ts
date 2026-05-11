@@ -1,4 +1,5 @@
 import type { IndicatorConfig, PlotConfig, PlotConfigTemplate } from '@/types';
+import { isIndicatorConfig } from '@/types';
 
 const plotTemplates = ref<PlotConfigTemplate>({
   BollingerBands: {
@@ -49,11 +50,13 @@ function replaceTemplateColumns(template: Partial<PlotConfig>, nameMap: Record<s
   const newMainPlot: Record<string, IndicatorConfig> = {};
   for (const key in template.main_plot) {
     const newKey = nameMap[key] || key;
-    // TODO: typecheck / don't force the type
-    newMainPlot[newKey] = template.main_plot[key]!;
-    if (newMainPlot[newKey].fill_to !== undefined) {
-      newMainPlot[newKey].fill_to =
-        nameMap[newMainPlot[newKey].fill_to] || newMainPlot[newKey].fill_to;
+    const config = template.main_plot[key];
+    if (isIndicatorConfig(config)) {
+      newMainPlot[newKey] = config;
+      if (newMainPlot[newKey].fill_to !== undefined) {
+        newMainPlot[newKey].fill_to =
+          nameMap[newMainPlot[newKey].fill_to] || newMainPlot[newKey].fill_to;
+      }
     }
   }
   if ('main_plot' in template) {
@@ -66,11 +69,13 @@ function replaceTemplateColumns(template: Partial<PlotConfig>, nameMap: Record<s
     const newSubplot: Record<string, IndicatorConfig> = {};
     for (const key in template.subplots[subplotKey]) {
       const newKey = nameMap[key] || key;
-      // TODO: typecheck / don't force the type
-      newSubplot[newKey] = template.subplots[subplotKey][key]!;
-      if (newSubplot[newKey].fill_to !== undefined) {
+      const config = template.subplots[subplotKey][key];
+      if (isIndicatorConfig(config)) {
+        newSubplot[newKey] = config;
+        if (newSubplot[newKey].fill_to !== undefined) {
         newSubplot[newKey].fill_to =
           nameMap[newSubplot[newKey].fill_to] || newSubplot[newKey].fill_to;
+        }
       }
     }
     newSubplots[subplotKey] = newSubplot;

@@ -31,3 +31,16 @@ export interface PlotConfigTemplate {
 }
 
 export const EMPTY_PLOTCONFIG: PlotConfig = { main_plot: {}, subplots: {} };
+
+export function isIndicatorConfig(obj: any): obj is IndicatorConfig {
+  if (typeof obj !== 'object' || obj === null) {
+    return false;
+  }
+
+  if ('color' in obj && typeof obj.color !== 'string' && obj.color !== undefined) return false;
+  if ('type' in obj && typeof obj.type !== 'string' && obj.type !== undefined) return false;
+  if ('fill_to' in obj && typeof obj.fill_to !== 'string' && obj.fill_to !== undefined) return false;
+  if ('scatterSymbolSize' in obj && typeof obj.scatterSymbolSize !== 'number' && obj.scatterSymbolSize !== undefined) return false;
+
+  return true;
+}
