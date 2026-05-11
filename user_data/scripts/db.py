@@ -965,9 +965,52 @@ def init_db():
             except sqlite3.IntegrityError:
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            is_open INTEGER NOT NULL DEFAULT 1,
+            fee_open REAL NOT NULL DEFAULT 0.0,
+            fee_open_cost REAL,
+            fee_open_currency TEXT,
+            fee_close REAL NOT NULL DEFAULT 0.0,
+            fee_close_cost REAL,
+            fee_close_currency TEXT,
+            open_rate REAL,
+            open_rate_requested REAL,
+            open_trade_value REAL,
+            close_rate REAL,
+            close_rate_requested REAL,
+            close_profit REAL,
+            close_profit_abs REAL,
+            stake_amount REAL NOT NULL,
+            amount REAL,
+            amount_requested REAL,
+            open_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            close_date DATETIME,
+            open_order_id TEXT,
+            stop_loss REAL,
+            stop_loss_pct REAL,
+            initial_stop_loss REAL,
+            initial_stop_loss_pct REAL,
+            stoploss_order_id TEXT,
+            stoploss_last_update DATETIME,
+            max_rate REAL,
+            min_rate REAL,
+            sell_reason TEXT,
+            strategy TEXT,
+            enter_tag TEXT,
+            timeframe INTEGER,
+            exchange TEXT,
+            profit_ratio REAL,
+            profit_abs REAL,
+            leverage REAL DEFAULT 1.0,
+            is_short INTEGER NOT NULL DEFAULT 0,
+            liquidation_price REAL,
+            funding_fees REAL DEFAULT 0.0)''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
-            content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            content TEXT, context TEXT, score REAL DEFAULT 0.0, decision_id TEXT, pair TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
@@ -1651,6 +1694,8 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        c.execute('''INSERT INTO autonomy_diagnostics (level, days_stuck, n_trades_30d, winrate_30d, sharpe_approx_30d, worst_drawdown_30d, eligible)
+                     VALUES (1, 0, 10, 0.5, 1.0, 0.1, 1)''')
         conn.commit()
 
     logger.info(f"[DB] Database initialized at {DB_PATH}")
