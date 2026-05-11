@@ -2,7 +2,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from freqtrade.exchange import timeframe_to_next_date
 from freqtrade.persistence.models import PairLock
@@ -142,11 +142,10 @@ class PairLocks:
                 PairLock.active.is_(True),
                 PairLock.reason == reason,
             ]
-            PairLock.session.execute(
-                update(PairLock)
-                .where(*filters)
-                .values(active=False)
-            )
+            locks = PairLock.session.scalars(select(PairLock).filter(*filters)).all()
+            for lock in locks:
+                logger.info(f"Releasing lock for {lock.pair} with reason '{reason}'.")
+                lock.active = False
             PairLock.session.commit()
         else:
             # used in backtesting mode; don't show log messages for speed
