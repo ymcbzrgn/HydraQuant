@@ -26,14 +26,14 @@ const classLabel = 'w-6/12 text-surface-500 text-sm';
         {{ trade.amount }}
       </ValuePair>
       <ValuePair description="Open Rate" :class-label="classLabel">
-        {{ formatNumber(trade.open_rate) }}
+        {{ formatPrice(trade.open_rate) }}
       </ValuePair>
       <ValuePair
         v-if="trade.is_open && trade.current_rate"
         description="Current Rate"
         :class-label="classLabel"
       >
-        {{ formatNumber(trade.current_rate) }}
+        {{ formatPrice(trade.current_rate) }}
       </ValuePair>
       <ValuePair description="Open date" :class-label="classLabel">
         <DateTimeTZ :date="trade.open_timestamp" :date-only="true" />

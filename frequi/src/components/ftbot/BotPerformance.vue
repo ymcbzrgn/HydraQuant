@@ -47,7 +47,7 @@ const performanceTable = computed<
     {
       key: 'profit_abs',
       label: `Profit ${botStore.activeBot.botState?.stake_currency}`,
-      formatter: (v: unknown) => formatNumber(v as number, 5),
+      formatter: (v: unknown) => formatPrice(v as number, 5),
     },
     { key: 'count', label: 'Count' },
   ];

@@ -480,6 +480,7 @@ declare module 'vue' {
     readonly formatNumber: UnwrapRef<typeof import('./utils/formatters/numberformat')['formatNumber']>
     readonly formatObjectForTable: UnwrapRef<typeof import('./utils/objectToTableItems')['formatObjectForTable']>
     readonly formatPercent: UnwrapRef<typeof import('./utils/formatters/numberformat')['formatPercent']>
+    readonly formatPrice: UnwrapRef<typeof import('./utils/formatters/numberformat')['formatPrice']>
     readonly formatPriceCurrency: UnwrapRef<typeof import('./utils/formatters/numberformat')['formatPriceCurrency']>
     readonly ftEchartsTransforms: UnwrapRef<typeof import('./utils/charts/ftEchartsTransforms')['ftEchartsTransforms']>
     readonly generateAreaCandleSeries: UnwrapRef<typeof import('./utils/charts/candleChartSeries')['generateAreaCandleSeries']>

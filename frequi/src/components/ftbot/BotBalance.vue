@@ -22,7 +22,7 @@ const balanceCurrencies = computed(() => {
 });
 
 const formatCurrency = (value) => {
-  return value ? formatNumber(value, botStore.activeBot.stakeCurrencyDecimals) : '';
+  return value ? formatPrice(value, botStore.activeBot.stakeCurrencyDecimals) : '';
 };
 
 const chartValues = computed<BalanceValues[]>(() => {

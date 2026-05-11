@@ -46,7 +46,7 @@ const confirmExitValue = ref<ModalReasons | null>(null);
 
 const increasePosition = ref({ visible: false, trade: {} as Trade });
 function formatPriceWithDecimals(price: number) {
-  return formatNumber(price, botStore.activeBot.stakeCurrencyDecimals);
+  return formatPrice(price, botStore.activeBot.stakeCurrencyDecimals);
 }
 
 const tableFields = ref([
@@ -250,10 +250,10 @@ watch(
           <template
             v-else-if="field === 'open_rate' || field === 'current_rate' || field === 'close_rate'"
           >
-            {{ formatNumber(data[field]) }}
+            {{ formatPrice(data[field]) }}
           </template>
           <template v-else-if="field === 'amount'">
-            {{ formatNumber(data[field]) }}
+            {{ formatPrice(data[field]) }}
           </template>
           <template v-else-if="field === 'profit'">
             <TradeProfit :trade="data" />

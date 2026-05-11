@@ -7,13 +7,13 @@
     </div>
 
     <TabView>
-      <TabPanel value="structural" header="Structural Analysis">
+      <TabPanel header="Structural Analysis">
         <div class="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg whitespace-pre-wrap leading-relaxed border dark:border-gray-700 text-sm break-words">
           {{ signal.reasoning || 'No reasoning provided by the AI for this decision.' }}
         </div>
       </TabPanel>
 
-      <TabPanel value="parameters" header="Parameters">
+      <TabPanel header="Parameters">
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="p-3 border rounded-lg dark:border-gray-700 bg-white dark:bg-gray-900 flex flex-col items-center">
             <div class="text-sm text-gray-600 dark:text-gray-400 mb-2">Confidence Score</div>
@@ -34,7 +34,7 @@
         </div>
       </TabPanel>
 
-      <TabPanel value="market" header="Market Context">
+      <TabPanel header="Market Context">
         <SentimentDisplay :pair="signal.pair" :sentiment="pairSentiment" />
       </TabPanel>
     </TabView>

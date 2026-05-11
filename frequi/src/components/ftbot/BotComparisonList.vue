@@ -182,7 +182,7 @@ const tableItems = computed<ComparisonTableItems[]>(() => {
         <div v-if="data.balance">
           <span :title="(data as ComparisonTableItems).stakeCurrency"
             >{{
-              formatNumber(
+              formatPrice(
                 (data as ComparisonTableItems).balance ?? 0,
                 (data as ComparisonTableItems).stakeCurrencyDecimals,
               )

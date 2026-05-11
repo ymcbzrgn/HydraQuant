@@ -23,7 +23,7 @@ function getWorstPair(trades: Trade[]) {
 
 function useFormatPriceStake(stake_currency_decimals: number, stake_currency: string) {
   const formatPriceStake = (price) => {
-    return `${formatNumber(price, stake_currency_decimals)} ${stake_currency}`;
+    return `${formatPrice(price, stake_currency_decimals)} ${stake_currency}`;
   };
   return formatPriceStake;
 }

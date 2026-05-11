@@ -25,6 +25,18 @@ export function formatNumber(value: number | null | undefined, decimals = 15): s
 }
 
 /**
+ * Format number to `decimals` without trailing zeros
+ * Compatibility function
+ * // TODO: should be replaced with formatNumber!
+ * @param value Number to format
+ * @param decimals number of decimals (Defaults to 15)
+ * @returns Formatted string
+ */
+export function formatPrice(value: number | null, decimals = 15): string {
+  return formatNumber(value, decimals);
+}
+
+/**
  * Formats price in the format "<price> <StakeCurrency>" using "deciaml" decimals
  * @param price Price to format
  * @param currency currency to use
@@ -32,7 +44,7 @@ export function formatNumber(value: number | null | undefined, decimals = 15): s
  * @returns
  */
 export function formatPriceCurrency(price: number | null, currency: string, decimals = 3) {
-  return `${formatNumber(price, decimals)} ${currency ?? ''}`;
+  return `${formatPrice(price, decimals)} ${currency ?? ''}`;
 }
 
 /**
