@@ -1077,3 +1077,35 @@ def test_protection_manager_desc(
 
     short_desc = str(freqtrade.protections.short_desc())
     assert short_desc == desc_expected
+
+
+def test_MaxDrawdown_invalid_config(mocker, default_conf):
+    default_conf["_strategy_protections"] = [
+        {
+            "method": "MaxDrawdown",
+            "lookback_period": 1000,
+            "stop_duration": 60,
+            "trade_limit": 3,
+            "max_allowed_drawdown": 1.5,
+        }
+    ]
+    with pytest.raises(
+        OperationalException,
+        match=r"MaxDrawdown protection: max_allowed_drawdown must be between 0.0 and 1.0.*",
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
+
+    default_conf["_strategy_protections"] = [
+        {
+            "method": "MaxDrawdown",
+            "lookback_period": 1000,
+            "stop_duration": 60,
+            "trade_limit": 3,
+            "max_allowed_drawdown": -0.1,
+        }
+    ]
+    with pytest.raises(
+        OperationalException,
+        match=r"MaxDrawdown protection: max_allowed_drawdown must be between 0.0 and 1.0.*",
+    ):
+        get_patched_freqtradebot(mocker, default_conf)
