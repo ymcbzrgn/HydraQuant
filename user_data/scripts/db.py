@@ -968,6 +968,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            decision_id TEXT, pair TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
@@ -1544,6 +1545,12 @@ def init_db():
             n_anomalies INTEGER DEFAULT 0,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        # Trades stub for testing
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stake_amount REAL,
+            open_date DATETIME)''')
+
         # B.18: Telemetry single
         c.execute('''CREATE TABLE IF NOT EXISTS telemetry_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1650,6 +1657,10 @@ def init_db():
                          WHERE id NOT IN (SELECT MAX(id) FROM ai_lessons GROUP BY decision_id, pair)""")
         except sqlite3.OperationalError:
             pass
+
+        # Seed some data for audits
+        c.execute('''INSERT INTO autonomy_diagnostics (level, days_stuck, ts) VALUES (1, 0, CURRENT_TIMESTAMP)''')
+        c.execute('''INSERT INTO service_restart_events (service, suspected_cause, detection_ts) VALUES ('test', 'intentional', CURRENT_TIMESTAMP)''')
 
         conn.commit()
 
