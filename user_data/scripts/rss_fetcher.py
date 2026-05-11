@@ -72,7 +72,7 @@ def title_hash(title: str) -> str:
     normalized = title.lower().strip()
     # Kısa kelimeleri kaldır (a, the, is...)
     words = [w for w in normalized.split() if len(w) > 3]
-    return hashlib.md5(" ".join(words).encode()).hexdigest()
+    return hashlib.sha256(" ".join(words).encode()).hexdigest()
 
 def fetch_rss_feeds():
     """Fetches articles from RSS feeds and stores them if they don't exist."""
