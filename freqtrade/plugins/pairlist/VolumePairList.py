@@ -193,7 +193,6 @@ class VolumePairList(IPairList):
             ]
             # No point in testing for blacklisted pairs...
             _pairlist = self.verify_blacklist(_pairlist, logger.info)
-            _pairlist_set = set(_pairlist)
             if not self._use_range:
                 filtered_tickers = [
                     v
@@ -201,7 +200,7 @@ class VolumePairList(IPairList):
                     if (
                         self._exchange.get_pair_quote_currency(k) == self._stake_currency
                         and (self._use_range or v.get(self._sort_key) is not None)
-                        and v["symbol"] in _pairlist_set
+                        and v["symbol"] in _pairlist
                     )
                 ]
                 pairlist = [s["symbol"] for s in filtered_tickers]

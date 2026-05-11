@@ -966,9 +966,14 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id INTEGER,
+            pair TEXT, signal TEXT, outcome_pnl REAL, lesson_text TEXT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, stake_amount REAL,
+            open_date DATETIME, close_date DATETIME)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
         # api_ai.py reads level/promoted_at/sharpe_estimate/max_drawdown_pct/days_at_level;
