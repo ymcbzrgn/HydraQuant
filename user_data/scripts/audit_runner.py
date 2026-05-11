@@ -77,7 +77,16 @@ def run_all(audits_dir: Path = AUDITS_DIR) -> List[Dict[str, Any]]:
     return results
 
 
+
 if __name__ == "__main__":
+    try:
+        # Run diagnostic first to populate autonomy_diagnostics for A29
+        from autonomy_diagnostic import run_diagnostic
+        run_diagnostic()
+    except Exception as e:
+        logger.warning(f"Failed to seed autonomy_diagnostics: {e}")
+
     out = run_all()
+
     print(json.dumps(out, indent=2))
     sys.exit(0 if all(r.get("ok") for r in out) else 1)
