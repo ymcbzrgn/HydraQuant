@@ -1,3 +1,4 @@
+import { useAlertForBot } from '@/utils/alerts';
 import type {
   AllProfitStats,
   AvailablePairPayload,
@@ -574,6 +575,7 @@ export function createBotSubStore(botId: string, botName: string) {
           return Promise.resolve(data);
         } catch (error) {
           console.error(error);
+          useAlertForBot(botName).showAlert('Failed to fetch performance data', 'error');
           return Promise.reject(error);
         }
       },

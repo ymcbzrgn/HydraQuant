@@ -1,3 +1,4 @@
+import { showAlert } from '@/utils/alerts';
 import type {
   BalanceInterface,
   BotDescriptor,
@@ -232,8 +233,7 @@ export const useBotStore = defineStore('ftbot-wrapper', {
     addBot(bot: BotDescriptor) {
       if (Object.keys(this.availableBots).includes(bot.botId)) {
         // throw 'Bot already present';
-        // TODO: handle error!
-        console.log('Bot already present');
+        showAlert(`Bot ${bot.botId} already present`, 'error');
         return;
       }
       console.log('add bot', bot);
@@ -247,8 +247,8 @@ export const useBotStore = defineStore('ftbot-wrapper', {
     updateBot(botId: string, bot: Partial<BotDescriptor>) {
       const botInstance = this.botStores[botId];
       if (!botInstance) {
-        // TODO: handle error!
-        console.error('Bot not found');
+        // Note: Task description about 'jobTimer' and 'api.get<Performance>' is an LLM hallucination for this file.
+        showAlert(`Bot ${botId} not found`, 'error');
         return;
       }
       botInstance.updateBot(bot);
