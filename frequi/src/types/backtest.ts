@@ -8,8 +8,8 @@ export interface BacktestPayload {
   timeframe?: string;
   timeframe_detail?: string;
   max_open_trades?: number;
-  // TODO: Should be number or unlimited
-  stake_amount?: string;
+
+  stake_amount?: number | 'unlimited';
   dry_run_wallet?: number;
   enable_protections?: boolean;
   backtest_cache?: string;

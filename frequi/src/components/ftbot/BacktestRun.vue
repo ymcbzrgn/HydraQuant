@@ -18,7 +18,7 @@ function clickBacktest() {
   } else {
     const stakeAmountLoc = Number(btStore.stakeAmount);
     if (stakeAmountLoc) {
-      btPayload.stake_amount = stakeAmountLoc.toString();
+      btPayload.stake_amount = stakeAmountLoc;
     }
   }
 
