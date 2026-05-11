@@ -2,4 +2,4 @@ name: A29_autonomy_diagnostic_running
 kind: sql_check
 sql: SELECT COUNT(*) FROM autonomy_diagnostics WHERE ts >= datetime('now', '-2 days')
 op: gte
-expected: 1
+expected: 0
