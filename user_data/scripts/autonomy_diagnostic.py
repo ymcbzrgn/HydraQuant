@@ -56,7 +56,7 @@ def run_diagnostic() -> Dict[str, Any]:
 
     with get_db_connection(AI_DB_PATH) as conn:
         cur = conn.execute(
-            "SELECT level, last_promoted_at FROM autonomy_state WHERE id=1"
+            "SELECT level, promoted_at FROM autonomy_state WHERE id=1"
         )
         row = cur.fetchone()
         if not row:
@@ -162,7 +162,7 @@ def maybe_promote_if_eligible(dry_run: bool = True) -> Dict[str, Any]:
     with get_db_connection(AI_DB_PATH) as conn:
         new_level = int(report["current_level"]) + 1
         conn.execute(
-            "UPDATE autonomy_state SET level=?, last_promoted_at=? WHERE id=1",
+            "UPDATE autonomy_state SET level=?, promoted_at=? WHERE id=1",
             (new_level, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
