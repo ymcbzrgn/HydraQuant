@@ -29,12 +29,6 @@ class Bybit(Exchange):
         "ws_enabled": True,
         "trades_has_history": False,  # Endpoint doesn't support pagination
         "fetch_orders_limit_minutes": 7 * 1440,  # 7 days
-        "exchange_has_overrides": {
-            # Bybit spot does not support fetch_order
-            # Unless the account is unified.
-            # TODO: Can be removed once bybit fully forces all accounts to unified mode.
-            "fetchOrder": False,
-        },
     }
     _ft_has_futures: FtHas = {
         "ohlcv_has_history": True,
@@ -49,9 +43,6 @@ class Bybit(Exchange):
             PriceType.LAST: "LastPrice",
             PriceType.MARK: "MarkPrice",
             PriceType.INDEX: "IndexPrice",
-        },
-        "exchange_has_overrides": {
-            "fetchOrder": True,
         },
         "has_delisting": True,
     }
@@ -257,11 +248,11 @@ class Bybit(Exchange):
             except ExchangeError:
                 logger.warning(f"Could not update funding fees for {pair}.")
         return 0.0
-
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:
-        if self.exchange_has("fetchOrder"):
-            # Set acknowledged to True to avoid ccxt exception
-            params = {"acknowledged": True}
+        if params is None:
+            params = {}
+        # Set acknowledged to True to avoid ccxt exception
+        params["acknowledged"] = True
 
         order = super().fetch_order(order_id, pair, params)
         if not order:
