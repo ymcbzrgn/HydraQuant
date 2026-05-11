@@ -965,8 +965,16 @@ def init_db():
             except sqlite3.IntegrityError:
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY,
+            pair TEXT,
+            stake_amount REAL,
+            open_date DATETIME
+        )''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, pair TEXT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
@@ -1651,6 +1659,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
         conn.commit()
 
     logger.info(f"[DB] Database initialized at {DB_PATH}")
