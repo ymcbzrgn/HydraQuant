@@ -24,10 +24,6 @@ class RPCMessageType(StrEnum):
     ANALYZED_DF = "analyzed_df"
     NEW_CANDLE = "new_candle"
 
-    def __repr__(self):
-        # TODO: do we still need to overwrite __repr__? Impact needs to be looked at in detail
-        return self.value
-
 
 # Enum for parsing requests from ws consumers
 class RPCRequestType(StrEnum):
