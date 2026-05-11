@@ -1,4 +1,4 @@
-import type { IndicatorConfig, PlotConfig, PlotConfigTemplate } from '@/types';
+import { type IndicatorConfig, isIndicatorConfig, type PlotConfig, type PlotConfigTemplate } from '@/types';
 
 const plotTemplates = ref<PlotConfigTemplate>({
   BollingerBands: {
@@ -46,36 +46,39 @@ function replaceTemplateColumns(template: Partial<PlotConfig>, nameMap: Record<s
   if (!nameMap) {
     return newTemplate;
   }
-  const newMainPlot: Record<string, IndicatorConfig> = {};
-  for (const key in template.main_plot) {
-    const newKey = nameMap[key] || key;
-    // TODO: typecheck / don't force the type
-    newMainPlot[newKey] = template.main_plot[key]!;
-    if (newMainPlot[newKey].fill_to !== undefined) {
-      newMainPlot[newKey].fill_to =
-        nameMap[newMainPlot[newKey].fill_to] || newMainPlot[newKey].fill_to;
+
+  if (template.main_plot) {
+    const newMainPlot: Record<string, IndicatorConfig> = {};
+    for (const [key, val] of Object.entries(template.main_plot)) {
+      const newKey = nameMap[key] || key;
+      if (isIndicatorConfig(val)) {
+        newMainPlot[newKey] = { ...val };
+        if (newMainPlot[newKey].fill_to !== undefined) {
+          newMainPlot[newKey].fill_to =
+            nameMap[newMainPlot[newKey].fill_to] || newMainPlot[newKey].fill_to;
+        }
+      }
     }
-  }
-  if ('main_plot' in template) {
     newTemplate.main_plot = newMainPlot;
   }
 
   // Replace the keys of all elements in subplots
-  const newSubplots: Record<string, Record<string, IndicatorConfig>> = {};
-  for (const subplotKey in template.subplots) {
-    const newSubplot: Record<string, IndicatorConfig> = {};
-    for (const key in template.subplots[subplotKey]) {
-      const newKey = nameMap[key] || key;
-      // TODO: typecheck / don't force the type
-      newSubplot[newKey] = template.subplots[subplotKey][key]!;
-      if (newSubplot[newKey].fill_to !== undefined) {
-        newSubplot[newKey].fill_to =
-          nameMap[newSubplot[newKey].fill_to] || newSubplot[newKey].fill_to;
+  if (template.subplots) {
+    const newSubplots: Record<string, Record<string, IndicatorConfig>> = {};
+    for (const [subplotKey, subplotValue] of Object.entries(template.subplots)) {
+      const newSubplot: Record<string, IndicatorConfig> = {};
+      for (const [key, val] of Object.entries(subplotValue)) {
+        const newKey = nameMap[key] || key;
+        if (isIndicatorConfig(val)) {
+          newSubplot[newKey] = { ...val };
+          if (newSubplot[newKey].fill_to !== undefined) {
+            newSubplot[newKey].fill_to =
+              nameMap[newSubplot[newKey].fill_to] || newSubplot[newKey].fill_to;
+          }
+        }
       }
+      newSubplots[subplotKey] = newSubplot;
     }
-    newSubplots[subplotKey] = newSubplot;
-  }
-  if ('subplots' in template) {
     newTemplate.subplots = newSubplots;
   }
   return newTemplate;

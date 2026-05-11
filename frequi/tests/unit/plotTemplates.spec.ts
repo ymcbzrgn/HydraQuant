@@ -203,3 +203,46 @@ describe('applyPlotTemplate', () => {
     expect(applyPlotTemplate('RSI', currentConfig, reMapping)).toEqual(expected);
   });
 });
+
+describe('replaceTemplateColumns - validation', () => {
+  it('handles invalid values in main_plot', () => {
+    const { replaceTemplateColumns } = usePlotTemplates();
+    const template = {
+      main_plot: {
+        valid: { color: 'red' },
+        invalid: 'not an object' as any,
+        nullValue: null as any,
+      },
+    };
+    const result = replaceTemplateColumns(template, { valid: 'valid_mapped' });
+    expect(result.main_plot).toEqual({
+      valid_mapped: { color: 'red' },
+    });
+    expect(result.main_plot?.invalid).toBeUndefined();
+    expect(result.main_plot?.nullValue).toBeUndefined();
+  });
+
+  it('handles invalid values in subplots', () => {
+    const { replaceTemplateColumns } = usePlotTemplates();
+    const template = {
+      subplots: {
+        MACD: {
+          valid: { color: 'blue' },
+          invalid: 123 as any,
+        },
+      },
+    };
+    const result = replaceTemplateColumns(template, { valid: 'valid_mapped' });
+    expect(result.subplots?.MACD).toEqual({
+      valid_mapped: { color: 'blue' },
+    });
+    expect(result.subplots?.MACD.invalid).toBeUndefined();
+  });
+
+  it('handles missing main_plot or subplots', () => {
+    const { replaceTemplateColumns } = usePlotTemplates();
+    expect(replaceTemplateColumns({}, {})).toEqual({});
+    expect(replaceTemplateColumns({ main_plot: {} }, {})).toEqual({ main_plot: {} });
+    expect(replaceTemplateColumns({ subplots: {} }, {})).toEqual({ subplots: {} });
+  });
+});
