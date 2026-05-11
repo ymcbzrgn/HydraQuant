@@ -968,6 +968,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            decision_id TEXT, pair TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
@@ -1001,6 +1002,13 @@ def init_db():
             c.execute("UPDATE autonomy_state SET level = current_level WHERE (level IS NULL OR level = 0) AND current_level IS NOT NULL")
         except sqlite3.OperationalError:
             pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL,
+            open_date DATETIME,
+            close_date DATETIME)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS pattern_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, timeframe TEXT,
