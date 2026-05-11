@@ -222,8 +222,8 @@ const cumProfitChartOptions: ComputedRefWithControl<EChartsOption> = computedWit
           const profit = params[0].data.profit;
           const currentProfit = params[0].data['currentProfit'];
           const profitText = currentProfit
-            ? `Projected profit (incl. unrealized): ${formatPrice(currentProfit, 3)}`
-            : `Profit: ${formatPrice(profit, 3)}`;
+            ? `Projected profit (incl. unrealized): ${formatNumber(currentProfit, 3)}`
+            : `Profit: ${formatNumber(profit, 3)}`;
           return `${timestampToDateString(params[1].data.date)}<br />${
             params[1].marker
           }${profitText}`;

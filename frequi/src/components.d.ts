@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AgentScorecard: typeof import('./components/ai/AgentScorecard.vue')['default']
     AIDashboard: typeof import('./components/ai/AIDashboard.vue')['default']
     AISignalPanel: typeof import('./components/ai/AISignalPanel.vue')['default']
     AutonomyLevel: typeof import('./components/ai/AutonomyLevel.vue')['default']
@@ -147,6 +148,7 @@ declare module 'vue' {
     MultiSelect: typeof import('primevue/multiselect')['default']
     NavBar: typeof import('./components/layout/NavBar.vue')['default']
     NavFooter: typeof import('./components/layout/NavFooter.vue')['default']
+    OrganismHealth: typeof import('./components/ai/OrganismHealth.vue')['default']
     Paginator: typeof import('primevue/paginator')['default']
     PairlistConfigActions: typeof import('./components/ftbot/PairlistConfigActions.vue')['default']
     PairlistConfigBlacklist: typeof import('./components/ftbot/PairlistConfigBlacklist.vue')['default']
@@ -170,8 +172,10 @@ declare module 'vue' {
     ProfitSymbol: typeof import('./components/general/ProfitSymbol.vue')['default']
     ProgressBar: typeof import('primevue/progressbar')['default']
     ProgressSpinner: typeof import('primevue/progressspinner')['default']
+    PromotionGate: typeof import('./components/ai/PromotionGate.vue')['default']
     RadioButton: typeof import('primevue/radiobutton')['default']
     RadioButtonGroup: typeof import('primevue/radiobuttongroup')['default']
+    RegimeWatch: typeof import('./components/ai/RegimeWatch.vue')['default']
     ReloadControl: typeof import('./components/ftbot/ReloadControl.vue')['default']
     RiskPanel: typeof import('./components/ai/RiskPanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

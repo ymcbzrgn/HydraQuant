@@ -98,7 +98,7 @@ const metrics = computed(() =>
       </Column>
       <Column field="profit_total_abs" :header="`Tot Profit ${props.stakeCurrency}`">
         <template #body="{ data, field }">
-          {{ formatPrice(data[field as string], props.stakeCurrencyDecimals) }}
+          {{ formatNumber(data[field as string], props.stakeCurrencyDecimals) }}
         </template>
       </Column>
       <Column field="profit_total" header="Tot Profit %">
@@ -115,7 +115,7 @@ const metrics = computed(() =>
           {{
             col.is_ratio
               ? formatPercent(data[field as string], 2)
-              : formatPrice(data[field as string], 2)
+              : formatNumber(data[field as string], 2)
           }}
         </template>
       </Column>
