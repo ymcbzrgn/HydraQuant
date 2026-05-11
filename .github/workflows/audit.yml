@@ -24,6 +24,11 @@ jobs:
           AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
         run: |
           PYTHONPATH=user_data/scripts python -c "from db import init_db; init_db()"
+      - name: Seed test data for audits
+        env:
+          AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
+        run: |
+          PYTHONPATH=user_data/scripts python -c "import sqlite3, os; sqlite3.connect(os.environ['AI_DB_PATH']).execute(\"INSERT INTO autonomy_diagnostics (level, days_stuck, n_trades_30d, winrate_30d, sharpe_approx_30d, worst_drawdown_30d) VALUES (1, 0, 0, 0.0, 0.0, 0.0); commit;\")"
       - name: Run audits
         env:
           AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
