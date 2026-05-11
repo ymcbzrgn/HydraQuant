@@ -2566,10 +2566,11 @@ if __name__ == "__main__":
         )
         cache_drain_thread.start()
 
+        from ai_config import CORS_ORIGINS
         serve_app = FastAPI(title="RAG Signal Service")
         serve_app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=CORS_ORIGINS,
             allow_methods=["*"],
             allow_headers=["*"],
         )

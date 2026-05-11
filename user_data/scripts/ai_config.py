@@ -16,6 +16,12 @@ except ImportError:
 # Base paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Centralized CORS Origins configuration
+CORS_ORIGINS = [
+    origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 # Database Path for SQLite (FTS5, Logging, Settings)
 AI_DB_PATH = os.environ.get(
     "AI_DB_PATH",

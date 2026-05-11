@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 # Ensure local imports work dynamically
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from ai_config import AI_DB_PATH
+from ai_config import AI_DB_PATH, CORS_ORIGINS
 from autonomy_manager import AutonomyManager, PROMOTION_CRITERIA
 from risk_budget import RiskBudgetManager
 from llm_cost_tracker import LLMCostTracker
@@ -28,7 +28,7 @@ app = FastAPI(title="Freqtrade AI API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
