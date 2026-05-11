@@ -439,6 +439,13 @@ def init_db():
 
     with get_connection() as conn:
         c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL NOT NULL,
+            open_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+            close_date DATETIME)''')
+
 
         # === PHASE 18-19: Core ===
         c.execute('''CREATE TABLE IF NOT EXISTS market_news (
@@ -966,8 +973,13 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
-            content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT,
+            pair TEXT,
+            lesson_type TEXT,
+            content TEXT,
+            context TEXT,
+            score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
