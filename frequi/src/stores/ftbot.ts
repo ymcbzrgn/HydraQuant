@@ -104,11 +104,12 @@ export function createBotSubStore(botId: string, botName: string) {
         detailTradeId: null as number | null,
         selectedPair: '',
         plotMultiPairs: [] as string[],
-        // TODO: type me
-        candleData: {},
+        candleData: {} as Record<string, { pair: string; timeframe: string; data: PairHistory }>,
         candleDataStatus: LoadingStatus.not_loaded,
-        // TODO: type me
-        history: {},
+        history: {} as Record<
+          string,
+          { pair: string; timeframe: string; timerange: string; data: PairHistory }
+        >,
         historyStatus: LoadingStatus.not_loaded,
         historyTakesLonger: false,
         strategyList: [] as string[],

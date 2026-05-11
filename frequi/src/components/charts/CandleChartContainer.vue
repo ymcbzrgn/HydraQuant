@@ -29,7 +29,7 @@ const settingsStore = useSettingsStore();
 const botStore = useBotStore();
 const plotStore = usePlotConfigStore();
 
-const dataset = computed((): PairHistory => {
+const dataset = computed((): PairHistory | undefined => {
   const firstpair = botStore.activeBot.plotMultiPairs[0];
   if (props.historicView) {
     return botStore.activeBot.history[`${firstpair}__${props.timeframe}`]?.data;
