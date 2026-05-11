@@ -886,11 +886,11 @@ export function createBotSubStore(botId: string, botName: string) {
       async forceentry(payload: ForceEnterPayload) {
         if (payload && payload.pair) {
           try {
-            // TODO: Update forcebuy to forceenter ...
+
             const res = await api.post<
               ForceEnterPayload,
               AxiosResponse<StatusResponse | TradeResponse>
-            >('/forcebuy', payload);
+            >('/forceenter', payload);
             showAlert(`Order for ${payload.pair} created.`, 'success');
 
             return Promise.resolve(res);

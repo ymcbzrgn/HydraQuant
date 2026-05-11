@@ -107,7 +107,6 @@ export interface OrderTypes {
   /** @deprecated Replaced by exit in 2.x */
   sell?: string;
   forcesell?: string;
-  forcebuy?: string;
   emergencysell?: string;
   entry?: string;
   exit?: string;

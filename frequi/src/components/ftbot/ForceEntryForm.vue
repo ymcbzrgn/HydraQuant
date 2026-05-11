@@ -77,7 +77,6 @@ const resetForm = () => {
   price.value = undefined;
   stakeAmount.value = undefined;
   ordertype.value =
-    botStore.activeBot.botState?.order_types?.forcebuy ||
     botStore.activeBot.botState?.order_types?.force_entry ||
     botStore.activeBot.botState?.order_types?.buy ||
     botStore.activeBot.botState?.order_types?.entry ||
