@@ -288,10 +288,6 @@ export const useBotStore = defineStore('ftbot-wrapper', {
         this.selectBot(bot.botId);
       }
     },
-    setGlobalAutoRefresh(value: boolean) {
-      // TODO: could be removed.
-      this.globalAutoRefresh = value;
-    },
     async allRefreshFrequent(forceUpdate = false) {
       const updates: Promise<unknown>[] = [];
       this.allBotStores.forEach(async (e) => {

@@ -5,7 +5,7 @@ const autoRefreshLoc = computed({
     return botStore.globalAutoRefresh;
   },
   set(newValue: boolean) {
-    botStore.setGlobalAutoRefresh(newValue);
+    botStore.globalAutoRefresh = newValue;
   },
 });
 </script>
