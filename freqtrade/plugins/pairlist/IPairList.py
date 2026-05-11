@@ -4,7 +4,6 @@ PairList Handler base class
 
 import logging
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from enum import StrEnum
 from typing import Any, Literal, TypedDict
 
@@ -200,11 +199,11 @@ class IPairList(LoggingMixin, ABC):
         :return: new whitelist
         """
         if self._enabled:
-            # Copy list since we're modifying this list
-            for p in deepcopy(pairlist):
-                # Filter out assets
-                if not self._validate_pair(p, tickers[p] if p in tickers else None):
-                    pairlist.remove(p)
+            pairlist = [
+                p
+                for p in pairlist
+                if self._validate_pair(p, tickers[p] if p in tickers else None)
+            ]
 
         return pairlist
 
