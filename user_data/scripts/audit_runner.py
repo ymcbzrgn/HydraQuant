@@ -55,7 +55,11 @@ def run_one(spec_path: Path) -> Dict[str, Any]:
             with get_db_connection(AI_DB_PATH) as conn:
                 row = conn.execute(spec["sql"]).fetchone()
                 v = (row[0] if row else 0)
-                expected = spec.get("expected", 0)
+                try:
+                    expected = int(spec.get("expected", 0))
+                except (ValueError, TypeError):
+                    expected = spec.get("expected", 0)
+
                 op = spec.get("op", "eq")
                 ok = (op == "eq" and v == expected) or (op == "lte" and v <= expected) or \
                      (op == "gte" and v >= expected)

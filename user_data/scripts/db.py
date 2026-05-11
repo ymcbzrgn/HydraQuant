@@ -506,6 +506,16 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, pair TEXT NOT NULL,
             signal_source TEXT NOT NULL, signal_type TEXT, confidence REAL, latency_ms REAL)''')
 
+        # Freqtrade trades table stub (required for audits and diagnostics)
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL,
+            amount REAL,
+            close_profit REAL,
+            open_date DATETIME,
+            close_date DATETIME)''')
+
         # === PHASE 19: Market Data ===
         c.execute('''CREATE TABLE IF NOT EXISTS derivatives_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
@@ -966,9 +976,27 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
-            content TEXT, context TEXT, score REAL DEFAULT 0.0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER,
+            pair TEXT,
+            signal TEXT,
+            outcome_pnl REAL,
+            lesson_text TEXT,
+            is_embedded BOOLEAN DEFAULT 0,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        # Handle legacy schema migration
+        for _col, _typ in [
+            ("decision_id", "INTEGER"),
+            ("pair", "TEXT"),
+            ("signal", "TEXT"),
+            ("outcome_pnl", "REAL"),
+            ("lesson_text", "TEXT"),
+            ("is_embedded", "BOOLEAN DEFAULT 0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE ai_lessons ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
         # api_ai.py reads level/promoted_at/sharpe_estimate/max_drawdown_pct/days_at_level;
