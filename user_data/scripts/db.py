@@ -966,7 +966,7 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, pair TEXT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
@@ -1360,6 +1360,12 @@ def init_db():
             suspected_cause TEXT)''')
 
         # A.4: Tool result disk persist
+
+        try:
+            c.execute("ALTER TABLE service_restart_events ADD COLUMN suspected_cause TEXT DEFAULT 'unknown'")
+        except sqlite3.OperationalError:
+            pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS tool_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tool_name TEXT NOT NULL,
@@ -1392,6 +1398,15 @@ def init_db():
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # A.10: SHA-256 prompt integrity
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL,
+            open_date DATETIME,
+            close_date DATETIME)'''
+        )
+
         c.execute('''CREATE TABLE IF NOT EXISTS prompt_hashes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL UNIQUE,
