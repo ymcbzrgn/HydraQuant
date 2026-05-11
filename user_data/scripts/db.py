@@ -1022,6 +1022,12 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+
+        try:
+            c.execute("INSERT OR IGNORE INTO autonomy_state (id, level, promoted_at) VALUES (1, 0, datetime('now'))")
+        except sqlite3.OperationalError:
+            pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS pattern_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, timeframe TEXT,
             pattern_type TEXT, entry_date TEXT, exit_date TEXT,
