@@ -968,6 +968,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            pair TEXT, decision_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
@@ -1484,6 +1485,11 @@ def init_db():
             eligible INTEGER DEFAULT 0,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        try:
+            c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
+        except sqlite3.OperationalError:
+            pass
+
         # B.6: Provider capabilities + B.5 adaptive concurrency
         c.execute('''CREATE TABLE IF NOT EXISTS provider_capabilities (
             model TEXT PRIMARY KEY,
@@ -1620,6 +1626,13 @@ def init_db():
             metrics_json TEXT,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL NOT NULL,
+            open_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+            close_date DATETIME)''')
+
         # === PHASE 30 INDICES ===
         for idx_sql in [
             'CREATE INDEX IF NOT EXISTS idx_anomaly_pair_ts ON price_anomaly_events(pair, ts)',
@@ -1645,6 +1658,10 @@ def init_db():
             c.execute(idx_sql)
 
         # === PHASE 30 — Dedup helper for ai_lessons (A.28) ===
+        try:
+            c.execute("ALTER TABLE ai_lessons ADD COLUMN decision_id TEXT")
+        except sqlite3.OperationalError:
+            pass
         try:
             c.execute("""DELETE FROM ai_lessons
                          WHERE id NOT IN (SELECT MAX(id) FROM ai_lessons GROUP BY decision_id, pair)""")
