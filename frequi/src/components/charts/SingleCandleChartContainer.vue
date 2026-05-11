@@ -30,9 +30,9 @@ const colorStore = useColorStore();
 const botStore = useBotStore();
 const plotStore = usePlotConfigStore();
 
-const dataset = computed((): PairHistory => {
+const dataset = computed((): PairHistory | undefined | null => {
   if (props.historicView) {
-    return botStore.activeBot.history[`${props.pair}__${props.timeframe}`]?.data;
+    return botStore.activeBot.history[`${props.pair}__${props.timeframe}`]?.data || undefined;
   }
   return botStore.activeBot.candleData[`${props.pair}__${props.timeframe}`]?.data;
 });
@@ -162,7 +162,7 @@ watch(
       <div class="min-w-0 w-full flex-1">
         <CandleChart
           v-if="hasDataset"
-          :dataset="dataset"
+          :dataset="dataset!"
           :trades="trades"
           :plot-config="plotStore.plotConfig"
           :heikin-ashi="settingsStore.useHeikinAshiCandles"

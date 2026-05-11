@@ -19,6 +19,8 @@ import type {
   BotDescriptor,
   BotFeatures,
   BotState,
+  CandleDataEntry,
+  HistoryDataEntry,
   ClosedTrade,
   DeleteTradeResponse,
   DownloadDataPayload,
@@ -104,11 +106,9 @@ export function createBotSubStore(botId: string, botName: string) {
         detailTradeId: null as number | null,
         selectedPair: '',
         plotMultiPairs: [] as string[],
-        // TODO: type me
-        candleData: {},
+        candleData: {} as Record<string, CandleDataEntry>,
         candleDataStatus: LoadingStatus.not_loaded,
-        // TODO: type me
-        history: {},
+        history: {} as Record<string, HistoryDataEntry>,
         historyStatus: LoadingStatus.not_loaded,
         historyTakesLonger: false,
         strategyList: [] as string[],

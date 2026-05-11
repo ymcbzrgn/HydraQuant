@@ -106,3 +106,16 @@ export interface PairHistory {
   /** Data end date in as millisecond timestamp */
   data_stop_ts: number;
 }
+
+export interface CandleDataEntry {
+  pair: string;
+  timeframe: string;
+  data: PairHistory | null;
+}
+
+export interface HistoryDataEntry {
+  pair: string;
+  timeframe: string;
+  timerange: string;
+  data: PairHistory | null;
+}
