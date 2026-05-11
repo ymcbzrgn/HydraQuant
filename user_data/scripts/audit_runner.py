@@ -35,7 +35,16 @@ def _minimal_yaml(text: str) -> Dict[str, Any]:
             k, v = line.split(":", 1)
             v = v.strip()
             cur_key = k.strip()
-            out[cur_key] = v if v else {}
+            if v:
+                try:
+                    out[cur_key] = int(v)
+                except ValueError:
+                    try:
+                        out[cur_key] = float(v)
+                    except ValueError:
+                        out[cur_key] = v
+            else:
+                out[cur_key] = {}
         elif cur_key and line.startswith("  "):
             inner = line.strip()
             if isinstance(out[cur_key], dict) and ":" in inner:

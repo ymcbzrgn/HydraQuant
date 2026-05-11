@@ -965,9 +965,11 @@ def init_db():
             except sqlite3.IntegrityError:
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY, stake_amount REAL, open_date DATETIME)''');
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
             id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
+            decision_id TEXT, pair TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
@@ -1651,6 +1653,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        c.execute("INSERT OR IGNORE INTO autonomy_diagnostics (level, days_stuck, n_trades_30d, winrate_30d, sharpe_approx_30d, worst_drawdown_30d, eligible, ts) VALUES (1, 0, 0, 0.0, 0.0, 0.0, 0, datetime('now'))")
         conn.commit()
 
     logger.info(f"[DB] Database initialized at {DB_PATH}")
