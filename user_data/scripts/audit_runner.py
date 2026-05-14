@@ -56,6 +56,8 @@ def run_one(spec_path: Path) -> Dict[str, Any]:
                 row = conn.execute(spec["sql"]).fetchone()
                 v = (row[0] if row else 0)
                 expected = spec.get("expected", 0)
+                expected = float(expected)
+                v = float(v)
                 op = spec.get("op", "eq")
                 ok = (op == "eq" and v == expected) or (op == "lte" and v <= expected) or \
                      (op == "gte" and v >= expected)

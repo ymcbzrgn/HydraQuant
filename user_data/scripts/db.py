@@ -970,6 +970,26 @@ def init_db():
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+        try:
+            c.execute('ALTER TABLE ai_lessons ADD COLUMN decision_id TEXT')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute('ALTER TABLE ai_lessons ADD COLUMN pair TEXT')
+        except sqlite3.OperationalError:
+            pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT)''')
+
+        try:
+            c.execute('ALTER TABLE trades ADD COLUMN stake_amount REAL')
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute('ALTER TABLE trades ADD COLUMN open_date DATETIME')
+        except sqlite3.OperationalError:
+            pass
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
         # api_ai.py reads level/promoted_at/sharpe_estimate/max_drawdown_pct/days_at_level;
         # the old (current_level/trust_alpha/trust_beta/successful_trades) schema was
@@ -1471,6 +1491,8 @@ def init_db():
             payload_json TEXT,
             consumer TEXT,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        if c.execute("SELECT COUNT(*) FROM autonomy_diagnostics").fetchone()[0] == 0:
+            c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
 
         # A.29: Autonomy diagnostic snapshots
         c.execute('''CREATE TABLE IF NOT EXISTS autonomy_diagnostics (
@@ -1483,6 +1505,7 @@ def init_db():
             worst_drawdown_30d REAL,
             eligible INTEGER DEFAULT 0,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
 
         # B.6: Provider capabilities + B.5 adaptive concurrency
         c.execute('''CREATE TABLE IF NOT EXISTS provider_capabilities (
