@@ -56,9 +56,17 @@ def run_one(spec_path: Path) -> Dict[str, Any]:
                 row = conn.execute(spec["sql"]).fetchone()
                 v = (row[0] if row else 0)
                 expected = spec.get("expected", 0)
+
+                # Phase 30: cast to float for safe comparison (prevents str vs int errors)
+                try:
+                    v_f = float(v)
+                    expected_f = float(expected)
+                except (ValueError, TypeError):
+                    v_f, expected_f = v, expected
+
                 op = spec.get("op", "eq")
-                ok = (op == "eq" and v == expected) or (op == "lte" and v <= expected) or \
-                     (op == "gte" and v >= expected)
+                ok = (op == "eq" and v_f == expected_f) or (op == "lte" and v_f <= expected_f) or \
+                     (op == "gte" and v_f >= expected_f)
                 return {"name": name, "kind": kind, "value": v, "expected": expected, "ok": bool(ok)}
         elif kind == "module_import":
             __import__(spec["module"])

@@ -24,6 +24,8 @@ jobs:
           AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite
         run: |
           PYTHONPATH=user_data/scripts python -c "from db import init_db; init_db()"
+          # Phase 30: Seed minimal data for liveness audits (A29)
+          PYTHONPATH=user_data/scripts python -c "from db import execute_with_retry; execute_with_retry(\"INSERT INTO autonomy_diagnostics (level, ts) VALUES (1, datetime('now'))\")"
       - name: Run audits
         env:
           AI_DB_PATH: ${{ runner.temp }}/ci_ai_data.sqlite

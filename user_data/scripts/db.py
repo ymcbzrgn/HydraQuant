@@ -966,9 +966,37 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
-            content TEXT, context TEXT, score REAL DEFAULT 0.0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER,
+            pair TEXT,
+            signal TEXT,
+            outcome_pnl REAL,
+            lesson_text TEXT,
+            is_embedded BOOLEAN DEFAULT 0,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # Phase 30 A.28 audit fix: Ensure ai_lessons has decision_id + pair columns
+        for _col, _typ in [
+            ("decision_id", "INTEGER"),
+            ("pair", "TEXT"),
+            ("signal", "TEXT"),
+            ("outcome_pnl", "REAL"),
+            ("lesson_text", "TEXT"),
+            ("is_embedded", "BOOLEAN DEFAULT 0"),
+            ("timestamp", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE ai_lessons ADD COLUMN {_col} {_typ}")
+            except sqlite3.OperationalError:
+                pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            stake_amount REAL NOT NULL,
+            open_date DATETIME NOT NULL,
+            close_date DATETIME,
+            is_open BOOLEAN DEFAULT 1)''')
 
         # Canonical autonomy_state schema (matches autonomy_manager.AutonomyManager).
         # api_ai.py reads level/promoted_at/sharpe_estimate/max_drawdown_pct/days_at_level;
