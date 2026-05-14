@@ -1679,6 +1679,19 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # A.29 Seed: ensure autonomy_state and diagnostics have initial rows for audits
+        try:
+            c.execute("SELECT COUNT(*) FROM autonomy_state")
+            if c.fetchone()[0] == 0:
+                now_iso = datetime.now().isoformat()
+                c.execute("INSERT INTO autonomy_state (id, level, promoted_at, updated_at) VALUES (1, 0, ?, ?)", (now_iso, now_iso))
+
+            c.execute("SELECT COUNT(*) FROM autonomy_diagnostics")
+            if c.fetchone()[0] == 0:
+                c.execute("INSERT INTO autonomy_diagnostics (level, eligible, ts) VALUES (0, 0, datetime('now'))")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
 
     logger.info(f"[DB] Database initialized at {DB_PATH}")
