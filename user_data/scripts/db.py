@@ -1491,8 +1491,6 @@ def init_db():
             payload_json TEXT,
             consumer TEXT,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        if c.execute("SELECT COUNT(*) FROM autonomy_diagnostics").fetchone()[0] == 0:
-            c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
 
         # A.29: Autonomy diagnostic snapshots
         c.execute('''CREATE TABLE IF NOT EXISTS autonomy_diagnostics (
@@ -1505,7 +1503,8 @@ def init_db():
             worst_drawdown_30d REAL,
             eligible INTEGER DEFAULT 0,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
+        if c.execute("SELECT COUNT(*) FROM autonomy_diagnostics").fetchone()[0] == 0:
+            c.execute("INSERT INTO autonomy_diagnostics (level) VALUES (1)")
 
         # B.6: Provider capabilities + B.5 adaptive concurrency
         c.execute('''CREATE TABLE IF NOT EXISTS provider_capabilities (
