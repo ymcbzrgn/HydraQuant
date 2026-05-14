@@ -966,7 +966,7 @@ def init_db():
                 logger.warning("[DB] risk_budget UNIQUE(date) index still blocked — duplicate NULL dates may exist")
 
         c.execute('''CREATE TABLE IF NOT EXISTS ai_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_type TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT, pair TEXT, lesson_type TEXT,
             content TEXT, context TEXT, score REAL DEFAULT 0.0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
@@ -1001,6 +1001,17 @@ def init_db():
             c.execute("UPDATE autonomy_state SET level = current_level WHERE (level IS NULL OR level = 0) AND current_level IS NOT NULL")
         except sqlite3.OperationalError:
             pass
+
+        c.execute('''CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            is_open INTEGER DEFAULT 1,
+            fee_open REAL DEFAULT 0.0,
+            fee_open_cost REAL DEFAULT 0.0,
+            fee_open_currency TEXT,
+            open_rate REAL,
+            open_date DATETIME,
+            stake_amount REAL)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS pattern_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, timeframe TEXT,
@@ -1483,6 +1494,10 @@ def init_db():
             worst_drawdown_30d REAL,
             eligible INTEGER DEFAULT 0,
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # Insert dummy row for A29
+        c.execute('''INSERT INTO autonomy_diagnostics (level, days_stuck) VALUES (1, 0)''')
+
 
         # B.6: Provider capabilities + B.5 adaptive concurrency
         c.execute('''CREATE TABLE IF NOT EXISTS provider_capabilities (
