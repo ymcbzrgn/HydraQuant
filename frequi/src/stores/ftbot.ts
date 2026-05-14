@@ -1143,6 +1143,7 @@ export function createBotSubStore(botId: string, botName: string) {
           this.sysInfo = data;
           return Promise.resolve(data);
         } catch (err) {
+          console.error("Failed to fetch sysinfo: ", err);
           return Promise.reject(err);
         }
       },

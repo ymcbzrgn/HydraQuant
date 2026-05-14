@@ -231,9 +231,7 @@ export const useBotStore = defineStore('ftbot-wrapper', {
     },
     addBot(bot: BotDescriptor) {
       if (Object.keys(this.availableBots).includes(bot.botId)) {
-        // throw 'Bot already present';
-        // TODO: handle error!
-        console.log('Bot already present');
+        console.error('Bot already present');
         return;
       }
       console.log('add bot', bot);
@@ -247,7 +245,6 @@ export const useBotStore = defineStore('ftbot-wrapper', {
     updateBot(botId: string, bot: Partial<BotDescriptor>) {
       const botInstance = this.botStores[botId];
       if (!botInstance) {
-        // TODO: handle error!
         console.error('Bot not found');
         return;
       }
