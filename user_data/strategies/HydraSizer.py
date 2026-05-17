@@ -110,8 +110,8 @@ class HydraSizer(IStrategy):
         # uses dynamic maxlen identical to ai_signal_cache so it scales
         # with whitelist × envelope × hormones (no hardcode).
         self._perception_cache: "OrderedDict[str, dict]" = OrderedDict()
-        self.cache_ttl_hours = 6 # Non-NEUTRAL signals valid for 6 hours (Phase 22: increased from 4h)
-        self._neutral_ttl_hours = 8.0  # NEUTRAL signals retried after 8h (reduced LLM calls for free tier)
+        self.cache_ttl_hours = 12 # 2026-05-18 crisis brake: 6h → 12h to halve RAG /signal call rate while LLM providers (Groq RPM=20) are exhausted
+        self._neutral_ttl_hours = 24.0  # 2026-05-18 crisis brake: 8h → 24h. With ~50 pairs, drops RAG call rate from ~6/h to ~2/h while LLM fleet recovers
 
         # Phase 3.5: Forgone P&L Engine — tracks every missed signal
         self.forgone_engine = ForgonePnLEngine(db_path=self.db_path)

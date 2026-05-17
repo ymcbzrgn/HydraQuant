@@ -11,24 +11,44 @@ Phase 2 (1 week observation): default bypass=0.0; full restoration.
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
+from pathlib import Path
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
 
-def _trade_count_30d() -> int:
+def _resolve_trades_db() -> str:
+    """2026-05-18 fix: `trades` table lives in tradesv3.sqlite (freqtrade DB),
+    not ai_data.sqlite. Mirror the resolution pattern from promotion_gate.py.
+    TRADES_DB_PATH env var overrides for TR-DRY paper-trade bot.
+    """
+    env_override = os.environ.get("TRADES_DB_PATH")
+    if env_override:
+        return env_override
     try:
-        from db import AI_DB_PATH, get_db_connection
+        from db import AI_DB_PATH
+        return str(Path(AI_DB_PATH).parent.parent / "tradesv3.sqlite")
+    except Exception:
+        return "/root/freqtrade/user_data/tradesv3.sqlite"
 
-        with get_db_connection(AI_DB_PATH) as conn:
+
+def _trade_count_30d() -> int:
+    db_path = _resolve_trades_db()
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
             row = conn.execute(
                 """SELECT COUNT(*) FROM trades
                    WHERE close_date >= datetime('now', '-30 days')
                      AND close_profit IS NOT NULL"""
             ).fetchone()
             return int(row[0] or 0)
+        finally:
+            conn.close()
     except Exception as e:
-        logger.error(f"[CalibratorHealth] count failed: {e}")
+        logger.error(f"[CalibratorHealth] count failed ({db_path}): {e}")
         return 0
 
 

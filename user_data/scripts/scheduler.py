@@ -1522,92 +1522,298 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"[Phase20:EventTrigger] Event check failed: {e}")
 
-    def _send_daily_summary(self):
-        """Job: Aggregate stats and send daily Telegram summary."""
-        logger.info("[Scheduler:Job] Sending daily sequence to Telegram...")
+    def _compute_daily_stats(self) -> dict:
+        """2026-05-18 rewrite: collect REAL metrics from live DBs for the daily Telegram report.
+
+        Replaces the prior placeholder dict (open_trades=0, daily_pnl=0.0, accuracy=0.0)
+        with actual queries against tradesv3_tr_dry.sqlite + ai_data.sqlite + the
+        promotion_gate API + systemd state. PnL is the headline metric.
+        """
+        import sqlite3
+        import json
+        import subprocess
+        import urllib.request
+
+        stats: dict = {}
+
+        tr_dry_db = "/root/freqtrade/user_data/tradesv3_tr_dry.sqlite"
         try:
-            from telegram_notifier import AITelegramNotifier
+            with sqlite3.connect(tr_dry_db, timeout=10) as conn:
+                conn.row_factory = sqlite3.Row
+                for label, hours in [("24h", 24), ("7d", 168), ("30d", 720)]:
+                    row = conn.execute(
+                        f"""SELECT COUNT(*) n,
+                                  COALESCE(SUM(close_profit_abs), 0) pnl_abs,
+                                  COALESCE(SUM(close_profit), 0) pnl_frac_sum,
+                                  SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END) wins,
+                                  COALESCE(AVG((julianday(close_date) - julianday(open_date)) * 24), 0) avg_hold_h,
+                                  COALESCE(AVG(close_profit_abs), 0) avg_pnl_abs,
+                                  COALESCE(AVG(close_profit), 0) avg_pnl_frac
+                           FROM trades
+                           WHERE is_open = 0
+                             AND close_date >= datetime('now', '-{hours} hours')"""
+                    ).fetchone()
+                    stats[f"closed_{label}"] = int(row["n"] or 0)
+                    stats[f"pnl_abs_{label}"] = float(row["pnl_abs"] or 0)
+                    stats[f"pnl_pct_{label}"] = float(row["pnl_frac_sum"] or 0) * 100
+                    stats[f"wins_{label}"] = int(row["wins"] or 0)
+                    stats[f"avg_hold_{label}"] = float(row["avg_hold_h"] or 0)
+                    stats[f"avg_pnl_abs_{label}"] = float(row["avg_pnl_abs"] or 0)
+                    stats[f"avg_pnl_pct_{label}"] = float(row["avg_pnl_frac"] or 0) * 100
+
+                row = conn.execute(
+                    "SELECT COUNT(*) n, COALESCE(SUM(close_profit_abs), 0) pnl_abs "
+                    "FROM trades WHERE is_open = 0"
+                ).fetchone()
+                stats["closed_all"] = int(row["n"] or 0)
+                stats["pnl_abs_all"] = float(row["pnl_abs"] or 0)
+
+                row = conn.execute(
+                    """SELECT pair, close_profit_abs, close_profit, is_short, exit_reason
+                       FROM trades WHERE is_open = 0
+                         AND close_date >= datetime('now', '-24 hours')
+                       ORDER BY close_profit_abs DESC LIMIT 1"""
+                ).fetchone()
+                stats["best_24h"] = dict(row) if row else None
+
+                row = conn.execute(
+                    """SELECT pair, close_profit_abs, close_profit, is_short, exit_reason
+                       FROM trades WHERE is_open = 0
+                         AND close_date >= datetime('now', '-24 hours')
+                       ORDER BY close_profit_abs ASC LIMIT 1"""
+                ).fetchone()
+                stats["worst_24h"] = dict(row) if row else None
+
+                rows = conn.execute(
+                    """SELECT pair, is_short, stake_amount, open_rate, leverage,
+                              (julianday('now') - julianday(open_date)) * 24 hours_open
+                       FROM trades WHERE is_open = 1
+                       ORDER BY open_date ASC"""
+                ).fetchall()
+                stats["open_now"] = [dict(r) for r in rows]
+
+                rows = conn.execute(
+                    """SELECT COALESCE(exit_reason, 'unknown') reason, COUNT(*) n
+                       FROM trades WHERE is_open = 0
+                         AND close_date >= datetime('now', '-24 hours')
+                       GROUP BY exit_reason ORDER BY 2 DESC LIMIT 6"""
+                ).fetchall()
+                stats["exit_reasons_24h"] = {r["reason"]: int(r["n"]) for r in rows}
+        except Exception as e:
+            logger.warning(f"[DailyStats] tr_dry trades query failed: {e}")
+
+        try:
+            from ai_config import AI_DB_PATH
+            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+                conn.row_factory = sqlite3.Row
+
+                row = conn.execute(
+                    """SELECT COUNT(*) total, COUNT(outcome_pnl) resolved,
+                              SUM(CASE WHEN outcome_pnl > 0 THEN 1 ELSE 0 END) winners,
+                              COALESCE(AVG(confidence), 0) avg_conf
+                       FROM ai_decisions
+                       WHERE timestamp >= datetime('now', '-7 days')
+                         AND signal_type IN ('BULLISH', 'BEARISH')"""
+                ).fetchone()
+                stats["ai_decisions_7d_total"] = int(row["total"] or 0)
+                stats["ai_decisions_7d_resolved"] = int(row["resolved"] or 0)
+                stats["ai_decisions_7d_winners"] = int(row["winners"] or 0)
+                stats["ai_decisions_7d_avg_conf"] = float(row["avg_conf"] or 0)
+
+                row = conn.execute(
+                    """SELECT COUNT(*) n, COALESCE(AVG(latency_ms), 0) avg_ms,
+                              COALESCE(SUM(timeout_breach), 0) breaches
+                       FROM rag_endpoint_latency
+                       WHERE ts >= datetime('now', '-24 hours')
+                         AND endpoint LIKE '/signal/%'"""
+                ).fetchone()
+                stats["rag_signal_calls_24h"] = int(row["n"] or 0)
+                stats["rag_avg_latency_ms"] = float(row["avg_ms"] or 0)
+                stats["rag_timeout_breaches"] = int(row["breaches"] or 0)
+
+                rows = conn.execute(
+                    """SELECT latency_ms FROM rag_endpoint_latency
+                       WHERE ts >= datetime('now', '-24 hours')
+                         AND endpoint LIKE '/signal/%'
+                       ORDER BY latency_ms"""
+                ).fetchall()
+                if rows:
+                    p95_idx = min(int(0.95 * len(rows)), len(rows) - 1)
+                    stats["rag_p95_latency_ms"] = float(rows[p95_idx]["latency_ms"])
+                else:
+                    stats["rag_p95_latency_ms"] = 0
+
+                row = conn.execute(
+                    """SELECT COUNT(*) n, COALESCE(SUM(cost_usd), 0) cost
+                       FROM llm_calls
+                       WHERE timestamp >= datetime('now', '-24 hours')"""
+                ).fetchone()
+                stats["llm_calls_24h"] = int(row["n"] or 0)
+                stats["llm_cost_24h"] = float(row["cost"] or 0)
+
+                row = conn.execute(
+                    """SELECT COUNT(*) n, COALESCE(SUM(forgone_pnl), 0) total
+                       FROM forgone_profit
+                       WHERE signal_time >= datetime('now', '-24 hours')
+                         AND was_executed = 0"""
+                ).fetchone()
+                stats["forgone_count_24h"] = int(row["n"] or 0)
+                stats["forgone_pnl_24h"] = float(row["total"] or 0)
+
+                rows = conn.execute(
+                    """SELECT pair, signal_type, confidence, forgone_pnl
+                       FROM forgone_profit
+                       WHERE signal_time >= datetime('now', '-24 hours')
+                         AND was_executed = 0 AND forgone_pnl > 2.0
+                       ORDER BY forgone_pnl DESC LIMIT 3"""
+                ).fetchall()
+                stats["forgone_top"] = [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning(f"[DailyStats] ai_data query failed: {e}")
+
+        try:
+            with urllib.request.urlopen(
+                "http://127.0.0.1:8890/api/v1/ai/promotion_gate", timeout=5
+            ) as resp:
+                stats["promotion_gate"] = json.loads(resp.read())
+        except Exception as e:
+            logger.warning(f"[DailyStats] promotion_gate fetch failed: {e}")
+            stats["promotion_gate"] = None
+
+        try:
+            services = ["freqtrade", "freqtrade-scheduler", "freqtrade-rag",
+                        "freqtrade-models", "freqtrade-ai-api", "freqtrade-tr-dry"]
+            active = 0
+            restarts_total = 0
+            for s in services:
+                r1 = subprocess.run(["systemctl", "is-active", s],
+                                    capture_output=True, text=True, timeout=3)
+                if r1.stdout.strip() == "active":
+                    active += 1
+                r2 = subprocess.run(["systemctl", "show", "-p", "NRestarts", "--value", s],
+                                    capture_output=True, text=True, timeout=3)
+                try:
+                    restarts_total += int(r2.stdout.strip() or 0)
+                except ValueError:
+                    pass
+            stats["services_active"] = active
+            stats["services_total"] = len(services)
+            stats["restarts_total"] = restarts_total
+        except Exception as e:
+            logger.warning(f"[DailyStats] systemctl probe failed: {e}")
+
+        try:
+            with open("/proc/meminfo") as f:
+                mem = {line.split(":")[0]: line.split(":")[1].strip()
+                       for line in f if ":" in line}
+            total_kb = int(mem["MemTotal"].split()[0])
+            avail_kb = int(mem["MemAvailable"].split()[0])
+            stats["ram_used_gb"] = (total_kb - avail_kb) / 1024 / 1024
+            stats["ram_total_gb"] = total_kb / 1024 / 1024
+        except Exception:
+            pass
+
+        try:
             from llm_cost_tracker import LLMCostTracker
-            from autonomy_manager import AutonomyManager
-            from forgone_pnl_engine import ForgonePnLEngine
-            
-            # Note: A real implementation would query the trades SQLite for true open/closed counts and PNL.
-            # Here we structure the stats dictionary by querying the AI subsystems.
-            stats = {
-                "open_trades": 0,
-                "closed_today": 0,
-                "daily_pnl": 0.0,
-                "daily_pnl_pct": 0.0,
-                "accuracy": 0.0,
-                "correct_trades": 0,
-                "total_eval_trades": 0
-            }
-            
             if self._cost_tracker is None:
                 self._cost_tracker = LLMCostTracker()
-            cost_summary = self._cost_tracker.get_daily_summary()
-            stats["api_cost_today"] = sum(m.get("cost_usd", 0) for m in cost_summary.get("models", {}).values())
+            cs = self._cost_tracker.get_daily_summary()
+            if not stats.get("llm_cost_24h"):
+                stats["llm_cost_24h"] = sum(m.get("cost_usd", 0)
+                                            for m in cs.get("models", {}).values())
+        except Exception:
+            pass
 
+        try:
+            from autonomy_manager import AutonomyManager
             if self._autonomy_manager is None:
                 self._autonomy_manager = AutonomyManager()
-            autonomy = self._autonomy_manager
-            stats["autonomy_level"] = f"L{autonomy.current_level}"
+            stats["autonomy_level"] = f"L{self._autonomy_manager.current_level}"
+        except Exception:
+            stats["autonomy_level"] = "?"
 
-            # Real portfolio balance + asset breakdown
-            stats["portfolio_value"] = self._read_portfolio_value()
-            try:
-                from db import get_db_connection
-                import json
-                conn = get_db_connection()
-                row = conn.execute("SELECT assets_json FROM portfolio_state WHERE id = 1").fetchone()
-                conn.close()
-                if row and row['assets_json']:
-                    stats["assets"] = json.loads(row['assets_json'])
-            except Exception:
-                pass
-            
+        stats["portfolio_value"] = self._read_portfolio_value()
+        try:
+            from db import get_db_connection
+            conn = get_db_connection()
+            row = conn.execute(
+                "SELECT assets_json FROM portfolio_state WHERE id = 1"
+            ).fetchone()
+            conn.close()
+            if row and row["assets_json"]:
+                stats["assets"] = json.loads(row["assets_json"])
+        except Exception:
+            pass
+
+        try:
+            from forgone_pnl_engine import ForgonePnLEngine
             if self._forgone_engine is None:
-                from forgone_pnl_engine import ForgonePnLEngine
                 self._forgone_engine = ForgonePnLEngine()
-            f_summary = self._forgone_engine.weekly_summary()
-            stats["forgone_pnl"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
-
-            # $100 Hypothetical Portfolio
             stats["hypothetical"] = self._forgone_engine.get_hypothetical_balance()
+        except Exception:
+            stats["hypothetical"] = {}
 
+        return stats
+
+    def _send_daily_summary(self):
+        """Job: Compute real metrics and send detailed end-of-day Telegram report."""
+        logger.info("[Scheduler:Job] Computing daily report stats...")
+        try:
+            stats = self._compute_daily_stats()
             notifier = self._get_telegram_notifier()
             notifier.send_daily_summary(stats)
-            
+            logger.info(
+                f"[Scheduler:Job] Daily report sent | pnl_24h=${stats.get('pnl_abs_24h', 0):.2f} "
+                f"closed_24h={stats.get('closed_24h', 0)} open={len(stats.get('open_now') or [])}"
+            )
         except Exception as e:
-            logger.error(f"[Scheduler:Job] Failed to send daily summary: {e}")
+            logger.error(f"[Scheduler:Job] Failed to send daily summary: {e}", exc_info=True)
 
     def _send_weekly_summary(self):
-        """Job: Aggregate stats and send weekly Telegram summary."""
-        logger.info("[Scheduler:Job] Sending weekly sequence to Telegram...")
-        try:
-            from telegram_notifier import AITelegramNotifier
-            from forgone_pnl_engine import ForgonePnLEngine
-            
-            stats = {
-                "win_rate": 0.0,
-                "sharpe_ratio": 0.0,
-                "max_drawdown": 0.0
-            }
-            
-            if self._forgone_engine is None:
-                from forgone_pnl_engine import ForgonePnLEngine
-                self._forgone_engine = ForgonePnLEngine()
-            f_summary = self._forgone_engine.weekly_summary()
-            stats["forgone_pnl_total"] = f_summary.get("forgone_trades", {}).get("total_pnl_pct", 0.0)
+        """Job: Compute REAL 7-day metrics and send weekly Telegram report.
 
-            # $100 Hypothetical Portfolio
-            stats["hypothetical"] = self._forgone_engine.get_hypothetical_balance()
+        2026-05-18 rewrite: previous version sent win_rate/sharpe/max_dd as hardcoded
+        zeros. Now reuses _compute_daily_stats() for trade aggregates and pulls
+        sharpe/max_dd from the live promotion_gate API.
+        """
+        logger.info("[Scheduler:Job] Computing weekly report stats...")
+        try:
+            stats = self._compute_daily_stats()
+
+            n_7d = stats.get("closed_7d", 0)
+            wins_7d = stats.get("wins_7d", 0)
+            stats["win_rate_7d"] = (wins_7d / n_7d * 100) if n_7d else 0.0
+
+            pg = stats.get("promotion_gate") or {}
+            m = pg.get("metrics") or {}
+            stats["sharpe_ratio"] = float(m.get("sharpe", 0.0) or 0.0)
+            stats["max_drawdown_pct"] = float(m.get("max_dd", 0.0) or 0.0) * 100
+
+            try:
+                import sqlite3
+                with sqlite3.connect("/root/freqtrade/user_data/tradesv3_tr_dry.sqlite",
+                                     timeout=10) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        """SELECT date(close_date) day,
+                                  COUNT(*) n,
+                                  COALESCE(SUM(close_profit_abs), 0) pnl
+                           FROM trades WHERE is_open = 0
+                             AND close_date >= datetime('now', '-7 days')
+                           GROUP BY date(close_date) ORDER BY day DESC"""
+                    ).fetchall()
+                    stats["weekly_pnl_by_day"] = [dict(r) for r in rows]
+            except Exception:
+                stats["weekly_pnl_by_day"] = []
 
             notifier = self._get_telegram_notifier()
             notifier.send_weekly_summary(stats)
-            
+            logger.info(
+                f"[Scheduler:Job] Weekly report sent | pnl_7d=${stats.get('pnl_abs_7d', 0):.2f} "
+                f"winrate_7d={stats.get('win_rate_7d', 0):.1f}% sharpe={stats.get('sharpe_ratio', 0):.2f}"
+            )
         except Exception as e:
-            logger.error(f"[Scheduler:Job] Failed to send weekly summary: {e}")
+            logger.error(f"[Scheduler:Job] Failed to send weekly summary: {e}", exc_info=True)
 
     def _send_daily_postmortem(self):
         """Daily 00:05 UTC: Analyze yesterday's trades, categorize losses, report forgone winners.
