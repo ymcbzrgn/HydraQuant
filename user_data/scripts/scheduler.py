@@ -419,6 +419,13 @@ class PipelineScheduler:
             id='decisions_outcome_backfill',
             name='AI Decisions Outcome Backfill (counterfactual)',
             max_instances=1, replace_existing=True)
+        # 2026-05-18 FAZ A: bind ai_decisions.outcome_pnl to the REAL trade
+        # ledger every 30 min so the system measures itself against money,
+        # not a counterfactual price-delta proxy.
+        self.scheduler.add_job(self._reconcile_decision_outcomes_tick, 'interval', minutes=30,
+            id='reconcile_decision_outcomes',
+            name='AI Decisions Outcome Reconcile (real trade ledger)',
+            max_instances=1, replace_existing=True)
 
         # T8 (2026-04-25): daily 02:45 UTC counterfactual → shadow Kelly.
         # Drains 32K+ counterfactual_results rows into per-pair Beta
@@ -2267,16 +2274,25 @@ class PipelineScheduler:
                             recent_backtest = True
                             break
 
+            # 2026-05-18 FAZ A5 — OOS holdout gap. The backtest window must NOT
+            # overlap the live-trading hot window: pattern_trades has no
+            # source/date filter, so temporal_knn pulls backtest rows whose
+            # outcome is already known into the live q4_evidence score
+            # (forensic: backtest 69% winrate vs live 33% — in-sample leak).
+            # Shifting the whole window back by HOLDOUT_DAYS keeps the backtest
+            # purely out-of-sample relative to current live decisions. Both
+            # start AND end shift, so incremental mode never gets start > end.
+            HOLDOUT_DAYS = 7
             if recent_backtest:
-                # Incremental: last 3 days
-                start = (now - timedelta(days=3)).strftime("%Y%m%d")
+                # Incremental: a 3-day window, ending HOLDOUT_DAYS in the past
+                start = (now - timedelta(days=3 + HOLDOUT_DAYS)).strftime("%Y%m%d")
                 mode = "incremental"
             else:
-                # Full: last 30 days
-                start = (now - timedelta(days=30)).strftime("%Y%m%d")
+                # Full: a 30-day window, ending HOLDOUT_DAYS in the past
+                start = (now - timedelta(days=30 + HOLDOUT_DAYS)).strftime("%Y%m%d")
                 mode = "full"
 
-            end = now.strftime("%Y%m%d")
+            end = (now - timedelta(days=HOLDOUT_DAYS)).strftime("%Y%m%d")
             timerange = f"{start}-{end}"
             logger.info(f"[Scheduler:AutoBacktest] Mode={mode}, timerange={timerange}")
 
@@ -2929,8 +2945,12 @@ class PipelineScheduler:
             logger.debug(f"[Phase26:Pheromone] Cleanup failed: {e}")
 
     def _decisions_outcome_backfill_tick(self):
-        """LOOP-3 (2026-04-25): backfill ai_decisions.outcome_pnl for any
-        decision older than 4h whose outcome was never written.
+        """LOOP-3 (2026-04-25): backfill ai_decisions.outcome_pnl_cf for any
+        decision older than 4h whose counterfactual was never written.
+
+        2026-05-18 FAZ A: this job now writes outcome_pnl_cf (a counterfactual
+        price-delta proxy), NOT outcome_pnl. outcome_pnl is the REAL trade-ledger
+        result, populated separately by _reconcile_decision_outcomes_tick.
 
         Audit found 84% of decisions had NULL outcome_pnl — the system
         literally could not see the consequences of its own predictions,
@@ -2971,7 +2991,7 @@ class PipelineScheduler:
                 rows = conn.execute("""
                     SELECT id, timestamp, pair, signal_type, confidence
                     FROM ai_decisions
-                    WHERE outcome_pnl IS NULL
+                    WHERE outcome_pnl_cf IS NULL
                       AND timestamp < datetime('now', '-4 hours')
                       AND timestamp >= datetime('now', '-30 days')
                     ORDER BY timestamp DESC LIMIT 500
@@ -2989,14 +3009,13 @@ class PipelineScheduler:
                     pair = row["pair"]
                     sig = (row["signal_type"] or "").upper()
                     if sig in ("NEUTRAL", "ABSTAIN", ""):
-                        # NEUTRAL signals never traded → outcome_pnl=0 by definition
+                        # NEUTRAL signals never traded → counterfactual = 0
                         skipped_neutral += 1
-                        # Still write 0.0 so backfill_pct goes up — agent
-                        # pool can use this to learn "I called NEUTRAL,
-                        # actual price moved X — was my abstention right?"
+                        # 2026-05-18 FAZ A: write outcome_pnl_cf (counterfactual),
+                        # NOT outcome_pnl. outcome_pnl is reserved for real trades.
                         with get_db_connection() as conn2:
                             conn2.execute(
-                                "UPDATE ai_decisions SET outcome_pnl = 0.0, "
+                                "UPDATE ai_decisions SET outcome_pnl_cf = 0.0, "
                                 "outcome_duration = 14400 WHERE id = ?",
                                 (row["id"],),
                             )
@@ -3046,7 +3065,7 @@ class PipelineScheduler:
 
                     with get_db_connection() as conn3:
                         conn3.execute(
-                            "UPDATE ai_decisions SET outcome_pnl = ?, "
+                            "UPDATE ai_decisions SET outcome_pnl_cf = ?, "
                             "outcome_duration = 14400 WHERE id = ?",
                             (round(outcome_pct, 4), row["id"]),
                         )
@@ -3062,6 +3081,77 @@ class PipelineScheduler:
             )
         except Exception as e:
             logger.warning(f"[Loop-3:Backfill] tick failed: {e}")
+
+    def _reconcile_decision_outcomes_tick(self):
+        """2026-05-18 FAZ A — bind ai_decisions.outcome_pnl to the REAL trade ledger.
+
+        The counterfactual backfill only fills outcome_pnl_cf (a price-delta
+        proxy). This job fills outcome_pnl with the ACTUAL realized result: for
+        every closed trade in tradesv3_tr_dry.sqlite it finds the BULLISH/BEARISH
+        ai_decision that fired just before the trade opened (same pair, within
+        20 min) and writes the real close_profit %. Without this the system was
+        measuring itself against a fantasy ledger (forensic 2026-05-18:
+        ai_decisions self-reported 62% winrate, real ledger was 33%).
+        """
+        try:
+            import os
+            import sqlite3
+            from db import get_db_connection
+
+            trades_db = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "tradesv3_tr_dry.sqlite")
+            if not os.path.exists(trades_db):
+                logger.warning("[ReconcileOutcomes] tradesv3_tr_dry.sqlite not found")
+                return
+
+            with sqlite3.connect(trades_db, timeout=10) as tconn:
+                tconn.row_factory = sqlite3.Row
+                trades = tconn.execute(
+                    """SELECT pair, open_date, close_date, close_profit, is_short
+                       FROM trades
+                       WHERE is_open = 0 AND close_profit IS NOT NULL
+                         AND close_date >= datetime('now', '-30 days')"""
+                ).fetchall()
+
+            if not trades:
+                logger.info("[ReconcileOutcomes] No closed trades to reconcile")
+                return
+
+            matched = 0
+            with get_db_connection() as conn:
+                for t in trades:
+                    # Match the decision direction to the trade direction. A
+                    # 24h lookback covers HydraSizer's 6-24h signal cache TTL:
+                    # a trade often opens hours after the decision was minted
+                    # (cache hit), so a tight window would miss most matches.
+                    want_signal = "BEARISH" if t["is_short"] else "BULLISH"
+                    row = conn.execute(
+                        """SELECT id FROM ai_decisions
+                           WHERE pair = ?
+                             AND signal_type = ?
+                             AND outcome_pnl IS NULL
+                             AND timestamp <= ?
+                             AND timestamp >= datetime(?, '-24 hours')
+                           ORDER BY timestamp DESC LIMIT 1""",
+                        (t["pair"], want_signal, t["open_date"], t["open_date"]),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    real_pnl = float(t["close_profit"] or 0.0) * 100.0
+                    conn.execute(
+                        "UPDATE ai_decisions SET outcome_pnl = ? WHERE id = ?",
+                        (round(real_pnl, 4), row["id"]),
+                    )
+                    matched += 1
+                conn.commit()
+
+            logger.info(
+                f"[ReconcileOutcomes] {matched}/{len(trades)} closed trades "
+                f"bound to real ai_decisions.outcome_pnl"
+            )
+        except Exception as e:
+            logger.warning(f"[ReconcileOutcomes] tick failed: {e}")
 
     def _shadow_kelly_divergence_tick(self):
         """Every 30min: per-pair shadow Kelly → entry-gate pheromones.

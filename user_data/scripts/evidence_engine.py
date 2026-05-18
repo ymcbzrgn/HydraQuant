@@ -1037,6 +1037,20 @@ class EvidenceEngine:
         else:
             signal = "NEUTRAL"
 
+        # 2026-05-18 FAZ B#1 — regime/signal conflict guard.
+        # Root cause of the SHORT-bias bleed (forensic: 48/52 paper trades were
+        # SHORT in a bull market, -339 USDT): the per-regime NEUTRAL band is only
+        # 0.01 in trending regimes, so a merely weak score (raw 0.42-0.50 —
+        # slightly past mid but NOT a strong reversal reading) crossed
+        # bearish_thr=0.49 and opened REAL counter-trend SHORTs. This makes the
+        # band asymmetric: trading WITH the trend keeps the normal threshold,
+        # trading AGAINST it demands a genuinely strong score (raw <0.42 in a
+        # bull regime / >0.58 in a bear regime). Strong reversals still pass.
+        if signal == "BEARISH" and regime == "trending_bull" and raw_score > 0.42:
+            signal = "NEUTRAL"
+        elif signal == "BULLISH" and regime == "trending_bear" and raw_score < 0.58:
+            signal = "NEUTRAL"
+
         # ═══ STEP 4: Dynamic-k sigmoid (replaces old agreement penalty) ═══
         #
         # KEY INSIGHT: The agreement penalty was DOUBLE-COUNTING disagreement.

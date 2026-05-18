@@ -2457,6 +2457,24 @@ class HydraSizer(IStrategy):
         MAX_EQUITY_LOSS = 0.15
         leverage = trade.leverage or 1.0
         leverage_aware_floor = -(MAX_EQUITY_LOSS / leverage)
+
+        # 2026-05-18 FAZ B#2 — SHORT bleed guard.
+        # Chandelier's lowest_low_14 anchor never locks a stop above price once
+        # a SHORT goes against us (price rising): stop_price stays far below
+        # current_rate, chandelier_result flips positive → falls back to the
+        # -15% floor, so losing SHORTs bleed all the way down. Forensic
+        # 2026-05-18: 25 trailing-stop exits, 0 winners, -335 USDT. For a SHORT
+        # that is >1h old and >2% in the red (and NOT inside a stop-hunt spread
+        # anomaly, where we deliberately loosen), clamp the stop to a -4% equity
+        # loss so the trade is cut instead of bleeding to -15%.
+        if trade.is_short and effective_pnl < -0.02 and stop_hunt_factor <= 1.0:
+            try:
+                age_h = (current_time - trade.open_date_utc).total_seconds() / 3600.0
+            except Exception:
+                age_h = 99.0
+            if age_h > 1.0:
+                result = max(result, -(0.04 / leverage))
+
         return max(result, leverage_aware_floor)
 
     def _sync_portfolio_to_ai(self):

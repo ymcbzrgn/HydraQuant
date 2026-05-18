@@ -461,7 +461,17 @@ def init_db():
             regime TEXT, trust_score_at_decision REAL, outcome_pnl REAL,
             outcome_duration REAL,
             agent_votes_json TEXT,
-            _status_cache TEXT)''')
+            _status_cache TEXT,
+            outcome_pnl_cf REAL)''')
+
+        # 2026-05-18 FAZ A — outcome_pnl_cf holds the counterfactual price-delta
+        # proxy (filled by the backfill job); outcome_pnl is reserved for the
+        # REAL trade-ledger result (filled by the reconcile job). Splitting them
+        # stops the system from measuring itself against a fantasy ledger.
+        try:
+            c.execute("ALTER TABLE ai_decisions ADD COLUMN outcome_pnl_cf REAL")
+        except sqlite3.OperationalError:
+            pass
 
         c.execute('''CREATE TABLE IF NOT EXISTS forgone_profit (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
