@@ -76,6 +76,11 @@ class DualEmbeddingPipeline:
     _bge_last_fail = 0.0
     _BGE_COOLDOWN_SECS = 60
 
+    # Phase 6 (2026-05-18): embedding cache moved from ai_data.sqlite to LanceDB
+    _lance_gemini = None
+    _lance_bge = None
+    _lance_lock = threading.Lock()
+
     KEY_COOLDOWN_SECS = 120  # 2 min cooldown on Gemini 429
 
     def __init__(self):
@@ -153,6 +158,25 @@ class DualEmbeddingPipeline:
     def _get_db_connection(self):
         conn = get_db_connection()
         return conn
+
+    def _get_lance_cache_tables(self):
+        """Phase 6 (2026-05-18): embedding cache backed by LanceDB instead of the
+        ai_data.sqlite embedding_cache table. Eliminates JSON-BLOB write lock
+        contention against ai_data.sqlite and shrinks that DB by ~1 GB.
+        Returns (gemini_table, bge_table) or (None, None) if LanceDB unavailable."""
+        if DualEmbeddingPipeline._lance_gemini is None:
+            with DualEmbeddingPipeline._lance_lock:
+                if DualEmbeddingPipeline._lance_gemini is None:
+                    try:
+                        from lance_store import get_lance_table
+                        DualEmbeddingPipeline._lance_gemini = get_lance_table(
+                            "embedding_cache_gemini", dim=768)
+                        DualEmbeddingPipeline._lance_bge = get_lance_table(
+                            "embedding_cache_bge", dim=768)
+                    except Exception as e:
+                        logger.error(f"[Embedding] LanceDB cache unavailable: {e}")
+                        return None, None
+        return DualEmbeddingPipeline._lance_gemini, DualEmbeddingPipeline._lance_bge
 
     def _hash_text(self, text: str) -> str:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -308,41 +332,24 @@ class DualEmbeddingPipeline:
     def get_embeddings(self, text: str) -> dict:
         """
         Returns both Gemini and BGE embeddings for a given text.
-        Checks SQLite cache first. Falls back gracefully if either backend unavailable.
+        Checks LanceDB cache first. Falls back gracefully if either backend unavailable.
         """
         text_hash = self._hash_text(text)
 
-        # 1. Check Cache
-        try:
-            with self._get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT gemini_embedding, bge_embedding FROM embedding_cache WHERE text_hash = ?",
-                    (text_hash,)
-                )
-                row = cursor.fetchone()
-
-                if row and row['gemini_embedding'] and row['bge_embedding']:
-                    gemini_emb = json.loads(row['gemini_embedding'])
-                    bge_emb = json.loads(row['bge_embedding'])
-                    # AUDIT-9 (2026-04-25): refresh last_used_at on hit so
-                    # the daily LRU eviction (scheduler._embedding_cache_evict)
-                    # ranks by actual access recency, not first-mint time.
-                    try:
-                        cursor.execute(
-                            "UPDATE embedding_cache SET last_used_at = CURRENT_TIMESTAMP WHERE text_hash = ?",
-                            (text_hash,),
-                        )
-                        conn.commit()
-                    except Exception:
-                        pass
+        # 1. Check LanceDB cache (Phase 6: replaced ai_data.sqlite embedding_cache)
+        gemini_table, bge_table = self._get_lance_cache_tables()
+        if gemini_table is not None and bge_table is not None:
+            try:
+                g = gemini_table.get(ids=[text_hash])
+                b = bge_table.get(ids=[text_hash])
+                if g["ids"] and b["ids"] and g["embeddings"] and b["embeddings"]:
                     return {
-                        "gemini": gemini_emb,
-                        "bge": bge_emb,
+                        "gemini": list(g["embeddings"][0]),
+                        "bge": list(b["embeddings"][0]),
                         "cached": True
                     }
-        except Exception as e:
-            logger.error(f"Error reading from embedding cache: {e}")
+            except Exception as e:
+                logger.error(f"Error reading from LanceDB embedding cache: {e}")
 
         # 2. Generate Embeddings (Cache Miss)
         logger.debug("Cache miss. Generating Dual Embeddings...")
@@ -368,19 +375,19 @@ class DualEmbeddingPipeline:
             logger.error("[Embedding] BOTH backends failed! Cannot generate embeddings.")
             return {"gemini": [], "bge": [], "cached": False}
 
-        # 3. Save to Cache
-        try:
-            with self._get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """INSERT OR REPLACE INTO embedding_cache
-                    (text_hash, text_content, gemini_embedding, bge_embedding)
-                    VALUES (?, ?, ?, ?)""",
-                    (text_hash, text, json.dumps(gemini_emb), json.dumps(bge_emb))
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Error writing to embedding cache: {e}")
+        # 3. Save to LanceDB cache (Phase 6: replaced ai_data.sqlite embedding_cache).
+        # delete-then-add gives upsert semantics; the LanceTable schema is a
+        # fixed-size float32[768] vector, so non-768 / empty embeddings are skipped.
+        if gemini_table is not None and bge_table is not None:
+            try:
+                if gemini_emb and len(gemini_emb) == 768:
+                    gemini_table.delete(ids=[text_hash])
+                    gemini_table.add(ids=[text_hash], embeddings=[gemini_emb], documents=[text])
+                if bge_emb and len(bge_emb) == 768:
+                    bge_table.delete(ids=[text_hash])
+                    bge_table.add(ids=[text_hash], embeddings=[bge_emb], documents=[text])
+            except Exception as e:
+                logger.error(f"Error writing to LanceDB embedding cache: {e}")
 
         return {
             "gemini": gemini_emb,

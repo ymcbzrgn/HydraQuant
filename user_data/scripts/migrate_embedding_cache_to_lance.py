@@ -118,6 +118,18 @@ def migrate(dry_run: bool, batch_size: int):
                     f"+ embedding_cache_bge. Re-run without --dry-run to execute.")
         return 0
 
+    # 2026-05-18 fix: drop existing LanceDB tables for a clean rebuild. The prior
+    # _existing_ids() idempotency path silently failed (LanceDB table object has
+    # no to_pandas(columns=) — exception swallowed, returned empty set), so every
+    # re-run duplicated all rows. A full rebuild is the correct semantic anyway:
+    # the source of truth is the SQLite embedding_cache table.
+    from lance_store import get_lance_store
+    _store = get_lance_store()
+    for _tname in ("embedding_cache_gemini", "embedding_cache_bge"):
+        if _tname in _store.list_tables():
+            _store.delete_table(_tname)
+            logger.info(f"Dropped existing {_tname} for clean rebuild")
+
     gemini_table, bge_table = _open_lance_tables()
     existing_gemini = _existing_ids(gemini_table)
     existing_bge = _existing_ids(bge_table)
