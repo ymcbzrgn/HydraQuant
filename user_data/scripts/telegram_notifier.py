@@ -77,25 +77,39 @@ class AITelegramNotifier:
         sign = "+" if v >= 0 else "−"
         return f"{sign}{abs(v):.2f}%"
 
+    @staticmethod
+    def _h(s) -> str:
+        """HTML-escape dynamic content so Telegram's HTML parse_mode accepts it.
+
+        2026-05-18: needed because field values like pair names ('BTC/USDT:USDT'),
+        exit_reasons ('stale_8h_flat__global'), and blocked_by tags ('pnl_positive')
+        broke the legacy Markdown parser. HTML mode only requires escaping <, >, &.
+        """
+        if s is None:
+            return ""
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
     def send_daily_summary(self, stats: dict):
-        """2026-05-18 rewrite: detailed end-of-day report.
+        """2026-05-18 rewrite: detailed end-of-day report (HTML parse mode).
 
         Section order is deliberate: PnL first (user's primary signal), then trades,
         then open positions, AI quality, infrastructure, promotion gate, forgone,
         portfolio, $100 sim. Every field is sourced from real DB queries in
-        scheduler._compute_daily_stats() — no more placeholder zeros.
+        scheduler._compute_daily_stats() — no more placeholder zeros. HTML escaping
+        on dynamic values keeps Telegram's parser from choking on pair names with
+        slashes or exit_reasons with underscores.
         """
         from datetime import datetime as _dt
 
+        h = self._h
         today = _dt.utcnow().strftime("%d %b %Y")
         L: list[str] = []
-        L.append(f"🏁 *GÜNLÜK RAPOR — {today}*")
+        L.append(f"🏁 <b>GÜNLÜK RAPOR — {today}</b>")
         L.append("━━━━━━━━━━━━━━━━━━━")
 
-        # ── PnL (headline) ──────────────────────────────────────
         L.append("")
-        L.append("💰 *PnL — TR-DRY paper bot*")
-        L.append(f"  Bugün (24h):  *{self._fmt_usd(stats.get('pnl_abs_24h', 0))}*  "
+        L.append("💰 <b>PnL — TR-DRY paper bot</b>")
+        L.append(f"  Bugün (24h):  <b>{self._fmt_usd(stats.get('pnl_abs_24h', 0))}</b>  "
                  f"({self._fmt_pct(stats.get('pnl_pct_24h', 0))})")
         L.append(f"  Bu hafta (7g): {self._fmt_usd(stats.get('pnl_abs_7d', 0))}  "
                  f"({self._fmt_pct(stats.get('pnl_pct_7d', 0))})")
@@ -103,9 +117,8 @@ class AITelegramNotifier:
         L.append(f"  Tüm zaman:    {self._fmt_usd(stats.get('pnl_abs_all', 0))}  "
                  f"({stats.get('closed_all', 0)} trade)")
 
-        # ── Trades 24h ──────────────────────────────────────────
         L.append("")
-        L.append("📊 *Trade'ler — 24 saat*")
+        L.append("📊 <b>Trade'ler — 24 saat</b>")
         n_24h = stats.get("closed_24h", 0)
         w_24h = stats.get("wins_24h", 0)
         l_24h = max(n_24h - w_24h, 0)
@@ -118,72 +131,66 @@ class AITelegramNotifier:
         worst = stats.get("worst_24h")
         if best:
             side = "SHORT" if best.get("is_short") else "LONG"
-            L.append(f"  En iyi:  {best['pair']} {side}  "
+            L.append(f"  En iyi:  {h(best['pair'])} {side}  "
                      f"{self._fmt_pct((best.get('close_profit') or 0) * 100)}  "
                      f"({self._fmt_usd(best.get('close_profit_abs') or 0)})")
         if worst and (not best or worst['pair'] != best['pair']
                       or worst.get('close_profit_abs') != best.get('close_profit_abs')):
             side = "SHORT" if worst.get("is_short") else "LONG"
-            L.append(f"  En kötü: {worst['pair']} {side}  "
+            L.append(f"  En kötü: {h(worst['pair'])} {side}  "
                      f"{self._fmt_pct((worst.get('close_profit') or 0) * 100)}  "
                      f"({self._fmt_usd(worst.get('close_profit_abs') or 0)})")
 
-        # ── Open positions ──────────────────────────────────────
         opens = stats.get("open_now") or []
         L.append("")
-        L.append(f"🟢 *Açık pozisyon: {len(opens)}*")
+        L.append(f"🟢 <b>Açık pozisyon: {len(opens)}</b>")
         for o in opens[:5]:
             side = "SHORT" if o.get("is_short") else "LONG"
-            L.append(f"  {o['pair']} {side}  ${(o.get('stake_amount') or 0):.0f} "
+            L.append(f"  {h(o['pair'])} {side}  ${(o.get('stake_amount') or 0):.0f} "
                      f"@ {(o.get('open_rate') or 0):.4f}  "
                      f"({(o.get('hours_open') or 0):.1f}h açık)")
         if len(opens) > 5:
             L.append(f"  …+{len(opens) - 5} more")
 
-        # ── Exit reasons ────────────────────────────────────────
         er = stats.get("exit_reasons_24h") or {}
         if er:
             L.append("")
-            L.append("⚠️ *Exit reason dağılımı (24h):*")
+            L.append("⚠️ <b>Exit reason dağılımı (24h):</b>")
             for reason, count in list(er.items())[:5]:
-                L.append(f"  {reason}: {count}")
+                L.append(f"  {h(reason)}: {count}")
 
-        # ── AI decision quality (7d) ────────────────────────────
         total = stats.get("ai_decisions_7d_total", 0)
         resolved = stats.get("ai_decisions_7d_resolved", 0)
         winners = stats.get("ai_decisions_7d_winners", 0)
         avg_conf = stats.get("ai_decisions_7d_avg_conf", 0)
         L.append("")
-        L.append("🤖 *AI Karar Kalitesi (son 7 gün)*")
+        L.append("🤖 <b>AI Karar Kalitesi (son 7 gün)</b>")
         L.append(f"  Toplam BULLISH/BEARISH karar: {total}")
         if resolved:
             acc = winners / resolved * 100
             L.append(f"  Çözülen: {resolved}  doğru yön: {winners}/{resolved} (%{acc:.0f})")
         L.append(f"  Avg confidence: {avg_conf:.2f}")
 
-        # ── RAG / LLM ───────────────────────────────────────────
         L.append("")
-        L.append("📞 *RAG / LLM (24h)*")
+        L.append("📞 <b>RAG / LLM (24h)</b>")
         L.append(f"  /signal p95 latency: {(stats.get('rag_p95_latency_ms', 0) / 1000):.1f}s  |  "
                  f"call: {stats.get('rag_signal_calls_24h', 0)}  |  "
                  f"timeout: {stats.get('rag_timeout_breaches', 0)}")
         L.append(f"  LLM API: {stats.get('llm_calls_24h', 0)} çağrı  |  "
                  f"cost: ${stats.get('llm_cost_24h', 0):.4f}")
 
-        # ── System health ───────────────────────────────────────
         L.append("")
-        L.append("🚦 *Sistem*")
+        L.append("🚦 <b>Sistem</b>")
         L.append(f"  Servisler: {stats.get('services_active', 0)}/"
                  f"{stats.get('services_total', 0)} active  |  "
                  f"Total restart: {stats.get('restarts_total', 0)}")
         if stats.get("ram_used_gb"):
             L.append(f"  RAM: {stats['ram_used_gb']:.1f} / "
                      f"{stats.get('ram_total_gb', 0):.1f} GB  |  "
-                     f"Autonomy: {stats.get('autonomy_level', '?')}")
+                     f"Autonomy: {h(stats.get('autonomy_level', '?'))}")
         else:
-            L.append(f"  Autonomy: {stats.get('autonomy_level', '?')}")
+            L.append(f"  Autonomy: {h(stats.get('autonomy_level', '?'))}")
 
-        # ── Promotion gate ──────────────────────────────────────
         pg = stats.get("promotion_gate") or {}
         if pg.get("metrics"):
             m = pg["metrics"]
@@ -191,7 +198,7 @@ class AITelegramNotifier:
             elig_pct = elig_raw * 100 if elig_raw <= 1 else elig_raw
             blocked = pg.get("blocked_by") or []
             L.append("")
-            L.append("🔒 *Promotion Gate (Real-Capital)*")
+            L.append("🔒 <b>Promotion Gate (Real-Capital)</b>")
             L.append(f"  Eligibility: %{elig_pct:.1f}  |  blocked: {len(blocked)}/8 kriter")
             L.append(f"  n_trades: {m.get('n_trades', 0)}  |  "
                      f"winrate: %{(m.get('winrate', 0) or 0) * 100:.0f}  |  "
@@ -200,38 +207,36 @@ class AITelegramNotifier:
                      f"max_dd: %{(m.get('max_dd', 0) or 0) * 100:.0f}  |  "
                      f"liquid: {m.get('n_liquid', 0)}")
             if blocked:
-                L.append(f"  Engelleyen: {', '.join(blocked[:4])}"
+                L.append(f"  Engelleyen: {h(', '.join(blocked[:4]))}"
                          + (f" +{len(blocked) - 4} more" if len(blocked) > 4 else ""))
 
-        # ── Forgone ─────────────────────────────────────────────
         L.append("")
-        L.append("🌑 *Forgone (alınmayan sinyaller — 24h)*")
+        L.append("🌑 <b>Forgone (alınmayan sinyaller — 24h)</b>")
         L.append(f"  Toplam: {stats.get('forgone_count_24h', 0)} sinyal  |  "
                  f"forgone PnL: {self._fmt_pct(stats.get('forgone_pnl_24h', 0))}")
         for f in (stats.get("forgone_top") or [])[:3]:
-            L.append(f"  {f['pair']} {f['signal_type']} c={f.get('confidence', 0):.2f} → "
+            L.append(f"  {h(f['pair'])} {h(f.get('signal_type'))} "
+                     f"c={f.get('confidence', 0):.2f} → "
                      f"+{f.get('forgone_pnl', 0):.1f}%")
 
-        # ── Portfolio ───────────────────────────────────────────
         pv = stats.get("portfolio_value", 0)
         assets = stats.get("assets") or {}
         if assets and pv:
             L.append("")
-            L.append("💼 *Portfolyo*")
-            L.append(f"  Toplam: *${pv:,.2f}*")
+            L.append("💼 <b>Portfolyo</b>")
+            L.append(f"  Toplam: <b>${pv:,.2f}</b>")
             parts = []
             for ccy, info in assets.items():
                 if isinstance(info, dict) and info.get("usd", 0) >= 1:
-                    parts.append(f"{ccy}: ${info['usd']:,.2f}")
+                    parts.append(f"{h(ccy)}: ${info['usd']:,.2f}")
             if parts:
                 L.append("  " + " | ".join(parts[:5]))
 
-        # ── $100 simulation ─────────────────────────────────────
         hyp = stats.get("hypothetical") or {}
         if hyp.get("total_trades", 0) > 0:
             L.append("")
-            L.append("💯 *$100 Simülasyon (kümülatif)*")
-            L.append(f"  Bakiye: *${hyp['current_balance']:.2f}*  "
+            L.append("💯 <b>$100 Simülasyon (kümülatif)</b>")
+            L.append(f"  Bakiye: <b>${hyp['current_balance']:.2f}</b>  "
                      f"({self._fmt_pct(hyp.get('total_return_pct', 0))})  |  "
                      f"Toplam: {hyp['total_trades']} trade")
             if hyp.get("today_trades"):
@@ -241,10 +246,10 @@ class AITelegramNotifier:
         msg = "\n".join(L)
         if len(msg) > 4000:
             msg = msg[:3990] + "\n…(truncated)"
-        self._send_message(msg)
+        self._send_message(msg, parse_mode="HTML")
 
     def send_weekly_summary(self, stats: dict):
-        """2026-05-18 rewrite: real 7-day report.
+        """2026-05-18 rewrite: real 7-day report (HTML parse mode).
 
         Previous version sent win_rate=0/sharpe=0/max_drawdown=0 placeholders. Now
         reads from _compute_daily_stats() (in scheduler) which pulls real trades,
@@ -252,21 +257,22 @@ class AITelegramNotifier:
         """
         from datetime import datetime as _dt
 
+        h = self._h
         today = _dt.utcnow().strftime("%d %b %Y")
         L: list[str] = []
-        L.append(f"📅 *HAFTALIK RAPOR — {today}*")
+        L.append(f"📅 <b>HAFTALIK RAPOR — {today}</b>")
         L.append("━━━━━━━━━━━━━━━━━━━")
 
         L.append("")
-        L.append("💰 *Haftalık PnL (TR-DRY paper)*")
-        L.append(f"  7 günlük PnL: *{self._fmt_usd(stats.get('pnl_abs_7d', 0))}*  "
+        L.append("💰 <b>Haftalık PnL (TR-DRY paper)</b>")
+        L.append(f"  7 günlük PnL: <b>{self._fmt_usd(stats.get('pnl_abs_7d', 0))}</b>  "
                  f"({self._fmt_pct(stats.get('pnl_pct_7d', 0))})")
         L.append(f"  30 günlük:    {self._fmt_usd(stats.get('pnl_abs_30d', 0))}")
         L.append(f"  Tüm zaman:    {self._fmt_usd(stats.get('pnl_abs_all', 0))}  "
                  f"({stats.get('closed_all', 0)} trade)")
 
         L.append("")
-        L.append("📊 *Trade istatistik (7g)*")
+        L.append("📊 <b>Trade istatistik (7g)</b>")
         n7 = stats.get("closed_7d", 0)
         w7 = stats.get("wins_7d", 0)
         wr = stats.get("win_rate_7d", 0.0)
@@ -279,16 +285,16 @@ class AITelegramNotifier:
         daily_pnl = stats.get("weekly_pnl_by_day") or []
         if daily_pnl:
             L.append("")
-            L.append("📆 *Günlük dağılım (son 7 gün):*")
+            L.append("📆 <b>Günlük dağılım (son 7 gün):</b>")
             for d in daily_pnl[:7]:
-                L.append(f"  {d['day']}: {d['n']} trade  {self._fmt_usd(d['pnl'])}")
+                L.append(f"  {h(d['day'])}: {d['n']} trade  {self._fmt_usd(d['pnl'])}")
 
         opens = stats.get("open_now") or []
         L.append("")
-        L.append(f"🟢 *Açık pozisyon şu an: {len(opens)}*")
+        L.append(f"🟢 <b>Açık pozisyon şu an: {len(opens)}</b>")
 
         L.append("")
-        L.append("📞 *RAG / LLM (24h örnek)*")
+        L.append("📞 <b>RAG / LLM (24h örnek)</b>")
         L.append(f"  Signal calls: {stats.get('rag_signal_calls_24h', 0)}  |  "
                  f"p95: {(stats.get('rag_p95_latency_ms', 0) / 1000):.1f}s")
         L.append(f"  LLM: {stats.get('llm_calls_24h', 0)} çağrı  |  "
@@ -296,27 +302,26 @@ class AITelegramNotifier:
 
         pg = stats.get("promotion_gate") or {}
         if pg.get("metrics"):
-            m = pg["metrics"]
             elig_raw = pg.get("eligibility_pct", 0)
             elig_pct = elig_raw * 100 if elig_raw <= 1 else elig_raw
             blocked = pg.get("blocked_by") or []
             L.append("")
-            L.append("🔒 *Promotion Gate*")
+            L.append("🔒 <b>Promotion Gate</b>")
             L.append(f"  Eligibility: %{elig_pct:.1f}  |  blocked: {len(blocked)}/8")
             if blocked:
-                L.append(f"  Engelleyen: {', '.join(blocked[:4])}"
+                L.append(f"  Engelleyen: {h(', '.join(blocked[:4]))}"
                          + (f" +{len(blocked) - 4} more" if len(blocked) > 4 else ""))
 
         L.append("")
-        L.append("🌑 *Forgone (24h)*: "
+        L.append("🌑 <b>Forgone (24h)</b>: "
                  f"{stats.get('forgone_count_24h', 0)} sinyal  "
                  f"{self._fmt_pct(stats.get('forgone_pnl_24h', 0))}")
 
         hyp = stats.get("hypothetical") or {}
         if hyp.get("total_trades", 0) > 0:
             L.append("")
-            L.append("💯 *$100 Simülasyon*")
-            L.append(f"  Bakiye: *${hyp['current_balance']:.2f}*  "
+            L.append("💯 <b>$100 Simülasyon</b>")
+            L.append(f"  Bakiye: <b>${hyp['current_balance']:.2f}</b>  "
                      f"({self._fmt_pct(hyp.get('total_return_pct', 0))})")
             if hyp.get("best_trade_pct") is not None:
                 L.append(f"  En iyi: {hyp['best_trade_pct']:+.2f}%  |  "
@@ -325,7 +330,7 @@ class AITelegramNotifier:
         msg = "\n".join(L)
         if len(msg) > 4000:
             msg = msg[:3990] + "\n…(truncated)"
-        self._send_message(msg)
+        self._send_message(msg, parse_mode="HTML")
 
     def send_alert(self, message: str, level: str = "INFO", cooldown_secs: int = None):
         """Send critical alerts with dedup cooldown to prevent spam.
