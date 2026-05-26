@@ -348,11 +348,19 @@ def spool_write(sql: str, params: Optional[list] = None,
                 db_path: str = AI_DB_PATH) -> bool:
     """Persist a write to hot_writes when the broker is unreachable.
     Drain job (scheduler._sqlite_spool_drain_tick) replays pending rows
-    when the broker reappears. Returns True on successful enqueue."""
+    when the broker reappears. Returns True on successful enqueue.
+
+    2026-05-26 leak fix: close() now in finally — when SQLite raises
+    `database is locked` after busy_timeout, the previous code path
+    skipped line 366 and leaked the fd. Every locked tick was burning
+    one connection that got garbage-collected only via Python refcount,
+    contributing to the 884-handle pile-up observed on tr-dry.
+    """
+    # Use a direct connection — if the shared pool is locked the
+    # spool itself should still be writable via a fresh fd with WAL
+    # + 30s busy_timeout.
+    conn = None
     try:
-        # Use a direct connection — if the shared pool is locked the
-        # spool itself should still be writable via a fresh fd with WAL
-        # + 30s busy_timeout.
         conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
@@ -363,11 +371,16 @@ def spool_write(sql: str, params: Optional[list] = None,
             (sql, json.dumps(list(params or [])), target_table or "", int(priority)),
         )
         conn.commit()
-        conn.close()
         return True
     except Exception as e:
         logger.error(f"[SqliteBroker:Spool] write failed: {e}")
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 MAX_SPOOL_RETRIES = 20
@@ -386,6 +399,7 @@ def drain_spool(batch_size: int = 50, db_path: str = AI_DB_PATH) -> int:
     if not client.is_alive():
         return 0
     drained = 0
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -428,7 +442,12 @@ def drain_spool(batch_size: int = 50, db_path: str = AI_DB_PATH) -> int:
                         (new_retry, str(resp.get("error", ""))[:200], row["id"]),
                     )
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.error(f"[SqliteBroker:Spool] drain failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return drained

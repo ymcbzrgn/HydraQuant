@@ -65,7 +65,7 @@ class LLMCostTracker:
             with get_db_connection(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS llm_calls (
+                    CREATE TABLE IF NOT EXISTS llm.llm_calls (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         model TEXT NOT NULL,

@@ -35,7 +35,7 @@ class SystemMonitor:
         try:
             conn = get_db_connection(self.db_path)
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS system_metrics (
+                CREATE TABLE IF NOT EXISTS obs.system_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                     metric_name TEXT NOT NULL,
@@ -44,7 +44,7 @@ class SystemMonitor:
                 )
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_metrics_name_ts
+                CREATE INDEX IF NOT EXISTS obs.idx_metrics_name_ts
                 ON system_metrics(metric_name, timestamp)
             """)
             conn.commit()

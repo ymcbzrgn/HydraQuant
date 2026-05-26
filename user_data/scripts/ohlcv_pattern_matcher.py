@@ -47,7 +47,7 @@ class OHLCVPatternMatcher:
         try:
             with self._get_conn() as conn:
                 conn.execute("""
-                    CREATE TABLE IF NOT EXISTS ohlcv_patterns (
+                    CREATE TABLE IF NOT EXISTS pat.ohlcv_patterns (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         pair TEXT NOT NULL,
                         timeframe TEXT DEFAULT '1h',
@@ -61,7 +61,7 @@ class OHLCVPatternMatcher:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_pair ON ohlcv_patterns(pair)")
+                conn.execute("CREATE INDEX IF NOT EXISTS pat.idx_ohlcv_pair ON ohlcv_patterns(pair)")
                 conn.commit()
         except Exception as e:
             logger.error(f"[OHLCVMatcher] DB init failed: {e}")

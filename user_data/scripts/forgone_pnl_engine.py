@@ -40,7 +40,7 @@ class ForgonePnLEngine:
         with self._get_db_connection() as conn:
             c = conn.cursor()
             c.execute('''
-                CREATE TABLE IF NOT EXISTS forgone_profit (
+                CREATE TABLE IF NOT EXISTS pat.forgone_profit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair TEXT NOT NULL,
                     signal_type TEXT,
@@ -54,7 +54,7 @@ class ForgonePnLEngine:
                 )
             ''')
             # Migrate old tables missing new columns
-            c.execute("PRAGMA table_info(forgone_profit)")
+            c.execute("PRAGMA pat.table_info(forgone_profit)")
             columns = [col['name'] for col in c.fetchall()]
             for col_name, col_type in [
                 ('signal_type', 'TEXT'),
@@ -76,7 +76,7 @@ class ForgonePnLEngine:
                 ('sub_risk', 'REAL'),
             ]:
                 if col_name not in columns:
-                    c.execute(f'ALTER TABLE forgone_profit ADD COLUMN {col_name} {col_type}')
+                    c.execute(f'ALTER TABLE pat.forgone_profit ADD COLUMN {col_name} {col_type}')
             conn.commit()
 
     def log_forgone_signal(

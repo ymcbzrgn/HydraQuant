@@ -23,6 +23,57 @@ from ai_config import AI_DB_PATH as DB_PATH
 # Phase 30 A.32 — Canonical re-export for downstream imports
 AI_DB_PATH = DB_PATH
 
+# 2026-05-26 FAZ 4 — Hot-table DB split.
+# The original single ai_data.sqlite carried 67 tables and was hammered by
+# 5 concurrent processes (tr-dry + scheduler + rag + ai-api + models). The
+# tek-yazar SQLite write lock became a serialisation choke-point that
+# caused multi-hour DB freezes. Splitting the hottest tables into topic
+# files isolates writer contention without losing the simplicity of SQLite.
+#
+# Mapping (writer-by-table):
+#   llm_data.sqlite     — llm_calls (528K) + llm_response_cache (11K) + llm_dead_models
+#                        Writer: llm_cost_tracker, llm_router, semantic_cache
+#   observability.sqlite — telemetry_events + system_metrics + protection_logs (420K)
+#                        + evidence_audit_log + rag_endpoint_latency
+#                        Writers: telemetry, severity_router, system_monitor,
+#                                 scheduler (system_metrics), HydraSizer
+#                                 (protection_logs)
+#   patterns.sqlite     — ohlcv_patterns (83K) + counterfactual_results (79K)
+#                        + forgone_profit (60K) + pattern_trades
+#                        Writers: ohlcv_pattern_matcher, counterfactual_engine,
+#                                 forgone_pnl_engine, pattern_stat_store
+import os as _os
+_DB_DIR = _os.path.dirname(DB_PATH) or "."
+LLM_DB_PATH = _os.path.join(_DB_DIR, "llm_data.sqlite")
+OBS_DB_PATH = _os.path.join(_DB_DIR, "observability.sqlite")
+PAT_DB_PATH = _os.path.join(_DB_DIR, "patterns.sqlite")
+
+
+def _ensure_split_dbs() -> None:
+    """Create empty WAL-mode files for the split DBs if missing.
+
+    init_db() qualifies every hot-table CREATE/ALTER/INDEX with `llm.`,
+    `obs.`, or `pat.`. Those aliases only exist if the underlying files
+    are present when `_create_connection` runs its ATTACH loop (the
+    ATTACH is guarded by `os.path.exists`). On a fresh install or after
+    a wipe the files may be missing — without this bootstrap every
+    schema-qualified DDL would die with `unknown database obs`. The
+    files are tiny (empty WAL journals) so the cost is negligible.
+    """
+    _os.makedirs(_DB_DIR, exist_ok=True)
+    for _p in (LLM_DB_PATH, OBS_DB_PATH, PAT_DB_PATH):
+        if not _os.path.exists(_p):
+            _c = sqlite3.connect(_p, timeout=30)
+            try:
+                _c.execute("PRAGMA journal_mode=WAL")
+                _c.execute("PRAGMA synchronous=NORMAL")
+                _c.commit()
+            finally:
+                _c.close()
+
+
+_ensure_split_dbs()
+
 # Phase 30 A.32 — Cleanup 0-byte legacy ai_data.sqlite at user_data/ root
 try:
     from pathlib import Path as _Path
@@ -39,22 +90,30 @@ except Exception:
 class _ConnectionPool:
     """Thread-safe SQLite connection pool.
     Her thread kendi connection'ini alir, isini bitirince pool'a geri verir.
+
+    2026-05-26 FAZ 4: now path-aware multi-singleton. _ConnectionPool() with
+    no args returns the canonical AI_DB_PATH pool (back-compat). Passing a
+    db_path returns the pool for that file, creating it on first call. Each
+    split DB (llm_data, observability, patterns) gets its own pool with
+    independent connections — writer contention no longer crosses files.
     """
 
-    _instance = None
-    _lock = threading.Lock()
+    _instances: dict = {}
+    _instances_lock = threading.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
+    def __new__(cls, db_path=None):
+        key = db_path or DB_PATH
+        with cls._instances_lock:
+            if key not in cls._instances:
+                inst = super().__new__(cls)
+                inst._initialized = False
+                cls._instances[key] = inst
+            return cls._instances[key]
 
-    def __init__(self):
+    def __init__(self, db_path=None):
         if self._initialized:
             return
+        self._db_path = db_path or DB_PATH
         self._pool: list[sqlite3.Connection] = []
         self._pool_lock = threading.Lock()
         # Memory-pressure revision (2026-04-21): the old max=8 × 8MB page cache
@@ -66,10 +125,10 @@ class _ConnectionPool:
         self._total_created = 0
         self._release_count = 0
         self._initialized = True
-        logger.info(f"[DB] Connection pool initialized (max={self._max_size}, timeout={self._busy_timeout_ms}ms)")
+        logger.info(f"[DB] Connection pool initialized for {self._db_path} (max={self._max_size}, timeout={self._busy_timeout_ms}ms)")
 
     def _create_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(DB_PATH, timeout=self._busy_timeout_ms / 1000, check_same_thread=False)
+        conn = sqlite3.connect(self._db_path, timeout=self._busy_timeout_ms / 1000, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
@@ -83,6 +142,27 @@ class _ConnectionPool:
         # continue; TRUNCATE happens later via the release-count path +
         # the new size-based scheduler job.
         conn.execute("PRAGMA wal_autocheckpoint=1000")
+        # 2026-05-26 FAZ 4 — ATTACH split DBs to the canonical connection.
+        # This is what makes the VIEW+TRIGGER transparent-migration pattern
+        # work: every connection opened against ai_data.sqlite sees the
+        # split DBs as `llm.`, `obs.`, `pat.` aliases, and the VIEWs +
+        # INSTEAD-OF triggers installed by migrate_transparent_v2.py route
+        # transparently to those files.
+        # Split connections (pools for LLM_DB_PATH / OBS_DB_PATH / PAT_DB_PATH
+        # themselves) DON'T re-attach — they're already on the target file.
+        if self._db_path == DB_PATH:
+            for alias, split_path in (
+                ("llm", LLM_DB_PATH),
+                ("obs", OBS_DB_PATH),
+                ("pat", PAT_DB_PATH),
+            ):
+                try:
+                    if os.path.exists(split_path):
+                        conn.execute(f"ATTACH DATABASE ? AS {alias}", (split_path,))
+                except Exception as e:
+                    logger.warning(
+                        f"[DB] ATTACH {alias} ({split_path}) failed: {e}"
+                    )
         self._total_created += 1
         # Wrap so conn.close() returns to pool instead of destroying
         return _PooledConnection(conn, self)
@@ -279,12 +359,22 @@ def get_db_connection(db_path: str = None) -> sqlite3.Connection:
     """Returns a pooled connection to AI DB, or a direct connection to a custom path.
 
     If db_path is None or matches AI_DB_PATH → pool'dan verir (PooledConnection).
-    If db_path is different (e.g. test tmp_path) → direct connection (no pool).
+    If db_path is one of the FAZ-4 hot-table split paths (LLM/OBS/PAT) →
+    a dedicated pool for that file (so connections don't bleed across DBs).
+    Otherwise (e.g. test tmp_path) → direct connection (no pool).
 
     IMPORTANT: Pooled connections auto-return on close(). Direct connections truly close.
     """
     if db_path is None or db_path == DB_PATH:
         return _pool.acquire()
+    # 2026-05-26 FAZ 4: dedicated pool per known split DB. _ConnectionPool
+    # is path-aware multi-singleton — passing the split path returns (or
+    # creates on first call) the pool that targets that file. Each pool
+    # keeps connections scoped to its own DB so writer contention can't
+    # cross files. Unknown paths still fall through to the direct-connect
+    # path below (preserves the tmp_path test isolation contract).
+    if db_path in (LLM_DB_PATH, OBS_DB_PATH, PAT_DB_PATH):
+        return _ConnectionPool(db_path).acquire()
     # Custom path — direct connection (for tests with tmp_path)
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -473,7 +563,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        c.execute('''CREATE TABLE IF NOT EXISTS forgone_profit (
+        c.execute('''CREATE TABLE IF NOT EXISTS pat.forgone_profit (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
             signal_type TEXT, signal_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             confidence REAL, entry_price REAL, was_executed BOOLEAN DEFAULT 0,
@@ -532,7 +622,7 @@ def init_db():
             value REAL NOT NULL, change_pct REAL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS ohlcv_patterns (
+        c.execute('''CREATE TABLE IF NOT EXISTS pat.ohlcv_patterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
             timeframe TEXT DEFAULT '1h', timestamp TEXT, fingerprint TEXT NOT NULL,
             outcome_1h REAL, outcome_4h REAL, outcome_24h REAL, direction TEXT,
@@ -561,7 +651,7 @@ def init_db():
             reversion_score REAL, funding_score REAL, regime_shift_score REAL,
             volume_anomaly_score REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS evidence_audit_log (
+        c.execute('''CREATE TABLE IF NOT EXISTS obs.evidence_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL,
             signal TEXT NOT NULL, confidence REAL NOT NULL, sub_scores_json TEXT,
             contradictions_json TEXT, evidence_sources_json TEXT, regime TEXT,
@@ -914,7 +1004,7 @@ def init_db():
         # adaptive-threshold jobs can group alpha-left-on-the-table by regime.
         # Idempotent ALTER — silently ignored if column already exists.
         try:
-            c.execute("ALTER TABLE forgone_profit ADD COLUMN regime TEXT")
+            c.execute("ALTER TABLE pat.forgone_profit ADD COLUMN regime TEXT")
         except sqlite3.OperationalError:
             pass
         # Data Acceleration audit fix: capture the 6 evidence sub-scores +
@@ -932,7 +1022,7 @@ def init_db():
             ("sub_risk", "REAL"),
         ):
             try:
-                c.execute(f"ALTER TABLE forgone_profit ADD COLUMN {_col} {_typ}")
+                c.execute(f"ALTER TABLE pat.forgone_profit ADD COLUMN {_col} {_typ}")
             except sqlite3.OperationalError:
                 pass
 
@@ -1012,13 +1102,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        c.execute('''CREATE TABLE IF NOT EXISTS pattern_trades (
+        c.execute('''CREATE TABLE IF NOT EXISTS pat.pattern_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT, timeframe TEXT,
             pattern_type TEXT, entry_date TEXT, exit_date TEXT,
             pnl_pct REAL, duration_hours REAL, regime TEXT,
             features_json TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS llm_calls (
+        c.execute('''CREATE TABLE IF NOT EXISTS llm.llm_calls (
             id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             model TEXT, provider TEXT, prompt_tokens INTEGER, completion_tokens INTEGER,
             cost_usd REAL, latency_ms REAL, purpose TEXT, success BOOLEAN DEFAULT 1)''')
@@ -1032,7 +1122,7 @@ def init_db():
         # new column names are authoritative. This migration aligns db.py to
         # match. Existing fresh DBs created against the old shape pick up
         # the new shape on next init via additive ALTER TABLE.
-        c.execute('''CREATE TABLE IF NOT EXISTS system_metrics (
+        c.execute('''CREATE TABLE IF NOT EXISTS obs.system_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             metric_name TEXT NOT NULL,
@@ -1040,25 +1130,25 @@ def init_db():
             metadata_json TEXT)''')
         # Idempotent forward-migration for DBs created before this change.
         existing_cols = {r[1] for r in c.execute(
-            "PRAGMA table_info(system_metrics)").fetchall()}
+            "PRAGMA obs.table_info(system_metrics)").fetchall()}
         if "metric_value" not in existing_cols and "value" in existing_cols:
             try:
-                c.execute("ALTER TABLE system_metrics RENAME COLUMN value TO metric_value")
+                c.execute("ALTER TABLE obs.system_metrics RENAME COLUMN value TO metric_value")
             except Exception:
                 # SQLite < 3.25 doesn't support RENAME COLUMN — fall back to
                 # ADD COLUMN + double-write convention. The new writers all
                 # use metric_value, the legacy writer (scheduler.py:3975)
                 # has been migrated as part of this sprint.
                 try:
-                    c.execute("ALTER TABLE system_metrics ADD COLUMN metric_value REAL")
+                    c.execute("ALTER TABLE obs.system_metrics ADD COLUMN metric_value REAL")
                 except Exception:
                     pass
         if "metadata_json" not in existing_cols and "metadata" in existing_cols:
             try:
-                c.execute("ALTER TABLE system_metrics RENAME COLUMN metadata TO metadata_json")
+                c.execute("ALTER TABLE obs.system_metrics RENAME COLUMN metadata TO metadata_json")
             except Exception:
                 try:
-                    c.execute("ALTER TABLE system_metrics ADD COLUMN metadata_json TEXT")
+                    c.execute("ALTER TABLE obs.system_metrics ADD COLUMN metadata_json TEXT")
                 except Exception:
                     pass
 
@@ -1148,7 +1238,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        c.execute('''CREATE TABLE IF NOT EXISTS counterfactual_results (
+        c.execute('''CREATE TABLE IF NOT EXISTS pat.counterfactual_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT, original_trade_id INTEGER,
             intervention_var TEXT NOT NULL, original_value REAL,
             counterfactual_value REAL, original_outcome_pnl REAL,
@@ -1276,11 +1366,11 @@ def init_db():
             'CREATE INDEX IF NOT EXISTS idx_macro_name_ts ON macro_data(metric_name, timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_defi_name_ts ON defi_data(metric_name, timestamp)',
             'CREATE INDEX IF NOT EXISTS idx_trends_kw_ts ON search_trends(keyword, timestamp)',
-            'CREATE INDEX IF NOT EXISTS idx_ohlcv_pair ON ohlcv_patterns(pair)',
+            'CREATE INDEX IF NOT EXISTS pat.idx_ohlcv_pair ON ohlcv_patterns(pair)',
             'CREATE INDEX IF NOT EXISTS idx_agent_mem_type ON agent_memory(agent_type, regime)',
             'CREATE INDEX IF NOT EXISTS idx_agent_perf ON agent_performance(agent_type, regime)',
             'CREATE INDEX IF NOT EXISTS idx_opp_pair_ts ON opportunity_scores(pair, timestamp)',
-            'CREATE INDEX IF NOT EXISTS idx_evidence_pair_ts ON evidence_audit_log(pair, timestamp)',
+            'CREATE INDEX IF NOT EXISTS obs.idx_evidence_pair_ts ON evidence_audit_log(pair, timestamp)',
             # Neural Organism
             'CREATE INDEX IF NOT EXISTS idx_neuron_organ ON neuron_state(organ, regime)',
             'CREATE INDEX IF NOT EXISTS idx_hippo_pair ON hippocampus_episodes(pair, regime)',
@@ -1344,12 +1434,12 @@ def init_db():
             ("status", "TEXT DEFAULT 'success'"),
         ]:
             try:
-                c.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} {typedef}")
+                c.execute(f"ALTER TABLE llm.llm_calls ADD COLUMN {col} {typedef}")
             except sqlite3.OperationalError:
                 pass
 
         # A.33: RAG endpoint latency
-        c.execute('''CREATE TABLE IF NOT EXISTS rag_endpoint_latency (
+        c.execute('''CREATE TABLE IF NOT EXISTS obs.rag_endpoint_latency (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             endpoint TEXT NOT NULL,
             pair TEXT,
@@ -1444,7 +1534,7 @@ def init_db():
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # A.17: LLM response cache
-        c.execute('''CREATE TABLE IF NOT EXISTS llm_response_cache (
+        c.execute('''CREATE TABLE IF NOT EXISTS llm.llm_response_cache (
             cache_key TEXT PRIMARY KEY,
             model TEXT,
             response_text TEXT,
@@ -1555,7 +1645,7 @@ def init_db():
             ts DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         # B.18: Telemetry single
-        c.execute('''CREATE TABLE IF NOT EXISTS telemetry_events (
+        c.execute('''CREATE TABLE IF NOT EXISTS obs.telemetry_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             kind TEXT NOT NULL,
             severity TEXT DEFAULT 'info',
@@ -1633,8 +1723,8 @@ def init_db():
         # === PHASE 30 INDICES ===
         for idx_sql in [
             'CREATE INDEX IF NOT EXISTS idx_anomaly_pair_ts ON price_anomaly_events(pair, ts)',
-            'CREATE INDEX IF NOT EXISTS idx_rag_lat_ts ON rag_endpoint_latency(ts)',
-            'CREATE INDEX IF NOT EXISTS idx_rag_lat_endpoint ON rag_endpoint_latency(endpoint)',
+            'CREATE INDEX IF NOT EXISTS obs.idx_rag_lat_ts ON rag_endpoint_latency(ts)',
+            'CREATE INDEX IF NOT EXISTS obs.idx_rag_lat_endpoint ON rag_endpoint_latency(endpoint)',
             'CREATE INDEX IF NOT EXISTS idx_restart_svc ON service_restart_events(service, detection_ts)',
             'CREATE INDEX IF NOT EXISTS idx_tool_results_ts ON tool_results(ts)',
             'CREATE INDEX IF NOT EXISTS idx_doom_pair ON doom_loop_events(pair, ts)',
@@ -1642,10 +1732,10 @@ def init_db():
             'CREATE INDEX IF NOT EXISTS idx_parse_failures_src ON parse_failures(source, ts)',
             'CREATE INDEX IF NOT EXISTS idx_news_clusters_key ON news_clusters(cluster_key, ts)',
             'CREATE INDEX IF NOT EXISTS idx_threat_tier ON threat_events(tier, ts)',
-            'CREATE INDEX IF NOT EXISTS idx_llm_cache_last_hit ON llm_response_cache(last_hit_at)',
+            'CREATE INDEX IF NOT EXISTS llm.idx_llm_cache_last_hit ON llm_response_cache(last_hit_at)',
             'CREATE INDEX IF NOT EXISTS idx_workflow_kind ON workflow_events(kind, ts)',
             'CREATE INDEX IF NOT EXISTS idx_autonomy_diag_ts ON autonomy_diagnostics(ts)',
-            'CREATE INDEX IF NOT EXISTS idx_telemetry_kind ON telemetry_events(kind, severity, ts)',
+            'CREATE INDEX IF NOT EXISTS obs.idx_telemetry_kind ON telemetry_events(kind, severity, ts)',
             'CREATE INDEX IF NOT EXISTS idx_composite_risk_pair ON composite_risk_decisions(pair, ts)',
             'CREATE INDEX IF NOT EXISTS idx_redteam_kind ON redteam_audit_runs(run_kind, ts)',
             'CREATE INDEX IF NOT EXISTS idx_contradiction_pair ON contradiction_events(pair, ts)',

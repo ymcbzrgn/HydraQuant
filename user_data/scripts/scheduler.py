@@ -100,8 +100,26 @@ class PipelineScheduler:
         # spawn stacked instances after a hang, which in turn fought for the
         # SQLite WAL lock and deadlocked the RSS ingest job. 60s grace window
         # lets APScheduler skip late executions entirely once coalesce kicks in.
+        #
+        # 2026-05-26 FAZ 3 — explicit executor pool sizes. APScheduler's
+        # default `default` executor is a ThreadPoolExecutor with **10**
+        # workers; with 78 registered jobs that meant up to 10 DB-mutating
+        # jobs could run in parallel against ai_data.sqlite, fighting tr-dry
+        # + rag + ai-api + models for the single WAL writer slot — the
+        # primary lock storm contributor. Pinning the default pool to 3
+        # workers (matched against SQLite's 4-slot canonical connection pool
+        # with one slot reserved for the hot-path tr-dry callers) brings
+        # contention back into the regime where WAL mode actually scales.
+        # The `cron_executor` carries the rare daily/weekly jobs (catboost,
+        # walk-forward, etc.) so they don't fight the interval workers when
+        # they fire.
+        from apscheduler.executors.pool import ThreadPoolExecutor as _APSExecPool
         self.scheduler = BackgroundScheduler(
             timezone="UTC",
+            executors={
+                "default": _APSExecPool(max_workers=3),
+                "cron_executor": _APSExecPool(max_workers=2),
+            },
             job_defaults={
                 "coalesce": True,
                 "max_instances": 1,
@@ -390,14 +408,22 @@ class PipelineScheduler:
         # APScheduler default coalesce=True merges missed runs into one;
         # we want misses dropped silently instead (the next 1-min tick
         # will resample anyway).
+        # 2026-05-26 FAZ 3 — cadence relaxed 1 min → 5 min. The 1-minute
+        # tick was eating an executor slot every minute (Memory Groom is
+        # itself disk-heavy: glibc malloc_trim + GC walk) on top of the
+        # WAL Checkpoint and Spool Drain that fire on the same schedule.
+        # 5 min still gives the predictive guardian plenty of samples (and
+        # the heavy work itself is pressure-gated inside _memory_cleanup),
+        # while freeing 4 minutes per cycle of write throughput for the
+        # rest of the fleet.
         self.scheduler.add_job(
             self._memory_cleanup,
-            'interval', minutes=1,
+            'interval', minutes=5,
             id='memory_cleanup',
             name='Memory Groom (sensor + GC + malloc_trim)',
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=30,
+            misfire_grace_time=120,
             replace_existing=True
         )
 
@@ -563,17 +589,24 @@ class PipelineScheduler:
         # 166 MB for hours; a busy one fired TRUNCATEs every few seconds
         # and contended with hot writers. Checking the file size every
         # 60s and truncating above 32 MB gives deterministic bounds.
+        # 2026-05-26 FAZ 3: WAL Checkpoint cadence relaxed 60s → 3 min.
+        # The size-based logic inside _wal_checkpoint_tick already protects
+        # against runaway WAL growth (truncates above 32 MB regardless of
+        # cadence). 60-second ticks were just extra writer contention; 3
+        # min still catches multi-MB WAL bursts well within the 32 MB cap.
         self.scheduler.add_job(self._wal_checkpoint_tick, 'interval',
-            seconds=60, id='wal_checkpoint',
+            minutes=3, id='wal_checkpoint',
             name='WAL Size-Based Checkpoint',
-            max_instances=1, replace_existing=True)
-        # Task 11/12: drain the hot_writes spool. Any write that missed
-        # the broker (startup race, transient ZMQ disconnect) sits in
-        # `hot_writes` state='pending' — this job replays them.
+            max_instances=1, replace_existing=True,
+            misfire_grace_time=120)
+        # 2026-05-26 FAZ 3: Spool Drain cadence relaxed 60s → 2 min. Spool
+        # rows are non-critical (telemetry, audit logs, cache puts); 2-min
+        # drain still keeps the queue bounded at peak ingestion rates.
         self.scheduler.add_job(self._sqlite_spool_drain_tick, 'interval',
-            minutes=1, id='sqlite_spool_drain',
+            minutes=2, id='sqlite_spool_drain',
             name='SQLite Write Spool Drain',
-            max_instances=1, replace_existing=True)
+            max_instances=1, replace_existing=True,
+            misfire_grace_time=120)
         # Task 14: weekly risk_budget adaptation. `RiskBudgetManager.weekly_adjust`
         # existed from Phase 3.5.3 but was never wired — multiplier stayed at
         # 1.0 in production for weeks. Sunday 23:55 UTC computes the past
@@ -1610,8 +1643,15 @@ class PipelineScheduler:
             logger.warning(f"[DailyStats] tr_dry trades query failed: {e}")
 
         try:
-            from ai_config import AI_DB_PATH
-            with sqlite3.connect(AI_DB_PATH, timeout=10) as conn:
+            # 2026-05-27 FAZ 4: this block reads from rag_endpoint_latency,
+            # llm_calls, forgone_profit — all of which now live in split
+            # DBs (obs / llm / pat). The default pool's ATTACH aliases
+            # resolve unqualified table names via SQLite's schema search,
+            # but a raw sqlite3.connect() has no ATTACH so the queries
+            # would die with "no such table". Switching to the pool gets
+            # ATTACH + retry/pooling for free.
+            from db import get_db_connection
+            with get_db_connection() as conn:
                 conn.row_factory = sqlite3.Row
 
                 row = conn.execute(
@@ -1844,18 +1884,18 @@ class PipelineScheduler:
                 logger.warning("[PostMortem] tradesv3.sqlite not found")
                 return
 
-            conn = sqlite3.connect(trade_db, timeout=30)
-            conn.row_factory = sqlite3.Row
-            trades = conn.execute("""
-                SELECT id, pair, close_profit as pnl_pct, close_profit_abs as pnl_abs,
-                       stake_amount, leverage, exit_reason,
-                       CAST((julianday(close_date) - julianday(open_date)) * 1440 AS INTEGER) as trade_duration,
-                       open_date, close_date, is_short
-                FROM trades
-                WHERE is_open = 0 AND close_date > datetime('now', '-1 day')
-                ORDER BY close_profit_abs ASC
-            """).fetchall()
-            conn.close()
+            # 2026-05-26 leak fix: with-block guarantees close() if fetchall raises.
+            with sqlite3.connect(trade_db, timeout=30) as conn:
+                conn.row_factory = sqlite3.Row
+                trades = conn.execute("""
+                    SELECT id, pair, close_profit as pnl_pct, close_profit_abs as pnl_abs,
+                           stake_amount, leverage, exit_reason,
+                           CAST((julianday(close_date) - julianday(open_date)) * 1440 AS INTEGER) as trade_duration,
+                           open_date, close_date, is_short
+                    FROM trades
+                    WHERE is_open = 0 AND close_date > datetime('now', '-1 day')
+                    ORDER BY close_profit_abs ASC
+                """).fetchall()
 
             if not trades:
                 logger.info("[PostMortem] No trades closed yesterday")
@@ -2438,12 +2478,12 @@ class PipelineScheduler:
                 trade_db = os.path.join(base_dir, "..", "user_data", "tradesv3.sqlite")
 
             if os.path.exists(trade_db):
-                conn = sqlite3.connect(trade_db, timeout=10)
-                rows = conn.execute(
-                    "SELECT pair, COUNT(*) as cnt FROM trades GROUP BY pair ORDER BY cnt DESC LIMIT ?",
-                    (n,)
-                ).fetchall()
-                conn.close()
+                # 2026-05-26 leak fix: with-block so a fetchall error doesn't strand the fd.
+                with sqlite3.connect(trade_db, timeout=10) as conn:
+                    rows = conn.execute(
+                        "SELECT pair, COUNT(*) as cnt FROM trades GROUP BY pair ORDER BY cnt DESC LIMIT ?",
+                        (n,)
+                    ).fetchall()
                 if rows:
                     return [r[0] for r in rows]
 

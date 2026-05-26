@@ -173,7 +173,13 @@ def check_signal_dist() -> None:
 def check_llm_calls() -> None:
     section("4. LLM Calls: pair + task_name Propagation (last 1h)")
     try:
-        conn = sqlite3.connect(AI_DB)
+        # 2026-05-27 FAZ 4: llm_calls now lives in llm_data.sqlite. The
+        # pooled connection has ATTACH aliases for llm/obs/pat so the
+        # unqualified `FROM llm_calls` resolves via SQLite's schema
+        # search; a raw `sqlite3.connect(AI_DB)` would die with "no
+        # such table".
+        from db import get_db_connection
+        conn = get_db_connection()
         rows = q(conn, """
             SELECT COUNT(*) total,
                    SUM(CASE WHEN agent_name != '' AND agent_name != 'default' THEN 1 ELSE 0 END) with_task,

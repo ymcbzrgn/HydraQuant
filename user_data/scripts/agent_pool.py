@@ -281,8 +281,28 @@ class AgentPool:
             pass
 
     def _get_conn(self):
-        conn = get_db_connection(self.db_path)
-        return conn
+        """Pool-managed connection. Caller closes via `with` block or finally."""
+        return get_db_connection(self.db_path)
+
+    def _conn_ctx(self):
+        """Context manager that guarantees close() on exit (incl. exceptions).
+
+        Usage:
+            with self._conn_ctx() as conn:
+                conn.execute(...)
+        """
+        from contextlib import contextmanager
+        @contextmanager
+        def _cm():
+            conn = self._get_conn()
+            try:
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return _cm()
 
     # ═══════════════════════════════════════════════════════════
     # Phase 27 Fix 2A/2C helpers — context injection for agents
@@ -295,59 +315,60 @@ class AgentPool:
         Pulls 30-day performance per agent + 7-day memory rows for this pair so
         R3 can generate meta-analysis from REAL numbers instead of hallucinating.
         """
+        # 2026-05-26 leak fix: with-block guarantees close() on every path
+        # incl. exceptions raised mid-query (used to leak the conn).
         try:
-            conn = self._get_conn()
-            lines: List[str] = []
+            with self._conn_ctx() as conn:
+                lines: List[str] = []
 
-            # Per-agent performance in this regime (last 30 days)
-            lines.append("=== AGENT PERFORMANCE (last 30 days, regime={}) ===".format(regime))
-            any_perf = False
-            for name in agents:
-                if name == "ReflectionAgent":
-                    continue
-                row = conn.execute("""
-                    SELECT COUNT(*) as total,
-                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as wins,
-                           ROUND(AVG(outcome_pnl), 2) as avg_pnl
-                    FROM agent_performance
-                    WHERE agent_type = ? AND regime = ?
-                      AND timestamp > datetime('now', '-30 days')
-                """, (name, regime)).fetchone()
-                total = row["total"] or 0
-                wins = row["wins"] or 0
-                avg = row["avg_pnl"] or 0.0
-                wr = (wins / total * 100.0) if total > 0 else 0.0
-                if total > 0:
-                    any_perf = True
-                lines.append(
-                    f"  {name}: {total} signals, {wr:.0f}% WR, avg PnL {avg:+.2f}%"
-                )
-            if not any_perf:
-                lines.append("  (no recent performance rows — ReflectionAgent must "
-                             "acknowledge limited history and defer to live factsheet.)")
-
-            # Recent memory rows for this pair (last 7 days)
-            rows = conn.execute("""
-                SELECT agent_type, signal, strength, key_argument,
-                       final_outcome_pnl
-                FROM agent_memory
-                WHERE pair = ? AND timestamp > datetime('now', '-7 days')
-                ORDER BY timestamp DESC LIMIT 20
-            """, (pair,)).fetchall()
-
-            if rows:
-                lines.append(f"\n=== MEMORY: {pair} (last 7 days) ===")
-                for r in rows:
-                    outcome = (f"→ {r['final_outcome_pnl']:+.2f}%"
-                               if r['final_outcome_pnl'] is not None
-                               else "→ PENDING")
-                    arg = (r['key_argument'] or "")[:80]
-                    strength = r['strength'] if r['strength'] is not None else 0.0
+                # Per-agent performance in this regime (last 30 days)
+                lines.append("=== AGENT PERFORMANCE (last 30 days, regime={}) ===".format(regime))
+                any_perf = False
+                for name in agents:
+                    if name == "ReflectionAgent":
+                        continue
+                    row = conn.execute("""
+                        SELECT COUNT(*) as total,
+                               SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as wins,
+                               ROUND(AVG(outcome_pnl), 2) as avg_pnl
+                        FROM agent_performance
+                        WHERE agent_type = ? AND regime = ?
+                          AND timestamp > datetime('now', '-30 days')
+                    """, (name, regime)).fetchone()
+                    total = row["total"] or 0
+                    wins = row["wins"] or 0
+                    avg = row["avg_pnl"] or 0.0
+                    wr = (wins / total * 100.0) if total > 0 else 0.0
+                    if total > 0:
+                        any_perf = True
                     lines.append(
-                        f"  {r['agent_type']}: {r['signal']}(str={strength:.2f}) "
-                        f"{outcome} | {arg}"
+                        f"  {name}: {total} signals, {wr:.0f}% WR, avg PnL {avg:+.2f}%"
                     )
-            conn.close()
+                if not any_perf:
+                    lines.append("  (no recent performance rows — ReflectionAgent must "
+                                 "acknowledge limited history and defer to live factsheet.)")
+
+                # Recent memory rows for this pair (last 7 days)
+                rows = conn.execute("""
+                    SELECT agent_type, signal, strength, key_argument,
+                           final_outcome_pnl
+                    FROM agent_memory
+                    WHERE pair = ? AND timestamp > datetime('now', '-7 days')
+                    ORDER BY timestamp DESC LIMIT 20
+                """, (pair,)).fetchall()
+
+                if rows:
+                    lines.append(f"\n=== MEMORY: {pair} (last 7 days) ===")
+                    for r in rows:
+                        outcome = (f"→ {r['final_outcome_pnl']:+.2f}%"
+                                   if r['final_outcome_pnl'] is not None
+                                   else "→ PENDING")
+                        arg = (r['key_argument'] or "")[:80]
+                        strength = r['strength'] if r['strength'] is not None else 0.0
+                        lines.append(
+                            f"  {r['agent_type']}: {r['signal']}(str={strength:.2f}) "
+                            f"{outcome} | {arg}"
+                        )
             return "\n".join(lines)
         except Exception as e:
             logger.debug(f"[AgentPool:R3] Reflection context failed: {e}")
@@ -360,15 +381,14 @@ class AgentPool:
         reasoning templates have actually worked.
         """
         try:
-            conn = self._get_conn()
-            rows = conn.execute("""
-                SELECT argument_pattern, times_used, times_correct,
-                       avg_pnl_when_used, quality_score
-                FROM argument_quality
-                WHERE agent_type = ? AND regime = ? AND times_used >= 3
-                ORDER BY quality_score DESC
-            """, (agent_type, regime)).fetchall()
-            conn.close()
+            with self._conn_ctx() as conn:
+                rows = conn.execute("""
+                    SELECT argument_pattern, times_used, times_correct,
+                           avg_pnl_when_used, quality_score
+                    FROM argument_quality
+                    WHERE agent_type = ? AND regime = ? AND times_used >= 3
+                    ORDER BY quality_score DESC
+                """, (agent_type, regime)).fetchall()
 
             if not rows or len(rows) == 0:
                 return ""  # not enough history yet
@@ -414,69 +434,67 @@ class AgentPool:
         if not pattern:
             return
         try:
-            conn = self._get_conn()
-            row = conn.execute("""
-                SELECT times_used, times_correct, avg_pnl_when_used
-                FROM argument_quality
-                WHERE agent_type = ? AND argument_pattern = ? AND regime = ?
-            """, (agent_type, pattern, regime)).fetchone()
+            with self._conn_ctx() as conn:
+                row = conn.execute("""
+                    SELECT times_used, times_correct, avg_pnl_when_used
+                    FROM argument_quality
+                    WHERE agent_type = ? AND argument_pattern = ? AND regime = ?
+                """, (agent_type, pattern, regime)).fetchone()
 
-            if row is None:
-                used = 1
-                correct = 1 if was_correct else 0
-                avg_pnl = float(outcome_pnl)
-            else:
-                used = (row["times_used"] or 0) + 1
-                correct = (row["times_correct"] or 0) + (1 if was_correct else 0)
-                prev_avg = row["avg_pnl_when_used"] or 0.0
-                avg_pnl = (prev_avg * (used - 1) + float(outcome_pnl)) / used
+                if row is None:
+                    used = 1
+                    correct = 1 if was_correct else 0
+                    avg_pnl = float(outcome_pnl)
+                else:
+                    used = (row["times_used"] or 0) + 1
+                    correct = (row["times_correct"] or 0) + (1 if was_correct else 0)
+                    prev_avg = row["avg_pnl_when_used"] or 0.0
+                    avg_pnl = (prev_avg * (used - 1) + float(outcome_pnl)) / used
 
-            # Mega Sprint 2026-04-23 (B.4.1): Laplace smoothing. The old
-            # "correct/used" formula collapsed a pattern's score to 0.0 after
-            # a single losing observation, which killed evidence before
-            # enough trials had accumulated. (correct+1)/(used+2) is the
-            # posterior mean of a Beta(1,1) prior — starts at 0.5 and
-            # regresses toward the true rate as n grows.
-            quality_score = (correct + 1) / (used + 2)
-            from datetime import datetime as _dt, timezone as _tz
-            now = _dt.now(tz=_tz.utc).isoformat()
+                # Mega Sprint 2026-04-23 (B.4.1): Laplace smoothing. The old
+                # "correct/used" formula collapsed a pattern's score to 0.0 after
+                # a single losing observation, which killed evidence before
+                # enough trials had accumulated. (correct+1)/(used+2) is the
+                # posterior mean of a Beta(1,1) prior — starts at 0.5 and
+                # regresses toward the true rate as n grows.
+                quality_score = (correct + 1) / (used + 2)
+                from datetime import datetime as _dt, timezone as _tz
+                now = _dt.now(tz=_tz.utc).isoformat()
 
-            conn.execute("""
-                INSERT INTO argument_quality
-                    (agent_type, argument_pattern, regime, times_used,
-                     times_correct, avg_pnl_when_used, quality_score, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_type, argument_pattern, regime) DO UPDATE SET
-                    times_used = excluded.times_used,
-                    times_correct = excluded.times_correct,
-                    avg_pnl_when_used = excluded.avg_pnl_when_used,
-                    quality_score = excluded.quality_score,
-                    updated_at = excluded.updated_at
-            """, (agent_type, pattern, regime, used, correct, avg_pnl,
-                  quality_score, now))
-            conn.commit()
-            conn.close()
+                conn.execute("""
+                    INSERT INTO argument_quality
+                        (agent_type, argument_pattern, regime, times_used,
+                         times_correct, avg_pnl_when_used, quality_score, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(agent_type, argument_pattern, regime) DO UPDATE SET
+                        times_used = excluded.times_used,
+                        times_correct = excluded.times_correct,
+                        avg_pnl_when_used = excluded.avg_pnl_when_used,
+                        quality_score = excluded.quality_score,
+                        updated_at = excluded.updated_at
+                """, (agent_type, pattern, regime, used, correct, avg_pnl,
+                      quality_score, now))
+                conn.commit()
         except Exception as e:
             logger.debug(f"[AgentPool:ArgQuality] Upsert failed: {e}")
 
     def _init_tables(self):
         """Ensure agent tables exist (idempotent)."""
         try:
-            conn = self._get_conn()
-            conn.execute("""CREATE TABLE IF NOT EXISTS agent_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
-                pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL, strength REAL,
-                key_argument TEXT, evidence_engine_confidence REAL,
-                final_outcome_pnl REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS agent_performance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
-                pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL,
-                outcome_pnl REAL, was_correct BOOLEAN,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_mem_type ON agent_memory(agent_type, regime)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_perf ON agent_performance(agent_type, regime)")
-            conn.commit()
-            conn.close()
+            with self._conn_ctx() as conn:
+                conn.execute("""CREATE TABLE IF NOT EXISTS agent_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
+                    pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL, strength REAL,
+                    key_argument TEXT, evidence_engine_confidence REAL,
+                    final_outcome_pnl REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+                conn.execute("""CREATE TABLE IF NOT EXISTS agent_performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, agent_type TEXT NOT NULL,
+                    pair TEXT NOT NULL, regime TEXT, signal TEXT NOT NULL,
+                    outcome_pnl REAL, was_correct BOOLEAN,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_mem_type ON agent_memory(agent_type, regime)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_perf ON agent_performance(agent_type, regime)")
+                conn.commit()
         except Exception as e:
             logger.error(f"[AgentPool:Init] Table init failed: {e}")
 
@@ -534,24 +552,23 @@ class AgentPool:
     def _get_agent_performance(self, agent_type: str, regime: str = None) -> Dict:
         """Get historical performance stats for an agent."""
         try:
-            conn = self._get_conn()
-            if regime:
-                rows = conn.execute("""
-                    SELECT COUNT(*) as total,
-                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
-                           AVG(outcome_pnl) as avg_pnl
-                    FROM agent_performance
-                    WHERE agent_type = ? AND regime = ?
-                """, (agent_type, regime)).fetchone()
-            else:
-                rows = conn.execute("""
-                    SELECT COUNT(*) as total,
-                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
-                           AVG(outcome_pnl) as avg_pnl
-                    FROM agent_performance
-                    WHERE agent_type = ?
-                """, (agent_type,)).fetchone()
-            conn.close()
+            with self._conn_ctx() as conn:
+                if regime:
+                    rows = conn.execute("""
+                        SELECT COUNT(*) as total,
+                               SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
+                               AVG(outcome_pnl) as avg_pnl
+                        FROM agent_performance
+                        WHERE agent_type = ? AND regime = ?
+                    """, (agent_type, regime)).fetchone()
+                else:
+                    rows = conn.execute("""
+                        SELECT COUNT(*) as total,
+                               SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
+                               AVG(outcome_pnl) as avg_pnl
+                        FROM agent_performance
+                        WHERE agent_type = ?
+                    """, (agent_type,)).fetchone()
 
             total = rows["total"] or 0
             correct = rows["correct"] or 0
@@ -1434,24 +1451,23 @@ class AgentPool:
             from datetime import datetime, timezone, timedelta
             now = datetime.now(tz=timezone.utc)
             ttl = now + timedelta(days=30)
-            conn = self._get_conn()
-            conn.execute("""
-                INSERT INTO exploit_archive
-                    (pair, regime, exploit_scenario, target_weakness,
-                     predicted_loss, was_defended, defense_description,
-                     was_validated_by_outcome, created_at, ttl_expiry)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-            """, (
-                pair, regime,
-                exploit.get("scenario", ""),
-                exploit.get("target_weakness", ""),
-                float(exploit.get("predicted_loss_pct", 0) or 0),
-                1 if defense.get("neutralises") else 0,
-                defense.get("defense", ""),
-                now.isoformat(), ttl.isoformat(),
-            ))
-            conn.commit()
-            conn.close()
+            with self._conn_ctx() as conn:
+                conn.execute("""
+                    INSERT INTO exploit_archive
+                        (pair, regime, exploit_scenario, target_weakness,
+                         predicted_loss, was_defended, defense_description,
+                         was_validated_by_outcome, created_at, ttl_expiry)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """, (
+                    pair, regime,
+                    exploit.get("scenario", ""),
+                    exploit.get("target_weakness", ""),
+                    float(exploit.get("predicted_loss_pct", 0) or 0),
+                    1 if defense.get("neutralises") else 0,
+                    defense.get("defense", ""),
+                    now.isoformat(), ttl.isoformat(),
+                ))
+                conn.commit()
         except Exception as e:
             logger.debug(f"[AgentPool:Exploit] archive failed: {e}")
 
@@ -1582,45 +1598,44 @@ class AgentPool:
         inserted = 0
         skipped = 0
         try:
-            conn = self._get_conn()
-            for agent_name, pos in positions.items():
-                direction = pos.get("direction")
-                strength_raw = pos.get("strength")
-                if not direction or strength_raw is None:
-                    skipped += 1
-                    continue
-                try:
-                    strength = float(strength_raw)
-                except (TypeError, ValueError):
-                    skipped += 1
-                    continue
-
-                # Phase 27 audit fix: R2 revised_direction AND revised_strength must
-                # BOTH be taken into account — previously strength was pinned to R1.
-                r2 = pos.get("round2", {}) or {}
-                if r2.get("revised_direction"):
-                    direction = r2["revised_direction"]
-                if r2.get("revised_strength") is not None:
+            with self._conn_ctx() as conn:
+                for agent_name, pos in positions.items():
+                    direction = pos.get("direction")
+                    strength_raw = pos.get("strength")
+                    if not direction or strength_raw is None:
+                        skipped += 1
+                        continue
                     try:
-                        strength = float(r2["revised_strength"])
+                        strength = float(strength_raw)
                     except (TypeError, ValueError):
-                        pass
+                        skipped += 1
+                        continue
 
-                if direction == "NEUTRAL" and strength <= 0.0:
-                    skipped += 1
-                    continue
+                    # Phase 27 audit fix: R2 revised_direction AND revised_strength must
+                    # BOTH be taken into account — previously strength was pinned to R1.
+                    r2 = pos.get("round2", {}) or {}
+                    if r2.get("revised_direction"):
+                        direction = r2["revised_direction"]
+                    if r2.get("revised_strength") is not None:
+                        try:
+                            strength = float(r2["revised_strength"])
+                        except (TypeError, ValueError):
+                            pass
 
-                conn.execute("""
-                    INSERT INTO agent_memory
-                    (agent_type, pair, regime, signal, strength, key_argument, evidence_engine_confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (agent_name, pair, regime, direction,
-                      strength,
-                      pos.get("key_argument", "")[:500],
-                      evidence_confidence))
-                inserted += 1
-            conn.commit()
-            conn.close()
+                    if direction == "NEUTRAL" and strength <= 0.0:
+                        skipped += 1
+                        continue
+
+                    conn.execute("""
+                        INSERT INTO agent_memory
+                        (agent_type, pair, regime, signal, strength, key_argument, evidence_engine_confidence)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (agent_name, pair, regime, direction,
+                          strength,
+                          pos.get("key_argument", "")[:500],
+                          evidence_confidence))
+                    inserted += 1
+                conn.commit()
             logger.debug(
                 f"[AgentPool:Memory] {pair} inserted={inserted} skipped={skipped}"
             )
@@ -1635,77 +1650,76 @@ class AgentPool:
         Also records EvidenceEngine outcome even when no agent debate occurred.
         """
         try:
-            conn = self._get_conn()
-            # Get recent agent memories for this pair (Phase 27: also fetch key_argument
-            # so we can update argument_quality with the outcome).
-            rows = conn.execute("""
-                SELECT agent_type, signal, strength, key_argument FROM agent_memory
-                WHERE pair = ? AND timestamp > datetime('now', '-6 hours')
-                ORDER BY timestamp DESC LIMIT 10
-            """, (pair,)).fetchall()
+            with self._conn_ctx() as conn:
+                # Get recent agent memories for this pair (Phase 27: also fetch key_argument
+                # so we can update argument_quality with the outcome).
+                rows = conn.execute("""
+                    SELECT agent_type, signal, strength, key_argument FROM agent_memory
+                    WHERE pair = ? AND timestamp > datetime('now', '-6 hours')
+                    ORDER BY timestamp DESC LIMIT 10
+                """, (pair,)).fetchall()
 
-            updated = 0
-            for row in rows:
-                agent_signal = row["signal"]
-                # Mega Sprint 2026-04-23 (B.4): was_correct is now evaluated
-                # against the AGENT's own position, not the aggregated trade
-                # signal. A bearish agent that correctly called a losing
-                # long was previously marked "wrong" because the trade signal
-                # was BULLISH — this made contrarian agents look permanently
-                # broken to the reflection loop.
-                if agent_signal == "BULLISH":
-                    was_correct = outcome_pnl > 0
-                elif agent_signal == "BEARISH":
-                    was_correct = outcome_pnl < 0
-                elif agent_signal == "NEUTRAL":
-                    # Tur-2 (M5): flat-zone band is tunable via neural_organism.
-                    band = float(_p("agent.neutral_correct_band_pct", 0.5))
-                    was_correct = abs(outcome_pnl) < band
-                else:
-                    was_correct = False
+                updated = 0
+                for row in rows:
+                    agent_signal = row["signal"]
+                    # Mega Sprint 2026-04-23 (B.4): was_correct is now evaluated
+                    # against the AGENT's own position, not the aggregated trade
+                    # signal. A bearish agent that correctly called a losing
+                    # long was previously marked "wrong" because the trade signal
+                    # was BULLISH — this made contrarian agents look permanently
+                    # broken to the reflection loop.
+                    if agent_signal == "BULLISH":
+                        was_correct = outcome_pnl > 0
+                    elif agent_signal == "BEARISH":
+                        was_correct = outcome_pnl < 0
+                    elif agent_signal == "NEUTRAL":
+                        # Tur-2 (M5): flat-zone band is tunable via neural_organism.
+                        band = float(_p("agent.neutral_correct_band_pct", 0.5))
+                        was_correct = abs(outcome_pnl) < band
+                    else:
+                        was_correct = False
 
-                conn.execute("""
-                    INSERT INTO agent_performance
-                    (agent_type, pair, regime, signal, outcome_pnl, was_correct)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (row["agent_type"], pair, regime, row["signal"],
-                      outcome_pnl, was_correct))
-                updated += 1
+                    conn.execute("""
+                        INSERT INTO agent_performance
+                        (agent_type, pair, regime, signal, outcome_pnl, was_correct)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (row["agent_type"], pair, regime, row["signal"],
+                          outcome_pnl, was_correct))
+                    updated += 1
 
-                # Phase 27 Fix 2C: update argument_quality for the pattern this
-                # agent leaned on, so the R1 feedback loop learns which rationales
-                # actually win money in each regime.
-                pattern = self._extract_argument_pattern(row["key_argument"] or "")
-                if pattern:
-                    self._update_argument_quality(
-                        row["agent_type"], pattern, regime or "_global",
-                        bool(was_correct), float(outcome_pnl)
-                    )
+                    # Phase 27 Fix 2C: update argument_quality for the pattern this
+                    # agent leaned on, so the R1 feedback loop learns which rationales
+                    # actually win money in each regime.
+                    pattern = self._extract_argument_pattern(row["key_argument"] or "")
+                    if pattern:
+                        self._update_argument_quality(
+                            row["agent_type"], pattern, regime or "_global",
+                            bool(was_correct), float(outcome_pnl)
+                        )
 
-            # Update memory records with outcome
-            if rows:
-                conn.execute("""
-                    UPDATE agent_memory SET final_outcome_pnl = ?
-                    WHERE id IN (
-                        SELECT id FROM agent_memory
-                        WHERE pair = ? AND final_outcome_pnl IS NULL
-                        ORDER BY timestamp DESC LIMIT ?
-                    )
-                """, (outcome_pnl, pair, len(rows)))
+                # Update memory records with outcome
+                if rows:
+                    conn.execute("""
+                        UPDATE agent_memory SET final_outcome_pnl = ?
+                        WHERE id IN (
+                            SELECT id FROM agent_memory
+                            WHERE pair = ? AND final_outcome_pnl IS NULL
+                            ORDER BY timestamp DESC LIMIT ?
+                        )
+                    """, (outcome_pnl, pair, len(rows)))
 
-            # Always record EvidenceEngine outcome — even without agent debate
-            # This ensures performance tracking works from day 1
-            if updated == 0 and signal:
-                was_correct = outcome_pnl > 0  # Trade was profitable = signal was correct
-                conn.execute("""
-                    INSERT INTO agent_performance
-                    (agent_type, pair, regime, signal, outcome_pnl, was_correct)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, ("EvidenceEngine", pair, regime, signal, outcome_pnl, was_correct))
-                updated = 1
+                # Always record EvidenceEngine outcome — even without agent debate
+                # This ensures performance tracking works from day 1
+                if updated == 0 and signal:
+                    was_correct = outcome_pnl > 0  # Trade was profitable = signal was correct
+                    conn.execute("""
+                        INSERT INTO agent_performance
+                        (agent_type, pair, regime, signal, outcome_pnl, was_correct)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, ("EvidenceEngine", pair, regime, signal, outcome_pnl, was_correct))
+                    updated = 1
 
-            conn.commit()
-            conn.close()
+                conn.commit()
 
             # Phase 28: Record agent→pair relationship in Grafeo
             if self._graph_store and updated > 0:
@@ -1732,18 +1746,17 @@ class AgentPool:
         No explicit weight manipulation needed — the selection score handles it.
         """
         try:
-            conn = self._get_conn()
-            rows = conn.execute("""
-                SELECT agent_type, regime,
-                       COUNT(*) as n,
-                       SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
-                       AVG(outcome_pnl) as avg_pnl
-                FROM agent_performance
-                WHERE timestamp > datetime('now', '-30 days')
-                GROUP BY agent_type, regime
-                ORDER BY agent_type, regime
-            """).fetchall()
-            conn.close()
+            with self._conn_ctx() as conn:
+                rows = conn.execute("""
+                    SELECT agent_type, regime,
+                           COUNT(*) as n,
+                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
+                           AVG(outcome_pnl) as avg_pnl
+                    FROM agent_performance
+                    WHERE timestamp > datetime('now', '-30 days')
+                    GROUP BY agent_type, regime
+                    ORDER BY agent_type, regime
+                """).fetchall()
 
             if not rows:
                 logger.info("[AgentPool:Rebalance] No performance data yet.")
@@ -1760,17 +1773,16 @@ class AgentPool:
     def get_performance_summary(self) -> List[Dict]:
         """Get performance stats for all agents (for API endpoint)."""
         try:
-            conn = self._get_conn()
-            rows = conn.execute("""
-                SELECT agent_type, regime,
-                       COUNT(*) as n_signals,
-                       SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
-                       AVG(outcome_pnl) as avg_pnl
-                FROM agent_performance
-                GROUP BY agent_type, regime
-                ORDER BY agent_type
-            """).fetchall()
-            conn.close()
+            with self._conn_ctx() as conn:
+                rows = conn.execute("""
+                    SELECT agent_type, regime,
+                           COUNT(*) as n_signals,
+                           SUM(CASE WHEN was_correct THEN 1 ELSE 0 END) as correct,
+                           AVG(outcome_pnl) as avg_pnl
+                    FROM agent_performance
+                    GROUP BY agent_type, regime
+                    ORDER BY agent_type
+                """).fetchall()
             return [dict(r) for r in rows]
         except Exception:
             return []

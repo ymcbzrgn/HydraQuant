@@ -142,7 +142,7 @@ def _persist_dead_model(provider: str, model_name: str, probe_after: float) -> N
     try:
         from db import execute_with_retry
         execute_with_retry(
-            """CREATE TABLE IF NOT EXISTS llm_dead_models (
+            """CREATE TABLE IF NOT EXISTS llm.llm_dead_models (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider TEXT NOT NULL,
                 model_name TEXT NOT NULL,

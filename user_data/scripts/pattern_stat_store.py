@@ -43,7 +43,7 @@ class PatternStatStore:
         try:
             with self._get_conn() as conn:
                 conn.execute("""
-                    CREATE TABLE IF NOT EXISTS pattern_trades (
+                    CREATE TABLE IF NOT EXISTS pat.pattern_trades (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         pair TEXT NOT NULL,
                         strategy TEXT,
@@ -67,11 +67,11 @@ class PatternStatStore:
                     )
                 """)
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_pattern_pair_regime
+                    CREATE INDEX IF NOT EXISTS pat.idx_pattern_pair_regime
                     ON pattern_trades(pair, regime)
                 """)
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_pattern_conditions
+                    CREATE INDEX IF NOT EXISTS pat.idx_pattern_conditions
                     ON pattern_trades(rsi_bucket, macd_signal, regime)
                 """)
                 conn.commit()

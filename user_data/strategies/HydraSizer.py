@@ -191,21 +191,26 @@ class HydraSizer(IStrategy):
             sizing, but pulling whole batches saves CPU + LLM tokens)
           - llm_router fleet_exhausted (B1 deposit, ratio < 0.10)
         """
-        # ── C1: RAG health probe — Sprint 2026-05-06 (F5) ─────────────
-        # PARAM-driven probe URL, timeout, and cache TTL. Old hardcoded
-        # `127.0.0.1:8891` + 5s timeout + 60s cache caused testnet bot to
-        # sit at "rag_health_unreachable" for 36h while tr-dry on the same
-        # endpoint kept trading. Adaptive cache: HEALTHY result is cached
-        # longer (cheap), UNREACHABLE result is re-probed soon (recovery).
+        # ── C1: RAG health probe — DISABLED 2026-05-26 ────────────────
+        # The probe was silencing the whole pipeline whenever /health took
+        # >5s, but the TP-Promoted RAG-dead fallback (line ~1779) already
+        # handles the "RAG returned default" case at the per-pair level —
+        # so the batch-wide kill switch was redundant AND blocked the
+        # fallback from ever firing (the gate runs before per-pair logic).
+        # Re-enable once the lock storm root cause (FAZ 4 hot-table split,
+        # FAZ 1 connection-leak completion) makes /health sub-second again.
+        #
+        # The cache slot is still updated for observability/telemetry but
+        # the return is unconditional success.
         try:
             rag_url = (
                 self.config.get("ai_config", {}).get("rag_service_url")
                 or "http://127.0.0.1:8891"
             )
             health_url = rag_url.rstrip("/") + "/health"
-            probe_timeout = float(_np("rag.probe_timeout_s", 2.0))
-            unreach_cache_s = float(_np("rag.unreachable_cache_s", 15))
-            healthy_cache_s = max(unreach_cache_s * 4.0, 60.0)
+            probe_timeout = float(_np("rag.probe_timeout_s", 5.0))
+            unreach_cache_s = float(_np("rag.unreachable_cache_s", 30))
+            healthy_cache_s = max(unreach_cache_s * 4.0, 120.0)
 
             probe_ts, last_healthy = self._rag_health_cache
             cache_window = healthy_cache_s if last_healthy else unreach_cache_s
@@ -221,7 +226,11 @@ class HydraSizer(IStrategy):
                 self._rag_health_cache = (now_ts, healthy)
                 last_healthy = healthy
             if not last_healthy:
-                return "rag_health_unreachable"
+                # OBSERVABILITY ONLY — gate disabled, do NOT skip the batch.
+                logger.debug(
+                    f"[BackpressureGate] /health unreachable (observability) — "
+                    f"TP-Promoted fallback will protect per-pair"
+                )
         except Exception:
             pass
 
@@ -739,7 +748,23 @@ class HydraSizer(IStrategy):
         DIAGNOSTIC OVERRIDE: Wraps parent's get_entry_signal to log exactly
         what Freqtrade sees when checking for entry signals.
         This tells us precisely WHY signals are accepted or rejected.
+
+        2026-05-27 confirm_trade_entry mystery probe: [GES-CALLED] fires
+        on EVERY invocation regardless of signal/lock state. If this log
+        never appears alongside a Signal:REAL, freqtrade is short-circuiting
+        between populate_entry_trend and get_entry_signal.
         """
+        try:
+            _row = dataframe.iloc[-1] if len(dataframe) > 0 else None
+            _el = int(_row.get('enter_long', 0)) if _row is not None else -1
+            _es = int(_row.get('enter_short', 0)) if _row is not None else -1
+            logger.info(
+                f"[GES-CALLED] {pair} tf={timeframe} rows={len(dataframe)} "
+                f"enter_long={_el} enter_short={_es}"
+            )
+        except Exception as _gex:
+            logger.info(f"[GES-CALLED] {pair} probe failed: {_gex}")
+
         signal, tag = super().get_entry_signal(pair, timeframe, dataframe)
         if signal:
             # Only log if pair is NOT locked (avoid 14K+ spam lines per day)
@@ -776,10 +801,18 @@ class HydraSizer(IStrategy):
         return cls._http_session
 
     def _get_sqlite_connection(self):
+        """Pool-managed connection. conn.close() returns to pool (no leak).
+
+        2026-05-26: previously called sqlite3.connect(self.db_path) directly,
+        bypassing db.py's pool. With ~750 trade ticks/day each opening + leaking
+        a connection on exception paths, tr-dry accumulated 700+ FD handles
+        which pinned ~3.7GB of SQLite cache and triggered swap thrash + 5h DB
+        freeze. Routing through the pool caps live connections at max_size=4.
+        """
         try:
-            conn = sqlite3.connect(self.db_path)
-            return conn
-        except sqlite3.Error as e:
+            from db import get_db_connection
+            return get_db_connection()
+        except Exception as e:
             logger.error(f"Error connecting to AI SQLite DB: {e}")
             return None
 
@@ -1160,17 +1193,23 @@ class HydraSizer(IStrategy):
                 'rag_service_url', 'http://127.0.0.1:8891')
 
             _t0 = _time.time()
+            # 2026-05-26 revised: timeout = 60s. Initial revision dropped 120 → 30
+            # which under-served the happy path (RAG warm cycle is 45-60s when
+            # ColBERT + MADAM run hot); 60s lets real responses through while
+            # still capping the wall-clock budget per pair so a 40-coin cycle
+            # caps at 40min in the worst case. The deeper safety net is the
+            # TriplePerception RAG-dead fallback below (line ~1779).
             # Phase 17: POST with technical data when available, GET fallback
             if technical_data:
                 response = requests.post(
                     f"{rag_service_url}/signal/{pair}",
                     json={"technical_data": technical_data},
-                    timeout=120
+                    timeout=60
                 )
             else:
                 response = requests.get(
                     f"{rag_service_url}/signal/{pair}",
-                    timeout=120  # Quality-first: give ColBERT+MADAM time to complete
+                    timeout=60
                 )
             _latency = (_time.time() - _t0) * 1000
             logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code}, POST={'Y' if technical_data else 'N'})")
@@ -1218,9 +1257,22 @@ class HydraSizer(IStrategy):
             except Exception:
                 pass
 
+            # 2026-05-26: subprocess fallback DISABLED. The fallback was
+            # spawning a fresh python process that imports rag_graph.py end
+            # to end (LanceStore, MemoRAG, ColBERT, semantic_cache) — every
+            # invocation cost 3-5 minutes of cold-start init and burned a
+            # second copy of the same model weights against the same DB,
+            # which is what drove the cycle-init storm we saw in the 18:52
+            # restart. The TP-Promoted RAG-dead fallback at line ~1779 now
+            # owns the RAG-unreachable code path: it trusts TripleAgent's
+            # directional reading instead of spawning a clone. signal_data
+            # stays at the line-1146 default (NEUTRAL, 0.0, no source),
+            # which rag_dead detection picks up downstream.
             if is_connection_error:
-                logger.warning(f"RAG service not running. Falling back to subprocess for {pair}")
-                self._get_ai_signal_subprocess(pair, signal_data)
+                logger.warning(
+                    f"[RAG] ConnectionError for {pair} — relying on TP-Promoted "
+                    f"RAG-dead fallback (subprocess path disabled 2026-05-26)"
+                )
             else:
                 logger.error(f"Error calling RAG Signal Service for {pair}: {e}")
 
@@ -1426,33 +1478,41 @@ class HydraSizer(IStrategy):
             logger.debug(f"[Indicators:RecentCloses] {metadata.get('pair')} failed: {_rc_e}")
 
         # Sentiment features from SQLite (used by custom_stake_amount)
+        # 2026-05-26 leak hardening: close() now in finally so an exception
+        # outside the inner try/except (KeyboardInterrupt, OOM, etc.) can't
+        # leave the FD dangling.
         conn = self._get_sqlite_connection()
         if conn:
-            pair = metadata['pair']
-            base_coin = pair.split('/')[0]
             try:
-                fng_df = pd.read_sql_query(
-                    "SELECT value as fng_value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1", conn)
-                dataframe['%-fng_index'] = fng_df['fng_value'].iloc[0] if not fng_df.empty else 50
-            except Exception:
-                dataframe['%-fng_index'] = 50
-            try:
-                sent_df = pd.read_sql_query(
-                    "SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling "
-                    "WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", conn, params=(base_coin,))
-                if not sent_df.empty:
-                    dataframe['%-sentiment_1h'] = sent_df['sentiment_1h'].iloc[0]
-                    dataframe['%-sentiment_4h'] = sent_df['sentiment_4h'].iloc[0]
-                    dataframe['%-sentiment_24h'] = sent_df['sentiment_24h'].iloc[0]
-                else:
+                pair = metadata['pair']
+                base_coin = pair.split('/')[0]
+                try:
+                    fng_df = pd.read_sql_query(
+                        "SELECT value as fng_value FROM fear_and_greed ORDER BY timestamp DESC LIMIT 1", conn)
+                    dataframe['%-fng_index'] = fng_df['fng_value'].iloc[0] if not fng_df.empty else 50
+                except Exception:
+                    dataframe['%-fng_index'] = 50
+                try:
+                    sent_df = pd.read_sql_query(
+                        "SELECT sentiment_1h, sentiment_4h, sentiment_24h FROM coin_sentiment_rolling "
+                        "WHERE coin = ? ORDER BY timestamp DESC LIMIT 1", conn, params=(base_coin,))
+                    if not sent_df.empty:
+                        dataframe['%-sentiment_1h'] = sent_df['sentiment_1h'].iloc[0]
+                        dataframe['%-sentiment_4h'] = sent_df['sentiment_4h'].iloc[0]
+                        dataframe['%-sentiment_24h'] = sent_df['sentiment_24h'].iloc[0]
+                    else:
+                        dataframe['%-sentiment_1h'] = 0.0
+                        dataframe['%-sentiment_4h'] = 0.0
+                        dataframe['%-sentiment_24h'] = 0.0
+                except Exception:
                     dataframe['%-sentiment_1h'] = 0.0
                     dataframe['%-sentiment_4h'] = 0.0
                     dataframe['%-sentiment_24h'] = 0.0
-            except Exception:
-                dataframe['%-sentiment_1h'] = 0.0
-                dataframe['%-sentiment_4h'] = 0.0
-                dataframe['%-sentiment_24h'] = 0.0
-            conn.close()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         else:
             dataframe['%-fng_index'] = 50
             dataframe['%-sentiment_1h'] = 0.0
@@ -1753,6 +1813,34 @@ class HydraSizer(IStrategy):
 
                 ai_too_weak = (ai_signal == "NEUTRAL") or (ai_conf < env_floor)
 
+                # 2026-05-26: RAG-DEAD FALLBACK. When RAG/EvidenceEngine times
+                # out the response is the line-1146 default {NEUTRAL, 0.0, no
+                # regime}, so regime_now collapses to "transitional" and the
+                # original promotion gate (requires regime_directional) silently
+                # blocks every fallback path — exactly the 5-day NO-TRADE
+                # pathology we just lived through.
+                #
+                # Detection covers two collapse modes:
+                #   (a) exception/timeout — defaults stay untouched
+                #       (NEUTRAL, 0.0, no source)
+                #   (b) HTTP non-200 — defaults also stay (handled by the
+                #       same `signal_data` dict).
+                # We extend (a) to include very-low-conf RAG returns too, so
+                # the bot doesn't sit on a 0.05-conf RAG result while TP has
+                # a directional reading worth trusting.
+                #
+                # tp floor: 0.50 (not 0.55). TP is already three independent
+                # backbones (Kronos + chart + sentiment) — a 0.50 directional
+                # confidence is the same bar as TP-Promoted normal path. The
+                # stricter 0.55 was pre-production conservatism; in practice
+                # it gated out exactly the BEARISH 0.54 signals we observed
+                # under the RAG-down scenario above.
+                rag_dead = (
+                    (ai_signal == "NEUTRAL" and ai_conf < 0.20)
+                    or not ai_decision.get("source")
+                )
+                strict_tp_floor = max(tp_min_conf, 0.50)
+
                 if (ai_too_weak and regime_directional
                         and tp_signal != "NEUTRAL" and tp_conf >= tp_min_conf):
                     # PROMOTE — TP becomes the primary signal, with a
@@ -1769,6 +1857,24 @@ class HydraSizer(IStrategy):
                     ai_decision["source"] = "TRIPLE_PERCEPTION_PROMOTED"
                     ai_decision["reasoning"] = (
                         f"[TP-Promoted: AI was {ai_signal}/{ai_conf:.2f} weak in {regime_now}] "
+                        + str(_tp_result.get("reasoning", ""))
+                    )
+                elif (rag_dead
+                        and tp_signal != "NEUTRAL"
+                        and tp_conf >= strict_tp_floor):
+                    promoted_conf = min(0.85, tp_conf * tp_haircut)
+                    logger.warning(
+                        f"[Phase26:TP-PromotedRAGDead] {pair} RAG/EvidenceEngine "
+                        f"returned default fallback (NEUTRAL/0.0) → trusting TP="
+                        f"{tp_signal}/{tp_conf:.2f} (promoted to {promoted_conf:.2f}, "
+                        f"regime={regime_now}, strict_floor={strict_tp_floor:.2f})"
+                    )
+                    ai_decision["signal"] = tp_signal
+                    ai_decision["confidence"] = promoted_conf
+                    ai_decision["sizing_multiplier"] = _tp_result.get("sizing_multiplier", 1.0)
+                    ai_decision["source"] = "TRIPLE_PERCEPTION_RAG_DEAD"
+                    ai_decision["reasoning"] = (
+                        f"[TP-Promoted RAG-dead: AI returned NEUTRAL/0.0 default] "
                         + str(_tp_result.get("reasoning", ""))
                     )
                 elif tp_signal == ai_signal and tp_signal != "NEUTRAL":
@@ -1960,6 +2066,22 @@ class HydraSizer(IStrategy):
             if 'rsi' in df.columns and 'macd' in df.columns:
                 df.loc[(df['rsi'] < 35) & (df['macd'] > df['macdsignal']), 'enter_long'] = 1
                 df.loc[(df['rsi'] > 65) & (df['macd'] < df['macdsignal']), 'enter_short'] = 1
+
+        # 2026-05-27 confirm_trade_entry mystery probe: log exit state of
+        # populate_entry_trend so we can correlate against [GES-CALLED] / the
+        # absence thereof. Together these prove whether freqtrade ever picks
+        # up the entry signal we just placed on df.iloc[-1].
+        try:
+            _last = df.iloc[-1]
+            _el = int(_last.get('enter_long', 0))
+            _es = int(_last.get('enter_short', 0))
+            if _el or _es:
+                logger.info(
+                    f"[POPULATE-EXIT] {pair} enter_long={_el} enter_short={_es} "
+                    f"rows={len(df)} last_date={_last.get('date', 'N/A')}"
+                )
+        except Exception as _pex:
+            logger.debug(f"[POPULATE-EXIT] {pair} probe failed: {_pex}")
 
         return df
 
@@ -2211,14 +2333,14 @@ class HydraSizer(IStrategy):
             breakdown["hrl_meta"] = 1.0
 
         # ── PARÇA 10: Forgone alpha adjustment ──
+        # 2026-05-26 leak fix: with-block guarantees close() on exception.
         try:
             from db import get_db_connection
-            conn = get_db_connection()
-            row = conn.execute("""
-                SELECT forgone_alpha_7d FROM pair_thresholds
-                WHERE pair = ? AND regime = ?
-            """, (pair, regime)).fetchone()
-            conn.close()
+            with get_db_connection() as conn:
+                row = conn.execute("""
+                    SELECT forgone_alpha_7d FROM pair_thresholds
+                    WHERE pair = ? AND regime = ?
+                """, (pair, regime)).fetchone()
             if row is not None:
                 alpha_7d = float(row["forgone_alpha_7d"] or 0.0)
                 if alpha_7d > 2.0:
@@ -2248,12 +2370,11 @@ class HydraSizer(IStrategy):
         """
         try:
             from db import get_db_connection
-            conn = get_db_connection()
-            row = conn.execute("""
-                SELECT confidence_threshold FROM pair_thresholds
-                WHERE pair = ? AND regime = ?
-            """, (pair, regime)).fetchone()
-            conn.close()
+            with get_db_connection() as conn:
+                row = conn.execute("""
+                    SELECT confidence_threshold FROM pair_thresholds
+                    WHERE pair = ? AND regime = ?
+                """, (pair, regime)).fetchone()
             if row is not None:
                 return float(row["confidence_threshold"])
         except Exception:
@@ -3844,18 +3965,19 @@ class HydraSizer(IStrategy):
             logger.debug(f"[LiveFeedback:MAGMA] {pair} failed: {e}")
 
         # 4. Update ai_decisions outcome (for ConfidenceCalibrator to use in next re-fit)
+        # 2026-05-26 leak fix: was direct sqlite3.connect(self.db_path) bypassing
+        # the pool. Now goes through get_db_connection() with a with-block so
+        # exception paths can't leak the FD.
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path, timeout=10)
-            conn.execute("""
-                UPDATE ai_decisions SET outcome_pnl = ?, outcome_duration = ?
-                WHERE pair = ? AND outcome_pnl IS NULL
-                ORDER BY timestamp DESC LIMIT 1
-            """, (trade_pnl_pct,
-                  int((current_time - trade.open_date_utc).total_seconds() / 60) if trade.open_date else None,
-                  pair))
-            conn.commit()
-            conn.close()
+            from db import get_db_connection
+            with get_db_connection() as conn:
+                conn.execute("""
+                    UPDATE ai_decisions SET outcome_pnl = ?, outcome_duration = ?
+                    WHERE pair = ? AND outcome_pnl IS NULL
+                    ORDER BY timestamp DESC LIMIT 1
+                """, (trade_pnl_pct,
+                      int((current_time - trade.open_date_utc).total_seconds() / 60) if trade.open_date else None,
+                      pair))
             logger.info(f"[LiveFeedback:Calibrator] {pair} decision outcome updated: {trade_pnl_pct:+.2f}%")
         except Exception as e:
             logger.debug(f"[LiveFeedback:Calibrator] {pair} outcome update failed: {e}")
@@ -4005,24 +4127,31 @@ class HydraSizer(IStrategy):
         except Exception as e:
             logger.debug(f"[bot_start] Microstructure init skipped: {e}")
         # Ensure protection_logs table exists for testnet data collection
+        # 2026-05-26 leak hardening: close() now in finally so a CREATE TABLE
+        # parse failure can't leak the pool handle on cold start.
         conn = self._get_sqlite_connection()
         if conn:
             try:
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS protection_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        event_type TEXT NOT NULL,
-                        pair TEXT,
-                        details TEXT,
-                        profit_at_event REAL,
-                        trade_count INTEGER
-                    )
-                ''')
-                conn.commit()
-            except Exception:
-                pass
-            conn.close()
+                try:
+                    conn.execute('''
+                        CREATE TABLE IF NOT EXISTS obs.protection_logs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TEXT NOT NULL,
+                            event_type TEXT NOT NULL,
+                            pair TEXT,
+                            details TEXT,
+                            profit_at_event REAL,
+                            trade_count INTEGER
+                        )
+                    ''')
+                    conn.commit()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         logger.info("[bot_start] AI Trading System ready.")
 
     @property
@@ -4285,19 +4414,26 @@ class HydraSizer(IStrategy):
 
         # 6. LOG EVERYTHING for testnet analysis (even when NOT exiting)
         # This data is gold when we switch to real money
+        # 2026-05-26 leak fix: close() guaranteed in finally even if
+        # INSERT raises sqlite3.OperationalError under lock contention.
         if hours_held > 0 and int(hours_held) % 4 == 0:  # Every 4 hours
             try:
                 conn = self._get_sqlite_connection()
                 if conn:
-                    conn.execute(
-                        "INSERT INTO protection_logs (timestamp, event_type, pair, details, profit_at_event) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (current_time.isoformat(), "trade_check", pair,
-                         f"signal={signal} conf={confidence:.2f} entry_conf={entry_conf} hours={hours_held:.1f}",
-                         round(current_profit, 6))
-                    )
-                    conn.commit()
-                    conn.close()
+                    try:
+                        conn.execute(
+                            "INSERT INTO protection_logs (timestamp, event_type, pair, details, profit_at_event) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (current_time.isoformat(), "trade_check", pair,
+                             f"signal={signal} conf={confidence:.2f} entry_conf={entry_conf} hours={hours_held:.1f}",
+                             round(current_profit, 6))
+                        )
+                        conn.commit()
+                    finally:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
             except Exception:
                 pass
 

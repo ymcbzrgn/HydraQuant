@@ -1427,7 +1427,7 @@ class EvidenceEngine:
             # additive; deploys use migrations/rev2_audit_fields.sql for
             # live DBs that pre-date this sprint.
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS evidence_audit_log (
+                CREATE TABLE IF NOT EXISTS obs.evidence_audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair TEXT NOT NULL,
                     signal TEXT NOT NULL,
@@ -1443,7 +1443,7 @@ class EvidenceEngine:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_pair_ts "
+            conn.execute("CREATE INDEX IF NOT EXISTS obs.idx_evidence_pair_ts "
                         "ON evidence_audit_log(pair, timestamp)")
 
             conn.execute("""

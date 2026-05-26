@@ -17,22 +17,55 @@ logger = logging.getLogger(__name__)
 DEFAULT_CSV_PATH = Path(__file__).parent.parent / "data" / "kpi_rollup_hourly.csv"
 
 
+def _resolve_trades_db_path() -> str:
+    """Trades live in tradesv3*.sqlite (freqtrade's own ledger), NOT ai_data.sqlite.
+
+    2026-05-26: previous code ran `SELECT … FROM trades` against ai_data.sqlite
+    and silently failed every hour with "no such table: trades", burning one
+    pool connection per cron tick. Now we resolve the active trades DB
+    (TR-DRY first, then production) and ATTACH it for cross-DB joins.
+    """
+    import os
+    candidates = [
+        "/root/freqtrade/user_data/tradesv3_tr_dry.sqlite",
+        "/root/freqtrade/user_data/tradesv3.sqlite",
+    ]
+    for p in candidates:
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    return candidates[0]
+
+
 def rollup_last_hour() -> Dict[str, Any]:
-    """Compute and persist current-hour bucket."""
+    """Compute and persist current-hour bucket.
+
+    Reads `trades` from the freqtrade trades DB via ATTACH; reads `llm_calls`
+    and `price_anomaly_events` from ai_data.sqlite (their home); writes
+    kpi_rollup_hourly back to ai_data.sqlite.
+    """
     try:
         from db import AI_DB_PATH, get_db_connection
+        trades_db = _resolve_trades_db_path()
 
         with get_db_connection(AI_DB_PATH) as conn:
-            row = conn.execute(
-                """SELECT COUNT(*),
-                          SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END),
-                          SUM(CASE WHEN close_profit < 0 THEN 1 ELSE 0 END),
-                          COALESCE(SUM(close_profit_abs), 0)
-                   FROM trades
-                   WHERE close_date >= datetime('now', '-1 hour')
-                     AND close_profit IS NOT NULL"""
-            ).fetchone()
-            n_trades, wins, losses, pnl_sum = row
+            # ATTACH trades DB read-only so we can join across DBs in one connection.
+            conn.execute(f"ATTACH DATABASE ? AS td", (trades_db,))
+            try:
+                row = conn.execute(
+                    """SELECT COUNT(*),
+                              SUM(CASE WHEN close_profit > 0 THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN close_profit < 0 THEN 1 ELSE 0 END),
+                              COALESCE(SUM(close_profit_abs), 0)
+                       FROM td.trades
+                       WHERE close_date >= datetime('now', '-1 hour')
+                         AND close_profit IS NOT NULL"""
+                ).fetchone()
+                n_trades, wins, losses, pnl_sum = row
+            finally:
+                try:
+                    conn.execute("DETACH DATABASE td")
+                except Exception:
+                    pass
 
             row2 = conn.execute(
                 """SELECT COUNT(*), COALESCE(AVG(latency_ms), 0)
