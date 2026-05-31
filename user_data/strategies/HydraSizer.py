@@ -1193,23 +1193,27 @@ class HydraSizer(IStrategy):
                 'rag_service_url', 'http://127.0.0.1:8891')
 
             _t0 = _time.time()
-            # 2026-05-26 revised: timeout = 60s. Initial revision dropped 120 → 30
-            # which under-served the happy path (RAG warm cycle is 45-60s when
-            # ColBERT + MADAM run hot); 60s lets real responses through while
-            # still capping the wall-clock budget per pair so a 40-coin cycle
-            # caps at 40min in the worst case. The deeper safety net is the
-            # TriplePerception RAG-dead fallback below (line ~1779).
+            # 2026-05-30: timeout = 10s. The 60s budget (set 2026-05-26) was
+            # the theoretical RAG happy-path budget, but in production RAG is
+            # chronically backlogged and 39 pairs × 60s = 39min per analyze
+            # cycle. That stretches the populate→enter_positions window past
+            # the freqtrade `outdated_offset` default (5min, threshold 125min
+            # at 1h timeframe) and silently kills get_entry_signal — exactly
+            # the symptom on 17 May–30 May (10 Signal:REAL events, 0 trades).
+            # At 10s the cycle drops to ~7min worst case; TP-Promoted RAG-dead
+            # fallback (line ~1779) covers the lost signals safely. Combined
+            # with exchange.outdated_offset=180, this restores the trade chain.
             # Phase 17: POST with technical data when available, GET fallback
             if technical_data:
                 response = requests.post(
                     f"{rag_service_url}/signal/{pair}",
                     json={"technical_data": technical_data},
-                    timeout=60
+                    timeout=10
                 )
             else:
                 response = requests.get(
                     f"{rag_service_url}/signal/{pair}",
-                    timeout=60
+                    timeout=10
                 )
             _latency = (_time.time() - _t0) * 1000
             logger.info(f"[RAG Latency] {pair}: {_latency:.0f}ms (status={response.status_code}, POST={'Y' if technical_data else 'N'})")

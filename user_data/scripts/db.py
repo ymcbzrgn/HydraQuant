@@ -129,6 +129,20 @@ class _ConnectionPool:
 
     def _create_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=self._busy_timeout_ms / 1000, check_same_thread=False)
+        # 2026-05-31: autocommit (isolation_level=None) eliminates the
+        # implicit BEGIN that the Python sqlite3 driver inserts before
+        # INSERT/UPDATE/DELETE in its default "deferred" mode. With
+        # implicit BEGIN, any code path that opens conn = get_db_connection()
+        # + writes + skips conn.close() on an exception path leaks an
+        # open transaction that holds ai_data's write lock forever.
+        # ~30 such non-with patterns exist in scheduler.py; the symptom is
+        # ai_data BEGIN IMMEDIATE 100% busy with 0 actual writes in 30min.
+        # Autocommit makes every conn.execute() commit immediately, so a
+        # leaked conn can no longer leak a stuck transaction. conn.commit()
+        # in existing code becomes a no-op; with-block __exit__ commit is
+        # also a no-op. Atomic batch semantics are sacrificed — callers
+        # that need atomicity must use explicit "BEGIN" / "COMMIT".
+        conn.isolation_level = None
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
