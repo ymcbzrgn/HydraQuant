@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="docs/assets/hydraquant-banner.png" alt="HydraQuant" width="100%">
 </p>
@@ -256,7 +258,7 @@ python user_data/scripts/deploy_health_check.py
 
 ## Where We Are
 
-HydraQuant is in **testnet alpha**, actively shipping Phase 29: _Sensory Expansion & Self-Falsification_. The current PnL on live testnet is not yet positive — which is the reason Phase 29 exists. The fixes under way:
+HydraQuant is in **testnet alpha**, actively shipping Phase 30. The current PnL on live testnet is not yet positive — which is the reason Phase 30 exists. The fixes under way:
 
 - Backtest framework revival — so every change can be measured instead of hoped.
 - Funding-rate and open-interest divergence as a seventh Evidence Engine sub-score.
